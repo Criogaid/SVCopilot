@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6,8 +6,6 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const apiDocsDir = path.resolve(scriptDir, "..", "api-docs");
 const officialDir = path.join(apiDocsDir, "official");
 const officialManifestPath = path.join(officialDir, "manifest.json");
-const outputPath = path.join(apiDocsDir, "api-manifest.json");
-const inventoryPath = path.join(apiDocsDir, "api-inventory.json");
 
 function decodeEntities(text) {
   return text
@@ -215,7 +213,7 @@ function summarize(classes) {
   };
 }
 
-export async function buildApiManifest() {
+export async function buildApiManifest({ outputDir = apiDocsDir } = {}) {
   const official = JSON.parse(await readFile(officialManifestPath, "utf8"));
   const classPages = official.pages.filter(
     (page) => page.path.endsWith(".html") && page.path !== "index.html" && !page.path.startsWith("tutorial-")
@@ -258,14 +256,24 @@ export async function buildApiManifest() {
         .map(([name]) => name),
     })),
   };
-  await writeFile(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  await writeFile(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`);
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "api-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(path.join(outputDir, "api-inventory.json"), `${JSON.stringify(inventory, null, 2)}\n`);
   return manifest;
+}
+
+function parseCliOutputDir(argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--output-dir") return argv[index + 1];
+    if (argv[index].startsWith("--output-dir=")) return argv[index].slice("--output-dir=".length);
+  }
+  return undefined;
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  buildApiManifest()
+  const cliOutputDir = parseCliOutputDir(process.argv.slice(2));
+  buildApiManifest(cliOutputDir ? { outputDir: path.resolve(cliOutputDir) } : {})
     .then((manifest) => {
       console.log(
         `[sv-api] parsed ${manifest.summary.classCount} classes, ${manifest.summary.methodOverloadCount} method overloads, and ${manifest.summary.memberCount} members`
