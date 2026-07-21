@@ -1,6 +1,6 @@
 {
   "name": "sv-copilot-server",
-  "version": "0.1.0",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Minimal MCP server for real-time control of Synthesizer V Studio 2 via a generic SV-API dispatcher.",
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test ../test/pipe-relay.test.mjs ../test/pipe-e2e.test.mjs ../test/api-manifest.test.mjs ../test/api-catalog.test.mjs",
+    "test": "node --test ../test/pipe-relay.test.mjs ../test/pipe-e2e.test.mjs ../test/api-manifest.test.mjs ../test/api-catalog.test.mjs ../test/copilot-engine.test.mjs",
     "smoke:mcp": "node ../test/mcp-client-smoke.mjs",
     "download:sv-api": "node ../tools/download-sv-api-docs.mjs",
     "parse:sv-api": "node ../tools/parse-sv-api-docs.mjs"

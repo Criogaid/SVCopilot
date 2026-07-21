@@ -178,6 +178,82 @@ local function marshal(v)
   end
 end
 
+local function marshalTyped(v, shapeHint, lengthHint, seen, depth)
+  local t = type(v)
+  seen = seen or {}
+  depth = depth or 0
+  if depth > 32 then
+    return { ['$sv'] = 'unsupported', luaType = t, reason = 'maximum depth exceeded' }
+  elseif v == nil then
+    return { ['$sv'] = 'nil' }
+  elseif t == 'number' then
+    if v ~= v then return { ['$sv'] = 'number', value = 'nan' } end
+    if v == math.huge then return { ['$sv'] = 'number', value = '+inf' } end
+    if v == -math.huge then return { ['$sv'] = 'number', value = '-inf' } end
+    return v
+  elseif t == 'string' or t == 'boolean' then
+    return v
+  elseif t == 'userdata' or t == 'function' then
+    return {
+      ['$sv'] = 'handle',
+      id = register(v),
+      type = t == 'function' and 'function' or tostring(v),
+    }
+  elseif t ~= 'table' then
+    return { ['$sv'] = 'unsupported', luaType = t }
+  end
+
+  if getmetatable(v) ~= nil or rawget(v, '__ptr__') ~= nil then
+    return { ['$sv'] = 'handle', id = register(v), type = 'object' }
+  end
+  if seen[v] then
+    return { ['$sv'] = 'unsupported', luaType = 'table', reason = 'cycle detected' }
+  end
+  seen[v] = true
+
+  local count, maxIndex, numericOnly = 0, 0, true
+  for k in pairs(v) do
+    count = count + 1
+    if type(k) == 'number' and k >= 1 and k == math.floor(k) then
+      if k > maxIndex then maxIndex = k end
+    else
+      numericOnly = false
+    end
+  end
+
+  local result
+  if shapeHint == 'array' or (count > 0 and numericOnly) then
+    local length = tonumber(lengthHint) or maxIndex
+    if length < maxIndex then length = maxIndex end
+    local entries = {}
+    for k, e in pairs(v) do
+      if type(k) == 'number' and k >= 1 and k == math.floor(k) then
+        entries[#entries + 1] = { k - 1, marshalTyped(e, nil, nil, seen, depth + 1) }
+      end
+    end
+    table.sort(entries, function(a, b) return a[1] < b[1] end)
+    result = {
+      ['$sv'] = count == length and 'array' or 'sparse-array',
+      length = length,
+      entries = entries,
+    }
+  elseif count == 0 then
+    result = { ['$sv'] = 'table', shape = 'unknown', entries = {} }
+  else
+    local entries = {}
+    for k, e in pairs(v) do
+      entries[#entries + 1] = {
+        marshalTyped(k, nil, nil, seen, depth + 1),
+        marshalTyped(e, nil, nil, seen, depth + 1),
+      }
+    end
+    result = { ['$sv'] = 'map', entries = entries }
+  end
+
+  seen[v] = nil
+  return result
+end
+
 local function unmarshal(v)
   local t = type(v)
   if v == json.null then
@@ -235,7 +311,9 @@ local function dispatch(cmd)
     return true
   elseif op == 'index' then
     local obj = resolveTarget(cmd.handle)
-    return marshal(obj[cmd.field])
+    local value = obj[cmd.field]
+    if value == nil then error('no such field: ' .. tostring(cmd.field)) end
+    return marshal(value)
   elseif op == 'call' then
     local obj = resolveTarget(cmd.handle)
     local member = obj[cmd.method]
@@ -246,12 +324,19 @@ local function dispatch(cmd)
     local n = #raw
     local args = {}
     for i = 1, n do args[i] = unmarshal(raw[i]) end
-    local results = { member(obj, table.unpack(args, 1, n)) }
-    if #results <= 1 then
+    local results = table.pack(member(obj, table.unpack(args, 1, n)))
+    if cmd.resultFormat == 'typed-v2' then
+      if results.n <= 1 then
+        return marshalTyped(results[1], cmd.resultShape, cmd.resultLength)
+      end
+      local items = {}
+      for i = 1, results.n do items[i] = marshalTyped(results[i]) end
+      return { ['$sv'] = 'tuple', items = items }
+    elseif results.n <= 1 then
       return marshal(results[1])
     end
     local multi = {}
-    for i = 1, #results do multi[i] = marshal(results[i]) end
+    for i = 1, results.n do multi[i] = marshal(results[i]) end
     return multi
   else
     error('unknown op: ' .. tostring(op))

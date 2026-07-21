@@ -50,6 +50,8 @@ local project = makeObj({
   getNumTracks = function() return 3 end,
   getTimeAxis  = function() return makeObj({}) end,
   getStruct    = function() return { bpm = 160, position = 0 } end,   -- plain data, must inline
+  getEmpty     = function() return {} end,
+  getSparse    = function() return { [2] = 62.5, [4] = 64 } end,
 })
 
 SV = {
@@ -123,6 +125,18 @@ check("unknown method -> ok:false + error", r:find('"ok":false', 1, true) and r:
 r = step('{"id":11,"op":"call","handle":' .. (projH or 0) .. ',"method":"getStruct"}')
 check("plain-data table recurses inline (no handle)",
   r:find('"bpm":160', 1, true) and not r:find('"__handle__"', 1, true), r)
+
+r = step('{"id":12,"op":"call","handle":' .. (projH or 0) .. ',"method":"getEmpty","resultFormat":"typed-v2","resultShape":"array","resultLength":0}')
+check("typed empty array keeps its shape",
+  r:find('"$sv":"array"', 1, true) and r:find('"length":0', 1, true), r)
+
+r = step('{"id":13,"op":"call","handle":' .. (projH or 0) .. ',"method":"getSparse","resultFormat":"typed-v2","resultShape":"array","resultLength":4}')
+check("typed sparse array keeps length and indexes",
+  r:find('"$sv":"sparse%-array"') and r:find('"length":4', 1, true), r)
+
+r = step('{"id":14,"op":"index","field":"MISSING"}')
+check("unknown field -> ok:false + error",
+  r:find('"ok":false', 1, true) and r:find("no such field", 1, true), r)
 
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

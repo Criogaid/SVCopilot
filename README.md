@@ -14,7 +14,9 @@ MCP client
 - 默认数据通道：两根单向 named pipe。
 - 控制通道：第三根单向 named pipe，用于 Scripts 菜单中的 Stop 命令。
 - 协议：NDJSON、版本握手、严格一写一读、单命令 in-flight。
-- 已验证：Node Relay 测试，以及真实 Lua 5.4 进程与 Windows named pipe 的端到端 dispatcher 测试。
+- 执行模型：所有原始调用与高层工作流共享一个 FIFO 协调器；一个工作流执行期间不会被其他 MCP 调用插入。
+- 结果编码：默认保留旧格式；高层读取可请求 `typed-v2`，无损区分空数组、稀疏数组、map、`nil`、特殊数字和 handle。
+- 已验证：Node 模块与 Relay 测试、真实 Lua 5.4 + Windows named pipe dispatcher，以及完整 MCP 客户端高层编辑闭环。
 - 待验证：在 SynthV 2.2.1 宿主中长时间运行、播放期间性能和 Relay hang 情况。
 
 旧版 [server/src/transport.js](server/src/transport.js) 和 [test/raw_client.py](test/raw_client.py) 仅作为 file IPC 历史参考；`src/index.js` 不再导入或启用它们。
@@ -85,10 +87,56 @@ MCP 客户端配置示例：
 | `sv_free` | 释放不再使用的 handle |
 | `sv_search_api` | 搜索本地解析的官方 API（类、方法、重载、参数、版本与文档锚点） |
 | `sv_describe` | 获取一个类或指定方法的完整官方 API 元数据 |
+| `sv_snapshot` | 将选择区、工程或指定组读取为统一的 0-based 数据，并签发短期 `contextId` |
+| `sv_run` | 在一个不可插队的执行单元中运行有序 call/index 步骤、局部引用、断言与句柄清理 |
+| `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高，超时返回最后一次观测而非伪造成功 |
+| `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
 
-MCP 资源也提供 `svapi://manifest`（完整清单）和 `svapi://class/{class}`（按精确类名读取，例如 `svapi://class/Note`）。
+MCP 资源还提供：
+
+- `svapi://manifest`：完整官方 API 清单。
+- `svapi://class/{class}`：按精确类名读取，例如 `svapi://class/Note`。
+- `svcopilot://capabilities`：当前连接 epoch、接口版本、限制和已知能力缺口。
 
 完整性来自通用 dispatcher：SynthV 对象会被登记为整数 handle，普通 JSON 数据直接内联。调用方可以沿对象 handle 遍历官方 API，而无需为每个方法新增 MCP 工具。`sv_root` 返回的根 handle 和已推断返回类型会被记录；对这些已知类型，`sv_call` 会在发往 SynthV 前校验方法、重载参数、handle 类型和官方文档中的最低版本要求。类型尚未知的 handle 仍交由宿主 dispatcher 执行，以保留通用遍历能力。
+
+`sv_call.args` 和 `sv_run.steps[].args` 接受任意 JSON 值，并保留 number/string/boolean/object/array/null 类型。官方 API 要求数字索引时必须传 `[1]`，不能传 `["1"]`；handle 参数传 `{"__handle__": N, "__epoch__": E}`。
+
+高层接口不替代原始 dispatcher，而是在它上面补充可验证语义：
+
+- `sv_snapshot` 返回稳定字段、0-based 索引、显式单位和分页信息；`contextId` 只保存定位信息与指纹，不持久保存 Lua handle。project 快照每页最多消耗 16 个 `traversalItems`：有音符的 vocal group 按音符消耗，空组、乐器组和空轨也各消耗一项。`page.count` 是遍历预算消耗，`page.returned` 分别给出本页实际返回的 tracks/groups/notes 数量。调用方必须沿 `page.nextCursor` 读取到 `data.snapshotComplete: true`。selection 的 processing 只统计选中音符；空选区返回 `expectedNotes: 0` 和 `state: "not_applicable"`。
+- `sv_set_lyrics` 在写入前重新定位目标并比较指纹，只写真正变化的字段；返回 `processedNotes`、`actuallyChangedNotes`，并在 verification evidence 中逐项给出请求过的歌词、音素和语言读回值。
+- `sv_run` 支持 `#/roots/...`、`#/inputs/...`、`#/steps/<id>/result` 局部引用，最多 128 步，失败即停。只读断言步骤可用 `verifiesStep` 关联前面的 mutation，关联成功后不会产生 `UNVERIFIED_WRITE`。
+- 每次 bridge 重连都会增加 epoch。带旧 `__epoch__` 的 handle 会在 Node 侧被拒绝，不能跨重连复用。
+
+写工作流不是数据库事务。`before-and-after` 会调用两次 `project:newUndoRecord`，目标是让一次逻辑编辑通常形成一个用户撤销步骤；中途失败时已发生的写入可能保留，返回值会明确报告 `partial` 或 `outcome_unknown`，不会声称自动回滚。
+
+`sv_run` 的后续步骤必须使用完整 JSON Pointer 引用：
+
+```json
+{
+  "mode": "read",
+  "steps": [
+    {"id":"track","op":"call","target":{"$ref":"#/roots/project"},"method":"getTrack","args":[1]},
+    {"id":"name","op":"call","target":{"$ref":"#/steps/track/result"},"method":"getName","return":true}
+  ]
+}
+```
+
+`$track`、`$track.result` 和 `{"$ref":"track"}` 都不是有效语法。
+
+`coverageAtLeast` 的报告会同时返回 `observedCoverage` 和 `requiredCoverage`。超过 32 项的断言观测只返回形状、数量、覆盖和数值范围摘要；一个 step result 同时设置 `return:true` 和直接 export 时，step 使用 `resultRef` 指向 exports，不重复内联大数组。
+
+音素处理完成度和内容覆盖率是两个独立维度。typed-v2 envelope 的实际观测项未齐时为 `pending`；实际观测项齐全时即为 `ready`，`-`、`+` 等延音产生的合法空字符串不会降低处理状态。`phonemeCoverage` 单独报告非空数、空值数、空值索引与缺项索引。`requireNonEmpty` 和 `requireNonEmptyPhonemes` 默认关闭；显式启用后，它们只增加全非空质量条件，超时返回 `phoneme_coverage_unsatisfied`，但 `data.state` 仍保持 `ready`。
+
+原始 dispatcher 保留宿主返回值，因此 `unselectNote` 等 mutation 即使实际生效也可能返回 `false`。不要把宿主布尔值当作后置条件；使用 `verifiesStep` 读回状态或高层工具。稳定错误会分类为 `UNKNOWN_METHOD`、`UNKNOWN_FIELD`、`UNKNOWN_HANDLE`、`INDEX_OUT_OF_RANGE`、`HOST_TIMEOUT` 等，而不是统一的 `INTERNAL_ERROR`。
+
+### 推荐的歌词编辑闭环
+
+1. `sv_snapshot { "scope": { "kind": "selection" } }`，检查 `status`、音符数量和歌词。
+2. 保存返回的 `contextId`，调用 `sv_set_lyrics`，歌词数组长度必须与上下文音符数完全一致。
+3. 检查 `effects: "verified"`、`verification.passed: true`、`processedNotes` 和 `actuallyChangedNotes`；如等待计算结果，还要检查 `data.processing.state`。
+4. 需要继续编辑时重新快照。成功写入后旧 `contextId` 会失效。
 
 ## Smoke test
 
@@ -128,7 +176,7 @@ npm run smoke:mcp
 ```
 
 该命令会依次启动 stdio MCP server、独立 Lua bridge 和客户端，并实际调用
-`listTools`、文档资源、`sv_search_api`、`sv_describe`、`sv_ping`、`sv_root`、`sv_call`、`sv_index` 与 Stop 脚本。
+`listTools`、文档/能力资源、原始工具、`sv_run`、选择区快照、歌词写入、处理等待、二次快照与 Stop 脚本。
 
 它包含：
 
@@ -142,15 +190,17 @@ lua ..\test\dispatcher_test.lua `
   "..\..\scripts\SynthVCopilotResearch\copilot\sv-scripts\StartSynthVCopilot.lua"
 ```
 
-预期：`11 passed, 0 failed`。
+预期：`14 passed, 0 failed`。
 
 ## 安全与约束
 
 - SynthV 的 pipe 读取是阻塞的。Relay 必须为桥发送的每一帧立即回复 `command`、`noop`、`shutdown` 或 `error`；实现和测试都维护这一不变量。
 - Relay 崩溃会使 Lua 读到 EOF 并退出；Relay 仍存活但停止响应时，SynthV UI 仍可能冻结。这是 stock Lua named pipe 无超时读取的固有限制。
 - 当前队列最多 64 个调用，单帧最多 64 KiB，单调用默认超时 10 秒。
-- handle 在工程结构变化后可能失效，应重新调用 `sv_root`，不要长期缓存。
-- 暂无运行时反射、dry-run 或原子 undo 分组；清单预检来自下载的官方文档而非宿主反射，类型未知 handle 的调用仍需调用方谨慎确认。
+- handle 带连接 epoch，只适合短期使用；工程结构变化后也应重新读取，不要长期缓存。
+- 快照是同一独占读取窗口内的 best-effort 视图，不是 SynthV 提供的原子工程快照。
+- 官方 API 完全没有枚举已安装声库、可用 singer、当前 singer 身份或 singer 分配关系的方法；当前只能读取/写入公开的 voice 参数，能力资源会显式报告该缺口。
+- 暂无运行时反射、dry-run 或通用自动回滚；清单预检来自下载的官方文档而非宿主反射，类型未知 handle 的调用仍需调用方谨慎确认。
 
 更完整的协议、故障模型和宿主验证清单见 [docs/architecture.md](docs/architecture.md)。
 

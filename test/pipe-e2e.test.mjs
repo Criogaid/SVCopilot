@@ -87,6 +87,29 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
     await relay.call({ op: "call", handle: projectHandle, method: "getStruct", args: [] }),
     { bpm: 160, position: 0 }
   );
+  assert.deepEqual(
+    await relay.call({
+      op: "call",
+      handle: projectHandle,
+      method: "getEmpty",
+      args: [],
+      resultFormat: "typed-v2",
+      resultShape: "array",
+      resultLength: 0,
+    }),
+    { $sv: "array", length: 0, entries: {} }
+  );
+  const sparse = await relay.call({
+    op: "call",
+    handle: projectHandle,
+    method: "getSparse",
+    args: [],
+    resultFormat: "typed-v2",
+    resultShape: "array",
+    resultLength: 4,
+  });
+  assert.equal(sparse.$sv, "sparse-array");
+  assert.equal(sparse.length, 4);
 
   const note = await relay.call({ op: "call", method: "create", args: ["Note"] });
   await relay.call({ op: "call", method: "boxSet", args: [note] });

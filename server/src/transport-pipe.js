@@ -1,4 +1,5 @@
 import net from "node:net";
+import { EventEmitter } from "node:events";
 
 const PIPE_PREFIX = "\\\\.\\pipe\\";
 const DEFAULT_SESSION = "default";
@@ -20,7 +21,7 @@ export function resolvePipePaths(session = resolveSession()) {
   };
 }
 
-export class PipeRelay {
+export class PipeRelay extends EventEmitter {
   constructor({
     session = resolveSession(),
     proto = 1,
@@ -28,6 +29,7 @@ export class PipeRelay {
     maxQueue = 64,
     maxFrameBytes = 64 * 1024,
   } = {}) {
+    super();
     this.session = session;
     this.proto = proto;
     this.timeoutMs = timeoutMs;
@@ -48,6 +50,7 @@ export class PipeRelay {
     this.initialized = false;
     this.closed = false;
     this.detaching = false;
+    this.connectionEpoch = 0;
   }
 
   async init() {
@@ -210,7 +213,11 @@ export class PipeRelay {
         });
         return;
       }
-      this.handshakeComplete = true;
+      if (!this.handshakeComplete) {
+        this.handshakeComplete = true;
+        this.connectionEpoch += 1;
+        this.emit("attach", { epoch: this.connectionEpoch, session: this.session });
+      }
       this._sendReply({ type: "hello", proto: this.proto, session: this.session });
       return;
     }
@@ -284,6 +291,7 @@ export class PipeRelay {
   _detach(reason) {
     if (this.detaching) return;
     this.detaching = true;
+    const wasAttached = this.handshakeComplete;
     const sockets = [this.toSvSocket, this.fromSvSocket];
     this.toSvSocket = null;
     this.fromSvSocket = null;
@@ -295,7 +303,16 @@ export class PipeRelay {
     for (const socket of sockets) {
       if (socket && !socket.destroyed) socket.destroy();
     }
+    if (wasAttached) this.emit("detach", { epoch: this.connectionEpoch, reason });
     this.detaching = false;
+  }
+
+  getStatus() {
+    return {
+      state: this.handshakeComplete ? "attached" : this.initialized ? "listening" : "stopped",
+      epoch: this.connectionEpoch,
+      session: this.session,
+    };
   }
 
   async _closeServers() {
