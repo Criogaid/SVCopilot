@@ -43,6 +43,15 @@ const ROOT_HANDLE_TYPES = Object.freeze({
 });
 let hostVersion = null;
 
+// The API manifest is a point-in-time mirror of the official docs, so treat
+// pre-validation as advisory. Only argument-shape problems are fatal (feeding a
+// real native method mismatched args can misbehave). Method-existence, version
+// gating, and unknown target types are deferred to the host: it is authoritative
+// and already rejects unknown/old methods cleanly, so blocking here would only
+// turn manifest staleness (e.g. a newer SynthV build, or a parse gap) into false
+// failures on valid calls.
+const FATAL_VALIDATION_CODES = new Set(["INVALID_ARGUMENTS", "ARGUMENT_MISMATCH"]);
+
 const TOOLS = [
   {
     name: "sv_root",
@@ -198,7 +207,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           hostVersion,
           resolveHandleType: (handle) => handleTypes.get(handle) ?? null,
         });
-        if (!validation.ok) return toolError(`${validation.code}: ${validation.message}`);
+        if (!validation.ok) {
+          if (FATAL_VALIDATION_CODES.has(validation.code)) {
+            return toolError(`${validation.code}: ${validation.message}`);
+          }
+          console.error(
+            `[sv-copilot] pre-check advisory (${validation.code}) for ${targetType ?? "SV"}.${args.method}; deferring to host.`
+          );
+        }
 
         const cmd = { op: "call", method: args.method, args: callArgs };
         if (args.handle !== undefined && args.handle !== null) cmd.handle = args.handle;

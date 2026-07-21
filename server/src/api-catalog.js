@@ -5,7 +5,31 @@ import { fileURLToPath } from "node:url";
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const manifestPath = path.resolve(sourceDir, "..", "..", "api-docs", "api-manifest.json");
 
-export const apiManifest = Object.freeze(JSON.parse(readFileSync(manifestPath, "utf8")));
+// The manifest is a generated artifact (`npm run parse:sv-api`). If it is missing
+// or corrupt, degrade gracefully instead of crashing the whole server at import:
+// search/describe/resources return empty and call pre-validation is skipped, but
+// the dispatcher (sv_ping/sv_call/sv_root/...) keeps working.
+function loadManifest() {
+  try {
+    return Object.freeze(JSON.parse(readFileSync(manifestPath, "utf8")));
+  } catch (error) {
+    console.error(
+      `[sv-copilot] API manifest unavailable at ${manifestPath} (${error.code || error.message}). ` +
+        "Run 'npm run parse:sv-api'. API search/describe and call pre-validation are disabled; the dispatcher still works."
+    );
+    return Object.freeze({
+      schemaVersion: 0,
+      generatedAt: null,
+      sourceMirror: null,
+      summary: {},
+      creatableTypes: [],
+      classes: {},
+      available: false,
+    });
+  }
+}
+
+export const apiManifest = loadManifest();
 
 export function getApiClass(className) {
   if (typeof className !== "string") return null;
