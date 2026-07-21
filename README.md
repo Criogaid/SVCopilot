@@ -92,6 +92,7 @@ MCP 客户端配置示例：
 | `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高，超时返回最后一次观测而非伪造成功 |
 | `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
 | `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚 |
+| `sv_snapshot_range` | 按 1-based bar/beat 范围跨轨读取：blick/音乐坐标双份、逐音符休止与相邻歌词、tempo/meter map、mixer，以及内容 hash `snapshotToken`（`sinceToken` 相同时返回 `no_change`） |
 
 MCP 资源还提供：
 

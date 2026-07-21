@@ -54,15 +54,31 @@ local groupReference = makeObject({
   isInstrumental = function() return false end,
   isMain = function() return true end,
   getOnset = function() return 0 end,
+  getEnd = function() return 4 * 4 * 705600 end,
   getTimeOffset = function() return 0 end,
   getPitchOffset = function() return 0 end,
   getVoice = function() return { paramTension = 0, paramBreathiness = 0 } end,
+})
+local mixer = makeObject({
+  getGainDecibel = function() return 0 end,
+  getPan = function() return 0 end,
+  isMuted = function() return false end,
+  isSolo = function() return false end,
+})
+local timeAxis = makeObject({
+  getAllMeasureMarks = function()
+    return { { position = 0, positionBlick = 0, numerator = 4, denominator = 4 } }
+  end,
+  getAllTempoMarks = function()
+    return { { position = 0, positionSeconds = 0, bpm = 120 } }
+  end,
 })
 local track = makeObject({
   getIndexInParent = function() return 1 end,
   getName = function() return "Pipe Vocal" end,
   getNumGroups = function() return 1 end,
   getGroupReference = function(_, index) if index == 1 then return groupReference end end,
+  getMixer = function() return mixer end,
 })
 local selection = makeObject({
   getSelectedNotes = function() return notes end,
@@ -77,7 +93,7 @@ local project = makeObject({
   getFileName = function() return "PipeProject" end,
   getNumTracks = function() return 3 end,
   getTrack = function(_, index) if index >= 1 and index <= 3 then return track end end,
-  getTimeAxis = function() return makeObject({}) end,
+  getTimeAxis = function() return timeAxis end,
   getStruct = function() return { bpm = 160, position = 0 } end,
   getEmpty = function() return {} end,
   getSparse = function() return { [2] = 62.5, [4] = 64 } end,

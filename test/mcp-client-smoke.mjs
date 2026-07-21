@@ -353,6 +353,44 @@ try {
   assert.equal(patchConflict.error.code, "EXPECTED_MISMATCH");
   assert.equal(patchConflict.effects, "none");
 
+  // sv_snapshot_range 公开契约：bar/beat 双坐标、meter/tempo map、mixer 和 sinceToken。
+  const rangeSnapshot = parseToolResult(
+    await client.callTool({
+      name: "sv_snapshot_range",
+      arguments: {
+        scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 2 } },
+        include: ["notes", "tempoMap", "meterMap", "mixer", "retakes"],
+      },
+    })
+  );
+  assert.equal(rangeSnapshot.ok, true);
+  assert.equal(rangeSnapshot.data.barBase, 1);
+  assert.equal(rangeSnapshot.data.range.to.blick, 4 * 705600);
+  assert.deepEqual(
+    rangeSnapshot.data.notes.map((note) => [note.lyrics, note.musical.bar, note.musical.beat]),
+    [
+      ["ら", 1, 1],
+      ["よ", 1, 2],
+    ]
+  );
+  assert.equal(rangeSnapshot.data.notes[0].nextLyrics, "よ");
+  assert.equal(rangeSnapshot.data.tempoMap[0].bpm, 120);
+  assert.equal(rangeSnapshot.data.meterMap[0].numerator, 4);
+  assert.equal(rangeSnapshot.data.tracks[0].mixer.muted, false);
+  assert.ok(rangeSnapshot.warnings.some((warning) => warning.code === "UNSUPPORTED_INCLUDE"));
+  const rangeAgain = parseToolResult(
+    await client.callTool({
+      name: "sv_snapshot_range",
+      arguments: {
+        scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 2 } },
+        include: ["notes", "tempoMap", "meterMap", "mixer", "retakes"],
+        sinceToken: rangeSnapshot.snapshotToken,
+      },
+    })
+  );
+  assert.equal(rangeAgain.status, "no_change");
+  assert.equal(rangeAgain.data, null);
+
   const note = parseToolResult(
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );

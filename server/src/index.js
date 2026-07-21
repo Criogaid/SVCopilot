@@ -20,6 +20,7 @@ import {
 } from "./api-catalog.js";
 import { HostSession } from "./host-session.js";
 import { LyricsService } from "./lyrics.js";
+import { RangeSnapshotService } from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
 import { ProcessingService } from "./processing.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
@@ -33,6 +34,7 @@ const workflowExecutor = new WorkflowExecutor(hostSession);
 const processingService = new ProcessingService(hostSession, snapshotService);
 const lyricsService = new LyricsService(hostSession, snapshotService);
 const notePatchService = new NotePatchService(hostSession, snapshotService);
+const rangeSnapshotService = new RangeSnapshotService(hostSession);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -422,6 +424,75 @@ const TOOLS = [
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
+  {
+    name: "sv_snapshot_range",
+    description:
+      "Read a musical range (1-based bar/beat, converted via the project TimeAxis) across selected tracks as canonical 0-based data with both blick and bar/beat coordinates, per-note rests and neighbor lyrics, tempo and meter maps, and optional mixer state. Returns a content-hash snapshotToken (not a host revision): pass it back as sinceToken to get no_change when the observed content is identical. Read-only; use sv_snapshot (selection/group) to obtain an editable contextId.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scope: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            kind: { const: "range" },
+            trackIndices: {
+              type: "array",
+              minItems: 1,
+              items: { type: "integer", minimum: 0 },
+              description: "0-based track indices; omit for all tracks.",
+            },
+            from: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                bar: { type: "integer", minimum: 1 },
+                beat: { type: "integer", minimum: 1 },
+              },
+              required: ["bar"],
+            },
+            to: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                bar: { type: "integer", minimum: 1 },
+                beat: { type: "integer", minimum: 1 },
+              },
+              required: ["bar"],
+              description: "Exclusive end of the range (bar/beat are 1-based).",
+            },
+          },
+          required: ["kind", "from", "to"],
+        },
+        include: {
+          type: "array",
+          uniqueItems: true,
+          items: {
+            enum: [
+              "notes",
+              "tempoMap",
+              "meterMap",
+              "mixer",
+              "voiceParameters",
+              "automation",
+              "attributes",
+              "retakes",
+            ],
+          },
+          description:
+            "Defaults to notes, tempoMap, meterMap. automation/attributes/retakes are not yet available and produce an UNSUPPORTED_INCLUDE warning instead of failing.",
+        },
+        sinceToken: {
+          type: "string",
+          description: "snapshotToken from a previous read; identical content returns no_change.",
+        },
+      },
+      required: ["scope"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
 ];
 
 const server = new Server(
@@ -522,6 +593,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_patch_notes":
         result = await notePatchService.patchNotes(args);
         break;
+      case "sv_snapshot_range":
+        result = await rangeSnapshotService.snapshot(args);
+        break;
       default:
         return toolError("UNKNOWN_TOOL", name);
     }
@@ -616,7 +690,7 @@ function capabilities() {
     },
     interfaces: {
       raw: ["sv_root", "sv_call", "sv_index", "sv_free"],
-      workflow: ["sv_snapshot", "sv_run", "sv_wait_for_processing"],
+      workflow: ["sv_snapshot", "sv_snapshot_range", "sv_run", "sv_wait_for_processing"],
       music: ["sv_set_lyrics", "sv_patch_notes"],
       typedResultFormat: "typed-v2",
     },
