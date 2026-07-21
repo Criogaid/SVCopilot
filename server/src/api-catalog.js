@@ -5,28 +5,60 @@ import { fileURLToPath } from "node:url";
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const manifestPath = path.resolve(sourceDir, "..", "..", "api-docs", "api-manifest.json");
 
-// The manifest is a generated artifact (`npm run parse:sv-api`). If it is missing
-// or corrupt, degrade gracefully instead of crashing the whole server at import:
-// search/describe/resources return empty and call pre-validation is skipped, but
-// the dispatcher (sv_ping/sv_call/sv_root/...) keeps working.
+// The manifest is a generated artifact (`npm run parse:sv-api`). If it is missing,
+// unreadable, invalid JSON, or structurally wrong (e.g. `null`, `{}`, or `classes`
+// not an object), degrade gracefully instead of crashing the server at import:
+// search/describe/resources report unavailable and call pre-validation is skipped,
+// but the dispatcher (sv_ping/sv_call/sv_root/...) keeps working.
+function unavailableStub() {
+  return Object.freeze({
+    schemaVersion: 0,
+    generatedAt: null,
+    sourceMirror: null,
+    summary: {},
+    creatableTypes: [],
+    classes: {},
+    available: false,
+  });
+}
+
+function isPlausibleManifest(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.classes !== null &&
+    typeof value.classes === "object" &&
+    !Array.isArray(value.classes)
+  );
+}
+
+// Exported for tests: turn parsed JSON into a usable manifest, or the stub if the
+// shape is not a valid API catalog.
+export function normalizeManifest(parsed) {
+  return isPlausibleManifest(parsed) ? Object.freeze(parsed) : unavailableStub();
+}
+
+function manifestWarning(reason) {
+  return (
+    `[sv-copilot] API manifest unavailable at ${manifestPath} (${reason}). ` +
+    "Run 'npm run parse:sv-api'. API search/describe and call pre-validation are disabled; the dispatcher still works."
+  );
+}
+
 function loadManifest() {
+  let parsed;
   try {
-    return Object.freeze(JSON.parse(readFileSync(manifestPath, "utf8")));
+    parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch (error) {
-    console.error(
-      `[sv-copilot] API manifest unavailable at ${manifestPath} (${error.code || error.message}). ` +
-        "Run 'npm run parse:sv-api'. API search/describe and call pre-validation are disabled; the dispatcher still works."
-    );
-    return Object.freeze({
-      schemaVersion: 0,
-      generatedAt: null,
-      sourceMirror: null,
-      summary: {},
-      creatableTypes: [],
-      classes: {},
-      available: false,
-    });
+    console.error(manifestWarning(error.code || error.message));
+    return unavailableStub();
   }
+  const manifest = normalizeManifest(parsed);
+  if (manifest.available === false) {
+    console.error(manifestWarning("manifest is not a valid API catalog (missing or non-object `classes`)"));
+  }
+  return manifest;
 }
 
 export const apiManifest = loadManifest();

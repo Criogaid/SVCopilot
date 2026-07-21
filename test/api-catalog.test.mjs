@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   describeApi,
+  normalizeManifest,
   searchApi,
   validateApiCall,
 } from "../server/src/api-catalog.js";
@@ -62,4 +63,16 @@ test("API catalog preflight validates methods, arguments, handles, and host vers
     hostVersion: "2.0.0",
   });
   assert.equal(unsupportedVersion.code, "VERSION_UNSUPPORTED");
+});
+
+test("normalizeManifest degrades structurally broken manifests to the unavailable stub", () => {
+  for (const broken of [null, {}, [], "not-json", 42, { classes: null }, { classes: [] }]) {
+    const manifest = normalizeManifest(broken);
+    assert.equal(manifest.available, false);
+    assert.deepEqual(manifest.classes, {});
+  }
+
+  const usable = normalizeManifest({ classes: { Note: { methods: {} } } });
+  assert.notEqual(usable.available, false);
+  assert.ok(usable.classes.Note);
 });
