@@ -22,14 +22,14 @@ function unavailableStub() {
 }
 
 function isPlausibleManifest(value) {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    value.classes !== null &&
-    typeof value.classes === "object" &&
-    !Array.isArray(value.classes)
-  );
+  if (!isObject(value) || !isObject(value.classes)) return false;
+  if (!isObject(value.classes.SV) || !isObject(value.classes.SV.methods)) return false;
+  // 每个类条目及其 methods 都必须是对象,否则运行时访问 apiClass.methods[...] 会抛异常,
+  // 让已知 handle 的 sv_call 返回 MCP 内部错误而不是转发给宿主。
+  for (const entry of Object.values(value.classes)) {
+    if (!isObject(entry) || !isObject(entry.methods)) return false;
+  }
+  return true;
 }
 
 // 导出供测试:把解析后的 JSON 转成可用的 manifest;结构不是合法 API 目录时返回 stub。
@@ -66,14 +66,14 @@ export const apiManifest = loadManifest();
 export const apiManifestAvailable = apiManifest.available !== false;
 
 export function getApiClass(className) {
-  if (typeof className !== "string") return null;
-  return apiManifest.classes[className] ?? null;
+  if (typeof className !== "string" || !Object.hasOwn(apiManifest.classes, className)) return null;
+  return apiManifest.classes[className];
 }
 
 export function getMethodOverloads(className, method) {
   const apiClass = getApiClass(className);
-  if (!apiClass || typeof method !== "string") return null;
-  return apiClass.methods[method] ?? null;
+  if (!apiClass || typeof method !== "string" || !Object.hasOwn(apiClass.methods, method)) return null;
+  return apiClass.methods[method];
 }
 
 export function describeApi(className, method) {
@@ -327,7 +327,11 @@ function getHandleId(value) {
   return value.__handle__;
 }
 
-function isAssignable(actualType, expectedType) {
+// 沿 extends 链递归判断可赋值性;visited 集合防止环导致死循环。
+export function isAssignable(actualType, expectedType, visited = new Set()) {
   if (actualType === expectedType) return true;
-  return getApiClass(actualType)?.extends?.includes(expectedType) ?? false;
+  if (visited.has(actualType)) return false;
+  visited.add(actualType);
+  const parents = getApiClass(actualType)?.extends ?? [];
+  return parents.some((parent) => isAssignable(parent, expectedType, visited));
 }

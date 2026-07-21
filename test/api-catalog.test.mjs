@@ -3,6 +3,9 @@ import test from "node:test";
 
 import {
   describeApi,
+  getApiClass,
+  getMethodOverloads,
+  isAssignable,
   normalizeManifest,
   searchApi,
   validateApiCall,
@@ -65,14 +68,49 @@ test("API catalog preflight validates methods, arguments, handles, and host vers
   assert.equal(unsupportedVersion.code, "VERSION_UNSUPPORTED");
 });
 
+test("API catalog ignores properties inherited from Object.prototype", () => {
+  const inheritedNames = ["toString", "constructor", "__proto__", "valueOf", "hasOwnProperty"];
+  for (const name of inheritedNames) {
+    assert.equal(getApiClass(name), null);
+    assert.equal(describeApi(name), null);
+    assert.equal(getMethodOverloads("Note", name), null);
+    assert.equal(
+      validateApiCall({ className: "Note", method: name, args: [], hostVersion: "2.2.1" }).code,
+      "UNKNOWN_METHOD"
+    );
+  }
+});
+
 test("normalizeManifest degrades structurally broken manifests to the unavailable stub", () => {
-  for (const broken of [null, {}, [], "not-json", 42, { classes: null }, { classes: [] }]) {
+  for (const broken of [
+    null,
+    {},
+    [],
+    "not-json",
+    42,
+    { classes: null },
+    { classes: [] },
+    { classes: {} },
+    { classes: { Project: { methods: {} } } },
+    { classes: { Project: {} } },
+    { classes: { Project: { methods: [] } } },
+  ]) {
     const manifest = normalizeManifest(broken);
     assert.equal(manifest.available, false);
     assert.deepEqual(manifest.classes, {});
   }
 
-  const usable = normalizeManifest({ classes: { Note: { methods: {} } } });
+  const usable = normalizeManifest({
+    classes: { SV: { methods: {} }, Note: { methods: {} } },
+  });
   assert.notEqual(usable.available, false);
   assert.ok(usable.classes.Note);
+});
+
+test("isAssignable resolves the full extends chain (transitive, cycle-safe)", () => {
+  assert.equal(isAssignable("Note", "Note"), true);
+  assert.equal(isAssignable("Note", "ScriptableNestedObject"), true);
+  assert.equal(isAssignable("Note", "NestedObject"), true);
+  assert.equal(isAssignable("Note", "Track"), false);
+  assert.equal(isAssignable("Note", "SV"), false);
 });
