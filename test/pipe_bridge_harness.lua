@@ -181,13 +181,23 @@ local timeAxis = makeObject({
     return { { position = 0, positionSeconds = 0, bpm = 120 } }
   end,
 })
-local track = makeObject({
-  getIndexInParent = function() return 1 end,
-  getName = function() return "Pipe Vocal" end,
-  getNumGroups = function() return 1 end,
-  getGroupReference = function(_, index) if index == 1 then return groupReference end end,
-  getMixer = function() return mixer end,
-})
+local makeTrack
+makeTrack = function(name)
+  local trackState = { name = name }
+  local trackObject
+  trackObject = makeObject({
+    getIndexInParent = function() return 1 end,
+    getName = function() return trackState.name end,
+    setName = function(_, value) trackState.name = value end,
+    getNumGroups = function() return 1 end,
+    getGroupReference = function(_, index) if index == 1 then return groupReference end end,
+    getMixer = function() return mixer end,
+    clone = function() return makeTrack(trackState.name) end,
+  })
+  return trackObject
+end
+local tracks = { makeTrack("Pipe Vocal"), makeTrack("Pipe Vocal"), makeTrack("Pipe Vocal") }
+local track = tracks[1]
 local selection = makeObject({
   getSelectedNotes = function() return notes end,
 })
@@ -199,8 +209,12 @@ local mainEditor = makeObject({
 local undoCount = 0
 local project = makeObject({
   getFileName = function() return "PipeProject" end,
-  getNumTracks = function() return 3 end,
-  getTrack = function(_, index) if index >= 1 and index <= 3 then return track end end,
+  getNumTracks = function() return #tracks end,
+  getTrack = function(_, index) return tracks[index] end,
+  addTrack = function(_, newTrack)
+    tracks[#tracks + 1] = newTrack
+    return #tracks
+  end,
   getTimeAxis = function() return timeAxis end,
   getStruct = function() return { bpm = 160, position = 0 } end,
   getEmpty = function() return {} end,

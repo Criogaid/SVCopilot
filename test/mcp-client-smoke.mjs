@@ -572,6 +572,31 @@ try {
   assert.equal(auditionStop.data.restoration[0].restored, true);
   assert.equal(auditionStop.data.restoration[0].observedAfterRestore, false);
 
+  // voice 降级接口：可观测参数 + 明确 unobservable；clone track 带读回验证。
+  const voiceProfile = parseToolResult(
+    await client.callTool({
+      name: "sv_get_voice_profile",
+      arguments: { trackIndex: 0 },
+    })
+  );
+  assert.equal(voiceProfile.ok, true);
+  assert.equal(voiceProfile.data.groups[0].voice.identityStatus, "unobservable");
+  assert.equal(voiceProfile.data.groups[0].voice.parameters.paramTension, 0);
+  assert.equal(voiceProfile.data.capabilities.singerIdentity, "unobservable");
+
+  const clonedTrack = parseToolResult(
+    await client.callTool({
+      name: "sv_clone_track_from_template",
+      arguments: { templateTrackIndex: 0, name: "Pipe Harmony" },
+    })
+  );
+  assert.equal(clonedTrack.ok, true);
+  assert.equal(clonedTrack.status, "succeeded");
+  assert.equal(clonedTrack.data.newTrackIndex, 3);
+  assert.equal(clonedTrack.data.trackCountAfter, 4);
+  assert.equal(clonedTrack.data.name, "Pipe Harmony");
+  assert.equal(clonedTrack.data.identityPreservation, "host_opaque");
+
   const note = parseToolResult(
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );
@@ -634,7 +659,8 @@ try {
 
   assert.equal(ping, "pong");
   assert.equal(fileName, "PipeProject");
-  assert.equal(trackCount, 3);
+  // 前面的 sv_clone_track_from_template 已把轨道数从 3 增加到 4。
+  assert.equal(trackCount, 4);
   assert.equal(quarter, 705600);
 
   const stop = spawn(luaBin, [stopHarness, stopScript], {

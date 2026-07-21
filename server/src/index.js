@@ -28,6 +28,7 @@ import { ParameterCurveService } from "./parameter-curve.js";
 import { ProcessingService } from "./processing.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
+import { VoiceProfileService } from "./voice-profile.js";
 import { WorkflowExecutor } from "./workflow.js";
 
 const bridge = new PipeRelay();
@@ -41,6 +42,7 @@ const rangeSnapshotService = new RangeSnapshotService(hostSession);
 const parameterCurveService = new ParameterCurveService(hostSession);
 const noteStructureService = new NoteStructureService(hostSession, snapshotService);
 const auditionService = new AuditionService(hostSession);
+const voiceProfileService = new VoiceProfileService(hostSession);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -717,6 +719,42 @@ const TOOLS = [
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
+  {
+    name: "sv_get_voice_profile",
+    description:
+      "Read observable voice parameters (getVoice, including vocalModeParams names) for a track's groups. The official API exposes NO singer identity, installed voicebank catalog, or assignment relation — those are reported as unobservable, never inferred.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        trackIndex: { type: "integer", minimum: 0 },
+        groupIndex: {
+          type: "integer",
+          minimum: 0,
+          description: "Omit to profile every group on the track.",
+        },
+      },
+      required: ["trackIndex"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_clone_track_from_template",
+    description:
+      "Clone an existing track (Track.clone + Project.addTrack) to create e.g. a harmony track inheriting the template's groups and voice settings, inside undo boundaries with read-back verification. Track.clone only promises a deep copy: whether hidden singer state survives is host-opaque and reported as identityPreservation: \"host_opaque\".",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        templateTrackIndex: { type: "integer", minimum: 0 },
+        name: { type: "string", minLength: 1 },
+      },
+      required: ["templateTrackIndex"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
 ];
 
 const server = new Server(
@@ -841,6 +879,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_restore_audition":
         result = await auditionService.restore(args);
         break;
+      case "sv_get_voice_profile":
+        result = await voiceProfileService.getProfile(args);
+        break;
+      case "sv_clone_track_from_template":
+        result = await voiceProfileService.cloneTrackFromTemplate(args);
+        break;
       default:
         return toolError("UNKNOWN_TOOL", name);
     }
@@ -949,6 +993,7 @@ function capabilities() {
         "sv_stop_audition",
         "sv_restore_audition",
       ],
+      voice: ["sv_get_voice_profile", "sv_clone_track_from_template"],
       typedResultFormat: "typed-v2",
     },
     knownLimits: {
