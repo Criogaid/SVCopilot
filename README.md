@@ -95,6 +95,7 @@ MCP 客户端配置示例：
 | `sv_snapshot_range` | 按 1-based bar/beat 范围跨轨读取：blick/音乐坐标双份、逐音符休止与相邻歌词、tempo/meter map、mixer，以及内容 hash `snapshotToken`（`sinceToken` 相同时返回 `no_change`） |
 | `sv_restructure_notes` | 结构操作：insert / delete（clone 备份）/ split（延音第二半）/ merge（连续音符），按调用顺序执行、活动 index 解析、Undo 边界与已验证补偿回滚 |
 | `sv_get_parameter_curve` | 读取 group 参数曲线：官方 definition、插值方式、local/absolute 双坐标控制点与统计 |
+| `sv_start_audition` / `sv_get_audition` / `sv_stop_audition` / `sv_restore_audition` | 非阻塞试听：保存 playhead/solo、solo 目标轨、seek + play/loop；stop 只恢复未被用户改动的字段并返回逐项证据；recovery payload 可在 server 崩溃后独立恢复。MCP 听不到声音，感知判断属于人 |
 | `sv_patch_parameter_curve` | 范围内 replace/add/scale 参数控制点：definition range 校验与 clamp、可选 simplify、Undo 边界、读回验证（精确或容差采样）和已验证补偿回滚 |
 
 MCP 资源还提供：

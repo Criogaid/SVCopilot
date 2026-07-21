@@ -19,6 +19,7 @@ import {
   searchApi,
 } from "./api-catalog.js";
 import { HostSession } from "./host-session.js";
+import { AuditionService } from "./audition.js";
 import { LyricsService } from "./lyrics.js";
 import { RangeSnapshotService } from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
@@ -39,6 +40,7 @@ const notePatchService = new NotePatchService(hostSession, snapshotService);
 const rangeSnapshotService = new RangeSnapshotService(hostSession);
 const parameterCurveService = new ParameterCurveService(hostSession);
 const noteStructureService = new NoteStructureService(hostSession, snapshotService);
+const auditionService = new AuditionService(hostSession);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -650,6 +652,71 @@ const TOOLS = [
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
+  {
+    name: "sv_start_audition",
+    description:
+      "Non-blocking audition: save playhead and target-track solo state, solo the requested tracks, seek to the range start (absolute blicks converted via TimeAxis), and play or loop. Returns an auditionId plus a recovery payload the caller should keep — if this server crashes, sv_restore_audition can undo solo/playhead changes from the payload alone. MCP cannot hear audio; a human judges the sound.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        fromBlick: { type: "integer", minimum: 0 },
+        toBlick: { type: "integer", minimum: 1 },
+        soloTrackIndices: {
+          type: "array",
+          items: { type: "integer", minimum: 0 },
+          description: "0-based tracks to solo for the audition; omit to leave the mixer untouched.",
+        },
+        loop: { type: "boolean", default: false },
+      },
+      required: ["fromBlick", "toBlick"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_get_audition",
+    description: "Read the current playback status and playhead for a running audition.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { auditionId: { type: "string", minLength: 1 } },
+      required: ["auditionId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_stop_audition",
+    description:
+      "Stop an audition and restore the saved state: playback stops, solo fields are restored ONLY if they still hold the audition-set value (user changes are left untouched and reported), and the playhead returns to the saved position. Returns per-field restoration evidence.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { auditionId: { type: "string", minLength: 1 } },
+      required: ["auditionId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_restore_audition",
+    description:
+      "Restore mixer and playhead state from a recovery payload returned by sv_start_audition. Use after a server crash left solo/mute changes behind. Same skip-if-user-modified semantics as sv_stop_audition.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        recovery: {
+          type: "object",
+          description: "The recovery payload from sv_start_audition (version 1).",
+        },
+      },
+      required: ["recovery"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
 ];
 
 const server = new Server(
@@ -762,6 +829,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_restructure_notes":
         result = await noteStructureService.restructureNotes(args);
         break;
+      case "sv_start_audition":
+        result = await auditionService.start(args);
+        break;
+      case "sv_get_audition":
+        result = await auditionService.get(args);
+        break;
+      case "sv_stop_audition":
+        result = await auditionService.stop(args);
+        break;
+      case "sv_restore_audition":
+        result = await auditionService.restore(args);
+        break;
       default:
         return toolError("UNKNOWN_TOOL", name);
     }
@@ -863,6 +942,12 @@ function capabilities() {
         "sv_restructure_notes",
         "sv_get_parameter_curve",
         "sv_patch_parameter_curve",
+      ],
+      audition: [
+        "sv_start_audition",
+        "sv_get_audition",
+        "sv_stop_audition",
+        "sv_restore_audition",
       ],
       typedResultFormat: "typed-v2",
     },

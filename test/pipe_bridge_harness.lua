@@ -150,13 +150,30 @@ local groupReference = makeObject({
   getPitchOffset = function() return 0 end,
   getVoice = function() return { paramTension = 0, paramBreathiness = 0 } end,
 })
+local mixerState = { gain = 0, pan = 0, muted = false, solo = false }
 local mixer = makeObject({
-  getGainDecibel = function() return 0 end,
-  getPan = function() return 0 end,
-  isMuted = function() return false end,
-  isSolo = function() return false end,
+  getGainDecibel = function() return mixerState.gain end,
+  getPan = function() return mixerState.pan end,
+  isMuted = function() return mixerState.muted end,
+  isSolo = function() return mixerState.solo end,
+  setGainDecibel = function(_, value) mixerState.gain = value end,
+  setPan = function(_, value) mixerState.pan = value end,
+  setMuted = function(_, value) mixerState.muted = value end,
+  setSolo = function(_, value) mixerState.solo = value end,
+})
+local playbackState = { playhead = 2.5, status = "stopped" }
+local playback = makeObject({
+  getPlayhead = function() return playbackState.playhead end,
+  getStatus = function() return playbackState.status end,
+  seek = function(_, t) playbackState.playhead = t end,
+  play = function() playbackState.status = "playing" end,
+  loop = function() playbackState.status = "looping" end,
+  pause = function() playbackState.status = "stopped" end,
+  stop = function() playbackState.status = "stopped" end,
 })
 local timeAxis = makeObject({
+  getSecondsFromBlick = function(_, b) return b / 705600 * 0.5 end,
+  getBlickFromSeconds = function(_, t) return math.floor(t * 2 * 705600 + 0.5) end,
   getAllMeasureMarks = function()
     return { { position = 0, positionBlick = 0, numerator = 4, denominator = 4 } }
   end,
@@ -200,7 +217,7 @@ SV = {
   getProject = function() return project end,
   getMainEditor = function() return mainEditor end,
   getArrangement = function() return makeObject({}) end,
-  getPlayback = function() return makeObject({}) end,
+  getPlayback = function() return playback end,
   create = function(_, objectType)
     if objectType == "Note" then
       return makeNote({ onset = 0, duration = 705600, pitch = 60, lyrics = "la", phonemes = "", language = "", detune = 0, attributes = {} })

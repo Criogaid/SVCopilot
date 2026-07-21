@@ -538,6 +538,40 @@ try {
   assert.equal(deleteResult.ok, true);
   assert.equal(deleteResult.data.finalNoteCount, 2);
 
+  // 试听闭环：start（solo + loop）→ get → stop（恢复 solo 与 playhead）。
+  const auditionStart = parseToolResult(
+    await client.callTool({
+      name: "sv_start_audition",
+      arguments: { fromBlick: 0, toBlick: 4 * 705600, soloTrackIndices: [0], loop: true },
+    })
+  );
+  assert.equal(auditionStart.ok, true);
+  assert.equal(auditionStart.data.playbackStatus, "looping");
+  assert.equal(auditionStart.data.range.toSeconds, 2);
+  assert.equal(auditionStart.data.recovery.savedPlayheadSeconds, 2.5);
+  assert.equal(auditionStart.data.recovery.mixerChanges[0].previousValue, false);
+
+  const auditionStatus = parseToolResult(
+    await client.callTool({
+      name: "sv_get_audition",
+      arguments: { auditionId: auditionStart.data.auditionId },
+    })
+  );
+  assert.equal(auditionStatus.data.playbackStatus, "looping");
+
+  const auditionStop = parseToolResult(
+    await client.callTool({
+      name: "sv_stop_audition",
+      arguments: { auditionId: auditionStart.data.auditionId },
+    })
+  );
+  assert.equal(auditionStop.ok, true);
+  assert.equal(auditionStop.status, "succeeded");
+  assert.equal(auditionStop.data.playbackStatus, "stopped");
+  assert.equal(auditionStop.data.playheadSeconds, 2.5);
+  assert.equal(auditionStop.data.restoration[0].restored, true);
+  assert.equal(auditionStop.data.restoration[0].observedAfterRestore, false);
+
   const note = parseToolResult(
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );
