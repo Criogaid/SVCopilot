@@ -391,6 +391,55 @@ try {
   assert.equal(rangeAgain.status, "no_change");
   assert.equal(rangeAgain.data, null);
 
+  // 参数曲线：读取（双坐标 + definition），replace 写入 + 精确读回验证。
+  const curve = parseToolResult(
+    await client.callTool({
+      name: "sv_get_parameter_curve",
+      arguments: { target: { trackIndex: 0, groupIndex: 0 }, parameter: "loudness" },
+    })
+  );
+  assert.equal(curve.ok, true);
+  assert.deepEqual(curve.data.definition.range, [-24, 24]);
+  assert.equal(curve.data.interpolationMethod, "Linear");
+  assert.equal(curve.data.stats.count, 2);
+  assert.equal(curve.data.points[1].localBlick, 705600);
+
+  const curvePatch = parseToolResult(
+    await client.callTool({
+      name: "sv_patch_parameter_curve",
+      arguments: {
+        target: { trackIndex: 0, groupIndex: 0 },
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: 2 * 705600 },
+        points: [
+          { blick: 0, value: 2 },
+          { blick: 705600, value: -3 },
+        ],
+      },
+    })
+  );
+  assert.equal(curvePatch.ok, true);
+  assert.equal(curvePatch.status, "succeeded");
+  assert.equal(curvePatch.effects, "verified");
+  assert.equal(curvePatch.verification.mode, "exact");
+  assert.equal(curvePatch.data.after.pointCount, 2);
+  assert.equal(curvePatch.data.after.stats.min, -3);
+
+  const curveOutOfRange = parseToolError(
+    await client.callTool({
+      name: "sv_patch_parameter_curve",
+      arguments: {
+        target: { trackIndex: 0, groupIndex: 0 },
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: 705600 },
+        points: [{ blick: 0, value: 999 }],
+      },
+    })
+  );
+  assert.equal(curveOutOfRange.error.code, "VALUE_OUT_OF_RANGE");
+
   const note = parseToolResult(
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );

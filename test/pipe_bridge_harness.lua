@@ -42,11 +42,58 @@ for index, state in ipairs(noteState) do
   })
 end
 
+local automationPoints = { { 0, 0.0 }, { 705600, 0.5 } }
+local automation = makeObject({
+  getDefinition = function()
+    return { displayName = "Loudness", typeName = "loudness", range = { -24, 24 }, defaultValue = 0 }
+  end,
+  getType = function() return "loudness" end,
+  getInterpolationMethod = function() return "Linear" end,
+  getAllPoints = function()
+    local out = {}
+    for index, point in ipairs(automationPoints) do out[index] = { point[1], point[2] } end
+    return out
+  end,
+  getPoints = function(_, from, to)
+    local out = {}
+    for _, point in ipairs(automationPoints) do
+      if point[1] >= from and point[1] <= to then out[#out + 1] = { point[1], point[2] } end
+    end
+    return out
+  end,
+  get = function(_, b)
+    for _, point in ipairs(automationPoints) do
+      if point[1] == b then return point[2] end
+    end
+    return 0
+  end,
+  add = function(_, b, v)
+    for _, point in ipairs(automationPoints) do
+      if point[1] == b then point[2] = v; return true end
+    end
+    automationPoints[#automationPoints + 1] = { b, v }
+    table.sort(automationPoints, function(a, c) return a[1] < c[1] end)
+    return true
+  end,
+  remove = function(_, from, to)
+    local kept, removed = {}, false
+    for _, point in ipairs(automationPoints) do
+      if point[1] < from or point[1] > to then kept[#kept + 1] = point else removed = true end
+    end
+    automationPoints = kept
+    return removed
+  end,
+  simplify = function() return false end,
+})
 local group = makeObject({
   getName = function() return "Pipe Group" end,
   getUUID = function() return "pipe-group-1" end,
   getNumNotes = function() return #notes end,
   getNote = function(_, index) return notes[index] end,
+  getParameter = function(_, parameterType)
+    if string.lower(parameterType) == "loudness" then return automation end
+    return nil
+  end,
 })
 local groupReference = makeObject({
   getIndexInParent = function() return 1 end,

@@ -22,6 +22,7 @@ import { HostSession } from "./host-session.js";
 import { LyricsService } from "./lyrics.js";
 import { RangeSnapshotService } from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
+import { ParameterCurveService } from "./parameter-curve.js";
 import { ProcessingService } from "./processing.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
@@ -35,6 +36,7 @@ const processingService = new ProcessingService(hostSession, snapshotService);
 const lyricsService = new LyricsService(hostSession, snapshotService);
 const notePatchService = new NotePatchService(hostSession, snapshotService);
 const rangeSnapshotService = new RangeSnapshotService(hostSession);
+const parameterCurveService = new ParameterCurveService(hostSession);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -493,6 +495,94 @@ const TOOLS = [
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
+  {
+    name: "sv_get_parameter_curve",
+    description:
+      "Read one Automation parameter curve (pitchDelta, loudness, tension, breathiness, voicing, gender, vibratoEnv, toneShift, vocalMode_<Name>, ...) of a note group. Automation lives in group-local blicks; every point is reported with both localBlick and absoluteBlick, together with the official definition (range, default) and interpolation method (read-only; there is no interpolation setter in the official API).",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            trackIndex: { type: "integer", minimum: 0 },
+            groupIndex: { type: "integer", minimum: 0 },
+          },
+          required: ["trackIndex", "groupIndex"],
+        },
+        parameter: { type: "string", minLength: 1 },
+        range: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            fromBlick: { type: "integer" },
+            toBlick: { type: "integer" },
+            coordinate: { enum: ["local", "absolute"], default: "local" },
+          },
+          required: ["fromBlick", "toBlick"],
+        },
+        maxPoints: { type: "integer", minimum: 1, maximum: 2000 },
+      },
+      required: ["target", "parameter"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_patch_parameter_curve",
+    description:
+      "Edit one Automation parameter curve inside a blick range. replace removes the range and writes explicit points; add/scale shift or scale the existing CONTROL POINTS in the range (not a continuous resampled curve), clamped to the official definition range. Optional simplify after writing. Writes sit inside undo boundaries with journaled previous points; atomic:true restores them on failure (verified compensation, not ACID). Read-back verification is exact without simplify, tolerance-sampled with it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            trackIndex: { type: "integer", minimum: 0 },
+            groupIndex: { type: "integer", minimum: 0 },
+          },
+          required: ["trackIndex", "groupIndex"],
+        },
+        parameter: { type: "string", minLength: 1 },
+        mode: { enum: ["replace", "add", "scale"] },
+        range: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            fromBlick: { type: "integer" },
+            toBlick: { type: "integer" },
+            coordinate: { enum: ["local", "absolute"], default: "local" },
+          },
+          required: ["fromBlick", "toBlick"],
+        },
+        points: {
+          type: "array",
+          maxItems: 2000,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              blick: { type: "integer" },
+              value: { type: "number" },
+            },
+            required: ["blick", "value"],
+          },
+          description: "replace mode only; blick uses range.coordinate.",
+        },
+        amount: { type: "number", description: "add/scale mode only." },
+        simplifyThreshold: { type: "number", minimum: 0 },
+        dryRun: { type: "boolean", default: false },
+        atomic: { type: "boolean", default: true },
+      },
+      required: ["target", "parameter", "mode", "range"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
 ];
 
 const server = new Server(
@@ -596,6 +686,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_snapshot_range":
         result = await rangeSnapshotService.snapshot(args);
         break;
+      case "sv_get_parameter_curve":
+        result = await parameterCurveService.getCurve(args);
+        break;
+      case "sv_patch_parameter_curve":
+        result = await parameterCurveService.patchCurve(args);
+        break;
       default:
         return toolError("UNKNOWN_TOOL", name);
     }
@@ -691,7 +787,7 @@ function capabilities() {
     interfaces: {
       raw: ["sv_root", "sv_call", "sv_index", "sv_free"],
       workflow: ["sv_snapshot", "sv_snapshot_range", "sv_run", "sv_wait_for_processing"],
-      music: ["sv_set_lyrics", "sv_patch_notes"],
+      music: ["sv_set_lyrics", "sv_patch_notes", "sv_get_parameter_curve", "sv_patch_parameter_curve"],
       typedResultFormat: "typed-v2",
     },
     knownLimits: {
