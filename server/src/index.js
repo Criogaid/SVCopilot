@@ -44,13 +44,10 @@ const ROOT_HANDLE_TYPES = Object.freeze({
 });
 let hostVersion = null;
 
-// The API manifest is a point-in-time mirror of the official docs, so treat
-// pre-validation as advisory. Only argument-shape problems are fatal (feeding a
-// real native method mismatched args can misbehave). Method-existence, version
-// gating, and unknown target types are deferred to the host: it is authoritative
-// and already rejects unknown/old methods cleanly, so blocking here would only
-// turn manifest staleness (e.g. a newer SynthV build, or a parse gap) into false
-// failures on valid calls.
+// API manifest 只是官方文档某一时刻的镜像,所以预检只作顾问用途。只有参数形状问题
+// 才致命(给真实原生方法喂不匹配的参数可能出错)。方法是否存在、版本门、未知目标类型
+// 一律交给宿主:宿主是权威,且对未知/旧方法本就干净拒绝,在这里硬拦只会把 manifest
+// 陈旧(如更新的 SynthV 构建,或解析缝隙)变成对有效调用的误杀。
 const FATAL_VALIDATION_CODES = new Set(["INVALID_ARGUMENTS", "ARGUMENT_MISMATCH"]);
 
 const TOOLS = [

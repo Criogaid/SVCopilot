@@ -5,11 +5,10 @@ import { fileURLToPath } from "node:url";
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const manifestPath = path.resolve(sourceDir, "..", "..", "api-docs", "api-manifest.json");
 
-// The manifest is a generated artifact (`npm run parse:sv-api`). If it is missing,
-// unreadable, invalid JSON, or structurally wrong (e.g. `null`, `{}`, or `classes`
-// not an object), degrade gracefully instead of crashing the server at import:
-// search/describe/resources report unavailable and call pre-validation is skipped,
-// but the dispatcher (sv_ping/sv_call/sv_root/...) keeps working.
+// manifest 是生成产物(`npm run parse:sv-api`)。当它缺失、读不出、不是合法 JSON,
+// 或结构不对(如 `null`、`{}`、`classes` 不是对象)时,优雅降级而不是在 import 期崩掉:
+// search/describe/资源报告不可用、调用预检跳过,但 dispatcher(sv_ping/sv_call/sv_root/…)
+// 照常工作。
 function unavailableStub() {
   return Object.freeze({
     schemaVersion: 0,
@@ -33,8 +32,7 @@ function isPlausibleManifest(value) {
   );
 }
 
-// Exported for tests: turn parsed JSON into a usable manifest, or the stub if the
-// shape is not a valid API catalog.
+// 导出供测试:把解析后的 JSON 转成可用的 manifest;结构不是合法 API 目录时返回 stub。
 export function normalizeManifest(parsed) {
   return isPlausibleManifest(parsed) ? Object.freeze(parsed) : unavailableStub();
 }
@@ -63,8 +61,8 @@ function loadManifest() {
 
 export const apiManifest = loadManifest();
 
-// True when the manifest actually loaded; false for the degradation stub. Lets
-// callers distinguish "not in the API" from "manifest not available".
+// manifest 真正加载成功时为 true;降级 stub 时为 false。让调用方区分
+// “API 里没有”和“manifest 不可用”。
 export const apiManifestAvailable = apiManifest.available !== false;
 
 export function getApiClass(className) {

@@ -124,9 +124,8 @@ try {
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );
   assert.equal(note.__type__, "Note");
-  // getDetune is version-gated in the manifest. Pre-validation now DEFERS version
-  // and method-existence to the authoritative host, so the call is forwarded; the
-  // harness Note has no getDetune, so we get the host's own "no such method".
+  // getDetune 在 manifest 里有版本门。预检现在把版本和方法存在性都交给权威宿主,
+  // 于是调用被转发;harness 的 Note 没有 getDetune,所以拿到的是宿主自己的 "no such method"。
   const versionDeferred = await client.callTool({
     name: "sv_call",
     arguments: { handle: note.__handle__, method: "getDetune", args: [] },
@@ -155,8 +154,8 @@ try {
   );
   console.log("[client] SV.QUARTER ->", quarter);
 
-  // setLyrics is not a Project method (absent from the Project manifest entry).
-  // Pre-validation defers to the host, which forwards and reports "no such method".
+  // setLyrics 不是 Project 的方法(不在 Project 的 manifest 条目里)。预检交给宿主,
+  // 转发后由宿主报告 "no such method"。
   const methodDeferred = await client.callTool({
     name: "sv_call",
     arguments: { handle: projectHandle, method: "setLyrics", args: ["la"] },
