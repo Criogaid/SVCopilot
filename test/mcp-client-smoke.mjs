@@ -124,12 +124,15 @@ try {
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );
   assert.equal(note.__type__, "Note");
-  const unsupportedVersion = await client.callTool({
+  // getDetune is version-gated in the manifest. Pre-validation now DEFERS version
+  // and method-existence to the authoritative host, so the call is forwarded; the
+  // harness Note has no getDetune, so we get the host's own "no such method".
+  const versionDeferred = await client.callTool({
     name: "sv_call",
     arguments: { handle: note.__handle__, method: "getDetune", args: [] },
   });
-  assert.equal(unsupportedVersion.isError, true);
-  assert.match(unsupportedVersion.content?.[0]?.text ?? "", /VERSION_UNSUPPORTED/);
+  assert.equal(versionDeferred.isError, true);
+  assert.match(versionDeferred.content?.[0]?.text ?? "", /no such method/);
 
   const fileName = parseToolResult(
     await client.callTool({
@@ -152,12 +155,14 @@ try {
   );
   console.log("[client] SV.QUARTER ->", quarter);
 
-  const invalidMethod = await client.callTool({
+  // setLyrics is not a Project method (absent from the Project manifest entry).
+  // Pre-validation defers to the host, which forwards and reports "no such method".
+  const methodDeferred = await client.callTool({
     name: "sv_call",
     arguments: { handle: projectHandle, method: "setLyrics", args: ["la"] },
   });
-  assert.equal(invalidMethod.isError, true);
-  assert.match(invalidMethod.content?.[0]?.text ?? "", /UNKNOWN_METHOD/);
+  assert.equal(methodDeferred.isError, true);
+  assert.match(methodDeferred.content?.[0]?.text ?? "", /no such method/);
 
   assert.equal(ping, "pong");
   assert.equal(fileName, "PipeProject");

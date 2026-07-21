@@ -31,6 +31,10 @@ function loadManifest() {
 
 export const apiManifest = loadManifest();
 
+// True when the manifest actually loaded; false for the degradation stub. Lets
+// callers distinguish "not in the API" from "manifest not available".
+export const apiManifestAvailable = apiManifest.available !== false;
+
 export function getApiClass(className) {
   if (typeof className !== "string") return null;
   return apiManifest.classes[className] ?? null;

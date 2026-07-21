@@ -23,6 +23,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   apiManifest,
+  apiManifestAvailable,
   describeApi,
   getApiClass,
   inferReturnedHandleType,
@@ -242,9 +243,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await bridge.call({ op: "ping" });
         break;
       case "sv_search_api":
+        if (!apiManifestAvailable) return manifestUnavailableError();
         result = searchApi(args.query, { limit: args.limit });
         break;
       case "sv_describe": {
+        if (!apiManifestAvailable) return manifestUnavailableError();
         if (!getApiClass(args.class)) return toolError(`UNKNOWN_CLASS: ${String(args.class)}.`);
         result = describeApi(args.class, args.method);
         if (!result) return toolError(`UNKNOWN_METHOD: ${args.class}.${String(args.method)}.`);
@@ -273,6 +276,12 @@ function toolError(message) {
   };
 }
 
+function manifestUnavailableError() {
+  return toolError(
+    "API_MANIFEST_UNAVAILABLE: the parsed SV API manifest is not loaded; run 'npm run parse:sv-api'."
+  );
+}
+
 function readApiResource(uri) {
   let parsed;
   try {
@@ -286,6 +295,9 @@ function readApiResource(uri) {
     return apiManifest;
   }
   if (parsed.hostname === "class") {
+    if (!apiManifestAvailable) {
+      throw new Error("API_MANIFEST_UNAVAILABLE: run 'npm run parse:sv-api'.");
+    }
     const className = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
     if (!className || className.includes("/")) throw new Error(`Invalid API class resource: ${uri}`);
     const apiClass = getApiClass(className);
