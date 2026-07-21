@@ -93,6 +93,7 @@ MCP 客户端配置示例：
 | `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
 | `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚 |
 | `sv_snapshot_range` | 按 1-based bar/beat 范围跨轨读取：blick/音乐坐标双份、逐音符休止与相邻歌词、tempo/meter map、mixer，以及内容 hash `snapshotToken`（`sinceToken` 相同时返回 `no_change`） |
+| `sv_restructure_notes` | 结构操作：insert / delete（clone 备份）/ split（延音第二半）/ merge（连续音符），按调用顺序执行、活动 index 解析、Undo 边界与已验证补偿回滚 |
 | `sv_get_parameter_curve` | 读取 group 参数曲线：官方 definition、插值方式、local/absolute 双坐标控制点与统计 |
 | `sv_patch_parameter_curve` | 范围内 replace/add/scale 参数控制点：definition range 校验与 clamp、可选 simplify、Undo 边界、读回验证（精确或容差采样）和已验证补偿回滚 |
 

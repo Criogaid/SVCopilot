@@ -22,6 +22,7 @@ import { HostSession } from "./host-session.js";
 import { LyricsService } from "./lyrics.js";
 import { RangeSnapshotService } from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
+import { NoteStructureService } from "./note-structure.js";
 import { ParameterCurveService } from "./parameter-curve.js";
 import { ProcessingService } from "./processing.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
@@ -37,6 +38,7 @@ const lyricsService = new LyricsService(hostSession, snapshotService);
 const notePatchService = new NotePatchService(hostSession, snapshotService);
 const rangeSnapshotService = new RangeSnapshotService(hostSession);
 const parameterCurveService = new ParameterCurveService(hostSession);
+const noteStructureService = new NoteStructureService(hostSession, snapshotService);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -583,6 +585,71 @@ const TOOLS = [
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
+  {
+    name: "sv_restructure_notes",
+    description:
+      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: { type: "string", minLength: 1 },
+        operations: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              op: { enum: ["insert", "delete", "split", "merge"] },
+              note: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  onsetBlick: { type: "integer", minimum: 0 },
+                  durationBlick: { type: "integer", minimum: 1 },
+                  pitch: { type: "integer", minimum: 0, maximum: 127 },
+                  lyrics: { type: "string" },
+                  phonemesOverride: { type: "string" },
+                  languageOverride: { type: "string" },
+                },
+                required: ["onsetBlick", "durationBlick", "pitch"],
+                description: "insert only. onsetBlick is group-local.",
+              },
+              noteId: { type: "string", description: "delete/split: note id from the same context." },
+              expected: {
+                type: "object",
+                description: "delete only: fingerprint preconditions checked before any write.",
+              },
+              atBlick: {
+                type: "integer",
+                minimum: 1,
+                description: "split only: group-local position strictly inside the note.",
+              },
+              secondLyrics: { type: "string", description: 'split only; defaults to "-".' },
+              noteIds: {
+                type: "array",
+                minItems: 2,
+                items: { type: "string" },
+                description: "merge only: consecutive notes in group order.",
+              },
+              lyricsJoin: { enum: ["first", "concat"], description: "merge only; default first." },
+            },
+            required: ["op"],
+          },
+        },
+        dryRun: { type: "boolean", default: false },
+        atomic: { type: "boolean", default: true },
+        waitFor: { enum: ["none", "phonemes", "computedAttributes"] },
+        timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+        pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
+      },
+      required: ["contextId", "operations"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
 ];
 
 const server = new Server(
@@ -692,6 +759,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_patch_parameter_curve":
         result = await parameterCurveService.patchCurve(args);
         break;
+      case "sv_restructure_notes":
+        result = await noteStructureService.restructureNotes(args);
+        break;
       default:
         return toolError("UNKNOWN_TOOL", name);
     }
@@ -787,7 +857,13 @@ function capabilities() {
     interfaces: {
       raw: ["sv_root", "sv_call", "sv_index", "sv_free"],
       workflow: ["sv_snapshot", "sv_snapshot_range", "sv_run", "sv_wait_for_processing"],
-      music: ["sv_set_lyrics", "sv_patch_notes", "sv_get_parameter_curve", "sv_patch_parameter_curve"],
+      music: [
+        "sv_set_lyrics",
+        "sv_patch_notes",
+        "sv_restructure_notes",
+        "sv_get_parameter_curve",
+        "sv_patch_parameter_curve",
+      ],
       typedResultFormat: "typed-v2",
     },
     knownLimits: {

@@ -440,15 +440,113 @@ try {
   );
   assert.equal(curveOutOfRange.error.code, "VALUE_OUT_OF_RANGE");
 
+  // 结构操作：split → merge 回原状，insert → delete 往返，全部走真实 pipe。
+  const structureSnapshot = parseToolResult(
+    await client.callTool({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
+  );
+  const splitResult = parseToolResult(
+    await client.callTool({
+      name: "sv_restructure_notes",
+      arguments: {
+        contextId: structureSnapshot.contextId,
+        waitFor: "none",
+        operations: [
+          { op: "split", noteId: structureSnapshot.data.notes[0].id, atBlick: 352800 },
+        ],
+      },
+    })
+  );
+  assert.equal(splitResult.ok, true);
+  assert.equal(splitResult.status, "succeeded");
+  assert.equal(splitResult.data.finalNoteCount, 3);
+  assert.equal(splitResult.atomicity, "verified_compensation");
+
+  const afterSplit = parseToolResult(
+    await client.callTool({
+      name: "sv_snapshot",
+      arguments: { scope: { kind: "selection" }, include: ["notes"] },
+    })
+  );
+  assert.deepEqual(
+    afterSplit.data.notes.map((note) => note.lyrics),
+    ["ら", "-", "よ"]
+  );
+
+  const mergeResult = parseToolResult(
+    await client.callTool({
+      name: "sv_restructure_notes",
+      arguments: {
+        contextId: afterSplit.contextId,
+        waitFor: "none",
+        operations: [
+          {
+            op: "merge",
+            noteIds: [afterSplit.data.notes[0].id, afterSplit.data.notes[1].id],
+            lyricsJoin: "first",
+          },
+        ],
+      },
+    })
+  );
+  assert.equal(mergeResult.ok, true);
+  assert.equal(mergeResult.data.finalNoteCount, 2);
+
+  const insertSnapshot = parseToolResult(
+    await client.callTool({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
+  );
+  assert.deepEqual(
+    insertSnapshot.data.notes.map((note) => [note.lyrics, note.durationBlick]),
+    [
+      ["ら", 705600],
+      ["よ", 705600],
+    ]
+  );
+  const insertResult = parseToolResult(
+    await client.callTool({
+      name: "sv_restructure_notes",
+      arguments: {
+        contextId: insertSnapshot.contextId,
+        waitFor: "none",
+        operations: [
+          { op: "insert", note: { onsetBlick: 1411200, durationBlick: 705600, pitch: 64, lyrics: "ん" } },
+        ],
+      },
+    })
+  );
+  assert.equal(insertResult.ok, true);
+  assert.equal(insertResult.data.appliedOperations[0].indexInGroup, 2);
+
+  const deleteSnapshot = parseToolResult(
+    await client.callTool({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
+  );
+  const deleteResult = parseToolResult(
+    await client.callTool({
+      name: "sv_restructure_notes",
+      arguments: {
+        contextId: deleteSnapshot.contextId,
+        waitFor: "none",
+        operations: [
+          {
+            op: "delete",
+            noteId: deleteSnapshot.data.notes[2].id,
+            expected: { lyrics: "ん" },
+          },
+        ],
+      },
+    })
+  );
+  assert.equal(deleteResult.ok, true);
+  assert.equal(deleteResult.data.finalNoteCount, 2);
+
   const note = parseToolResult(
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );
   assert.equal(note.__type__, "Note");
-  // getDetune 在 manifest 里有版本门。预检现在把版本和方法存在性都交给权威宿主,
-  // 于是调用被转发;harness 的 Note 没有 getDetune,所以拿到的是宿主自己的 "no such method"。
+  // 预检把版本和方法存在性都交给权威宿主，调用被转发；harness 的 Note 没有实现
+  // getRapAccent，所以拿到的是宿主自己的 "no such method"。
   const versionDeferred = await client.callTool({
     name: "sv_call",
-    arguments: { handle: note.__handle__, method: "getDetune", args: [] },
+    arguments: { handle: note.__handle__, method: "getRapAccent", args: [] },
   });
   assert.equal(versionDeferred.isError, true);
   assert.match(versionDeferred.content?.[0]?.text ?? "", /no such method/);

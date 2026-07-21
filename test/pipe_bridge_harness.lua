@@ -9,14 +9,26 @@ local function makeObject(methods)
   return methods
 end
 
-local noteState = {
-  { onset = 0, duration = 705600, pitch = 60, lyrics = "a", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
-  { onset = 705600, duration = 705600, pitch = 62, lyrics = "i", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
-}
+-- notes 是可变模型：makeNote 创建独立 state，group 里的顺序按 onset 保持排序。
 local notes = {}
-for index, state in ipairs(noteState) do
-  notes[index] = makeObject({
-    getIndexInParent = function() return index end,
+
+local function noteIndexOf(noteObject)
+  for index, candidate in ipairs(notes) do
+    if candidate == noteObject then return index end
+  end
+  return nil
+end
+
+local function sortNotes()
+  table.sort(notes, function(a, c) return a.__state__.onset < c.__state__.onset end)
+end
+
+local makeNote
+makeNote = function(state)
+  local note
+  note = makeObject({
+    getType = function() return "Note" end,
+    getIndexInParent = function() return noteIndexOf(note) end,
     getOnset = function() return state.onset end,
     getDuration = function() return state.duration end,
     getPitch = function() return state.pitch end,
@@ -29,17 +41,40 @@ for index, state in ipairs(noteState) do
       for key, value in pairs(state.attributes) do copy[key] = value end
       return copy
     end,
+    clone = function()
+      local attributes = {}
+      for key, value in pairs(state.attributes) do attributes[key] = value end
+      return makeNote({
+        onset = state.onset, duration = state.duration, pitch = state.pitch,
+        lyrics = state.lyrics, phonemes = state.phonemes, language = state.language,
+        detune = state.detune, attributes = attributes,
+      })
+    end,
     setLyrics = function(_, value) state.lyrics = value end,
     setPhonemes = function(_, value) state.phonemes = value end,
     setLanguageOverride = function(_, value) state.language = value end,
     setPitch = function(_, value) state.pitch = value end,
-    setOnset = function(_, value) state.onset = value end,
+    setOnset = function(_, value) state.onset = value; sortNotes() end,
     setDuration = function(_, value) state.duration = value end,
     setDetune = function(_, value) state.detune = value end,
     setAttributes = function(_, value)
       for key, item in pairs(value) do state.attributes[key] = item end
     end,
+    setTimeRange = function(_, onset, duration)
+      state.onset = onset
+      state.duration = duration
+      sortNotes()
+    end,
   })
+  note.__state__ = state
+  return note
+end
+
+for _, state in ipairs({
+  { onset = 0, duration = 705600, pitch = 60, lyrics = "a", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
+  { onset = 705600, duration = 705600, pitch = 62, lyrics = "i", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
+}) do
+  notes[#notes + 1] = makeNote(state)
 end
 
 local automationPoints = { { 0, 0.0 }, { 705600, 0.5 } }
@@ -90,6 +125,15 @@ local group = makeObject({
   getUUID = function() return "pipe-group-1" end,
   getNumNotes = function() return #notes end,
   getNote = function(_, index) return notes[index] end,
+  addNote = function(_, note)
+    notes[#notes + 1] = note
+    table.sort(notes, function(a, c) return a.__state__.onset < c.__state__.onset end)
+    for index, candidate in ipairs(notes) do
+      if candidate == note then return index end
+    end
+    return #notes
+  end,
+  removeNote = function(_, index) table.remove(notes, index) end,
   getParameter = function(_, parameterType)
     if string.lower(parameterType) == "loudness" then return automation end
     return nil
@@ -158,18 +202,24 @@ SV = {
   getArrangement = function() return makeObject({}) end,
   getPlayback = function() return makeObject({}) end,
   create = function(_, objectType)
+    if objectType == "Note" then
+      return makeNote({ onset = 0, duration = 705600, pitch = 60, lyrics = "la", phonemes = "", language = "", detune = 0, attributes = {} })
+    end
     return makeObject({ getType = function() return objectType end })
   end,
   boxSet = function(_, value) boxContent = value end,
   boxGet = function() return boxContent end,
   getPhonemesForGroup = function()
     local values = {}
-    for index, state in ipairs(noteState) do values[index] = state.lyrics .. "-phoneme" end
+    for index, note in ipairs(notes) do
+      local lyrics = note.__state__.lyrics
+      if lyrics ~= "" and lyrics ~= "-" then values[index] = lyrics .. "-phoneme" else values[index] = "" end
+    end
     return values
   end,
   getComputedAttributesForGroup = function()
     local values = {}
-    for index, state in ipairs(noteState) do values[index] = { phonemes = { state.lyrics } } end
+    for index, note in ipairs(notes) do values[index] = { phonemes = { note.__state__.lyrics } } end
     return values
   end,
 }
