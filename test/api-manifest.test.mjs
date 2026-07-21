@@ -25,7 +25,7 @@ test("official API mirror parses into a typed class catalog (isolated output)", 
   const outputDir = mkdtempSync(path.join(os.tmpdir(), "sv-api-"));
   t.after(() => rmSync(outputDir, { recursive: true, force: true }));
 
-  // The committed artifacts must not be a side effect of running the parser.
+  // 运行解析器不应把仓库里已提交的产物作为副作用改动。
   const before = { manifest: snapshot(repoManifest), inventory: snapshot(repoInventory) };
 
   execFileSync(process.execPath, [parser, "--output-dir", outputDir], { cwd: rootDir, stdio: "inherit" });
@@ -44,4 +44,19 @@ test("official API mirror parses into a typed class catalog (isolated output)", 
   const after = { manifest: snapshot(repoManifest), inventory: snapshot(repoInventory) };
   assert.ok(unchanged(before.manifest, after.manifest), "parser must not touch the committed api-manifest.json");
   assert.ok(unchanged(before.inventory, after.inventory), "parser must not touch the committed api-inventory.json");
+});
+
+test("parser rejects --output-dir without a value instead of falling back to api-docs/", () => {
+  // 缺值/空值必须非零退出,且绝不触碰仓库里的正式产物。
+  const before = { manifest: snapshot(repoManifest), inventory: snapshot(repoInventory) };
+  for (const badArgs of [["--output-dir"], ["--output-dir="]]) {
+    assert.throws(
+      () => execFileSync(process.execPath, [parser, ...badArgs], { cwd: rootDir, stdio: "pipe" }),
+      (error) => error.status === 2,
+      `expected non-zero exit for: ${badArgs.join(" ") || "(empty)"}`
+    );
+  }
+  const after = { manifest: snapshot(repoManifest), inventory: snapshot(repoInventory) };
+  assert.ok(unchanged(before.manifest, after.manifest), "api-manifest.json must stay untouched");
+  assert.ok(unchanged(before.inventory, after.inventory), "api-inventory.json must stay untouched");
 });

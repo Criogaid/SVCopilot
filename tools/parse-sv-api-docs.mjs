@@ -262,17 +262,36 @@ export async function buildApiManifest({ outputDir = apiDocsDir } = {}) {
   return manifest;
 }
 
+// 解析 --output-dir。缺值或空值必须报错,绝不能静默退回默认的 api-docs/ 而污染正式产物。
 function parseCliOutputDir(argv) {
   for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] === "--output-dir") return argv[index + 1];
-    if (argv[index].startsWith("--output-dir=")) return argv[index].slice("--output-dir=".length);
+    const arg = argv[index];
+    if (arg === "--output-dir") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error("--output-dir requires a directory value");
+      }
+      return value;
+    }
+    if (arg.startsWith("--output-dir=")) {
+      const value = arg.slice("--output-dir=".length);
+      if (value === "") throw new Error("--output-dir requires a non-empty directory value");
+      return value;
+    }
   }
   return undefined;
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const cliOutputDir = parseCliOutputDir(process.argv.slice(2));
+  let cliOutputDir;
+  try {
+    cliOutputDir = parseCliOutputDir(process.argv.slice(2));
+  } catch (error) {
+    // 属于 CLI 用法错误:非零退出,不落到正式产物目录。
+    console.error(`[sv-api] ${error.message}`);
+    process.exit(2);
+  }
   buildApiManifest(cliOutputDir ? { outputDir: path.resolve(cliOutputDir) } : {})
     .then((manifest) => {
       console.log(
