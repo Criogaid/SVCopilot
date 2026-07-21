@@ -10,8 +10,8 @@ local function makeObject(methods)
 end
 
 local noteState = {
-  { onset = 0, duration = 705600, pitch = 60, lyrics = "a", phonemes = "", language = "", detune = 0 },
-  { onset = 705600, duration = 705600, pitch = 62, lyrics = "i", phonemes = "", language = "", detune = 0 },
+  { onset = 0, duration = 705600, pitch = 60, lyrics = "a", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
+  { onset = 705600, duration = 705600, pitch = 62, lyrics = "i", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
 }
 local notes = {}
 for index, state in ipairs(noteState) do
@@ -24,9 +24,21 @@ for index, state in ipairs(noteState) do
     getPhonemes = function() return state.phonemes end,
     getLanguageOverride = function() return state.language end,
     getDetune = function() return state.detune end,
+    getAttributes = function()
+      local copy = {}
+      for key, value in pairs(state.attributes) do copy[key] = value end
+      return copy
+    end,
     setLyrics = function(_, value) state.lyrics = value end,
     setPhonemes = function(_, value) state.phonemes = value end,
     setLanguageOverride = function(_, value) state.language = value end,
+    setPitch = function(_, value) state.pitch = value end,
+    setOnset = function(_, value) state.onset = value end,
+    setDuration = function(_, value) state.duration = value end,
+    setDetune = function(_, value) state.detune = value end,
+    setAttributes = function(_, value)
+      for key, item in pairs(value) do state.attributes[key] = item end
+    end,
   })
 end
 

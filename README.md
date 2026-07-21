@@ -91,6 +91,7 @@ MCP 客户端配置示例：
 | `sv_run` | 在一个不可插队的执行单元中运行有序 call/index 步骤、局部引用、断言与句柄清理 |
 | `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高，超时返回最后一次观测而非伪造成功 |
 | `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
+| `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚 |
 
 MCP 资源还提供：
 
@@ -106,6 +107,7 @@ MCP 资源还提供：
 
 - `sv_snapshot` 返回稳定字段、0-based 索引、显式单位和分页信息；`contextId` 只保存定位信息与指纹，不持久保存 Lua handle。project 快照每页最多消耗 16 个 `traversalItems`：有音符的 vocal group 按音符消耗，空组、乐器组和空轨也各消耗一项。`page.count` 是遍历预算消耗，`page.returned` 分别给出本页实际返回的 tracks/groups/notes 数量。调用方必须沿 `page.nextCursor` 读取到 `data.snapshotComplete: true`。selection 的 processing 只统计选中音符；空选区返回 `expectedNotes: 0` 和 `state: "not_applicable"`。
 - `sv_set_lyrics` 在写入前重新定位目标并比较指纹，只写真正变化的字段；返回 `processedNotes`、`actuallyChangedNotes`，并在 verification evidence 中逐项给出请求过的歌词、音素和语言读回值。
+- `sv_patch_notes` 以 `sv_snapshot` 返回的 `data.notes[].id` 定位音符，支持 `expected` 逐字段前置条件与 `dryRun` 预演。`atomic:true`（默认）表示已验证补偿而非 ACID：失败时逆序恢复日志旧值并读回确认，status 区分 `rolled_back`、`rollback_failed`、`partial` 和 `outcome_unknown`。attributes 是部分写，只设置并验证请求过的 key。
 - `sv_run` 支持 `#/roots/...`、`#/inputs/...`、`#/steps/<id>/result` 局部引用，最多 128 步，失败即停。只读断言步骤可用 `verifiesStep` 关联前面的 mutation，关联成功后不会产生 `UNVERIFIED_WRITE`。
 - 每次 bridge 重连都会增加 epoch。带旧 `__epoch__` 的 handle 会在 Node 侧被拒绝，不能跨重连复用。
 

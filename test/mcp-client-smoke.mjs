@@ -271,6 +271,88 @@ try {
   assert.equal(verifiedWrite.effects, "verified");
   assert.ok(!verifiedWrite.warnings.some((warning) => warning.code === "UNVERIFIED_WRITE"));
 
+  // sv_patch_notes 公开契约：dry-run 无副作用，真实写入带补偿语义与逐项读回。
+  const patchTool = listed.tools.find((tool) => tool.name === "sv_patch_notes");
+  assert.ok(patchTool, "sv_patch_notes must be listed");
+  assert.equal(patchTool.inputSchema.properties.atomic.default, true);
+  assert.equal(patchTool.inputSchema.properties.dryRun.default, false);
+  assert.ok(patchTool.inputSchema.properties.patches.items.properties.set.properties.detuneCents);
+
+  const patchSnapshot = parseToolResult(
+    await client.callTool({
+      name: "sv_snapshot",
+      arguments: { scope: { kind: "selection" } },
+    })
+  );
+  const patchTargetId = patchSnapshot.data.notes[0].id;
+  const patchArguments = {
+    contextId: patchSnapshot.contextId,
+    patches: [
+      {
+        noteId: patchTargetId,
+        expected: { lyrics: "さ" },
+        set: { lyrics: "ら", pitch: 61, detuneCents: -8 },
+      },
+    ],
+    waitFor: "phonemes",
+    timeoutMs: 1000,
+  };
+  const patchPlan = parseToolResult(
+    await client.callTool({
+      name: "sv_patch_notes",
+      arguments: { ...patchArguments, dryRun: true },
+    })
+  );
+  assert.equal(patchPlan.ok, true);
+  assert.equal(patchPlan.status, "dry_run");
+  assert.equal(patchPlan.effects, "none");
+  assert.equal(patchPlan.data.plannedDiff.length, 3);
+  assert.equal(patchPlan.data.plannedChangedNotes, 1);
+
+  const patchApplied = parseToolResult(
+    await client.callTool({ name: "sv_patch_notes", arguments: patchArguments })
+  );
+  assert.equal(patchApplied.ok, true);
+  assert.equal(patchApplied.status, "succeeded");
+  assert.equal(patchApplied.effects, "verified");
+  assert.equal(patchApplied.atomicity, "verified_compensation");
+  assert.equal(patchApplied.rollback.attempted, false);
+  assert.equal(patchApplied.data.actuallyChangedNotes, 1);
+  assert.equal(patchApplied.undo.boundaryCallsCompleted, 2);
+  assert.equal(patchApplied.verification.passed, true);
+  assert.equal(patchApplied.verification.evidence.observed[patchTargetId].lyrics, "ら");
+  assert.equal(patchApplied.verification.evidence.observed[patchTargetId].detuneCents, -8);
+  assert.equal(patchApplied.data.processing.state, "ready");
+
+  const patchedSnapshot = parseToolResult(
+    await client.callTool({
+      name: "sv_snapshot",
+      arguments: { scope: { kind: "selection" }, include: ["notes"] },
+    })
+  );
+  assert.deepEqual(
+    patchedSnapshot.data.notes.map((note) => [note.lyrics, note.pitch, note.detuneCents]),
+    [
+      ["ら", 61, -8],
+      ["よ", 62, 0],
+    ]
+  );
+
+  const patchConflict = parseToolError(
+    await client.callTool({
+      name: "sv_patch_notes",
+      arguments: {
+        contextId: patchedSnapshot.contextId,
+        patches: [
+          { noteId: patchedSnapshot.data.notes[0].id, expected: { lyrics: "さ" }, set: { lyrics: "x" } },
+        ],
+      },
+    })
+  );
+  assert.equal(patchConflict.ok, false);
+  assert.equal(patchConflict.error.code, "EXPECTED_MISMATCH");
+  assert.equal(patchConflict.effects, "none");
+
   const note = parseToolResult(
     await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );

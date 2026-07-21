@@ -20,6 +20,7 @@ import {
 } from "./api-catalog.js";
 import { HostSession } from "./host-session.js";
 import { LyricsService } from "./lyrics.js";
+import { NotePatchService } from "./note-patch.js";
 import { ProcessingService } from "./processing.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
@@ -31,6 +32,7 @@ const snapshotService = new SnapshotService(hostSession);
 const workflowExecutor = new WorkflowExecutor(hostSession);
 const processingService = new ProcessingService(hostSession, snapshotService);
 const lyricsService = new LyricsService(hostSession, snapshotService);
+const notePatchService = new NotePatchService(hostSession, snapshotService);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -340,6 +342,86 @@ const TOOLS = [
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
+  {
+    name: "sv_patch_notes",
+    description:
+      'Patch fields of existing notes identified by snapshot noteIds (from sv_snapshot data.notes[].id). Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: { type: "string", minLength: 1 },
+        patches: {
+          type: "array",
+          minItems: 1,
+          maxItems: 200,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              noteId: {
+                type: "string",
+                description: "Note id from the same snapshot context, e.g. ctx_...:n:4.",
+              },
+              expected: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  lyrics: { type: "string" },
+                  phonemesOverride: { type: "string" },
+                  languageOverride: { type: "string" },
+                  pitch: { type: "integer" },
+                  onsetBlick: { type: "integer" },
+                  durationBlick: { type: "integer" },
+                  detuneCents: { type: "integer" },
+                  attributes: { type: "object" },
+                },
+                description:
+                  "Optional per-field preconditions checked against the live note before any write.",
+              },
+              set: {
+                type: "object",
+                additionalProperties: false,
+                minProperties: 1,
+                properties: {
+                  lyrics: { type: "string" },
+                  phonemesOverride: { type: "string" },
+                  languageOverride: { type: "string" },
+                  pitch: { type: "integer", minimum: 0, maximum: 127 },
+                  onsetBlick: { type: "integer", minimum: 0 },
+                  durationBlick: { type: "integer", minimum: 1 },
+                  detuneCents: { type: "integer" },
+                  attributes: {
+                    type: "object",
+                    description:
+                      "Partial attribute write: only the provided keys are set and verified.",
+                  },
+                },
+              },
+            },
+            required: ["noteId", "set"],
+          },
+        },
+        dryRun: {
+          type: "boolean",
+          default: false,
+          description: "Validate and return plannedDiff without any host write.",
+        },
+        atomic: {
+          type: "boolean",
+          default: true,
+          description:
+            "On failure after writes began, restore journaled previous values in reverse order and verify the restoration (compensation, not a database transaction).",
+        },
+        waitFor: { enum: ["none", "phonemes", "computedAttributes"] },
+        timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+        pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
+      },
+      required: ["contextId", "patches"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
 ];
 
 const server = new Server(
@@ -437,6 +519,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_set_lyrics":
         result = await lyricsService.setLyrics(args);
         break;
+      case "sv_patch_notes":
+        result = await notePatchService.patchNotes(args);
+        break;
       default:
         return toolError("UNKNOWN_TOOL", name);
     }
@@ -532,7 +617,7 @@ function capabilities() {
     interfaces: {
       raw: ["sv_root", "sv_call", "sv_index", "sv_free"],
       workflow: ["sv_snapshot", "sv_run", "sv_wait_for_processing"],
-      music: ["sv_set_lyrics"],
+      music: ["sv_set_lyrics", "sv_patch_notes"],
       typedResultFormat: "typed-v2",
     },
     knownLimits: {
