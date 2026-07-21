@@ -1,0 +1,10 @@
+# dependencies
+node_modules/
+
+# logs / OS junk
+*.log
+.DS_Store
+Thumbs.db
+
+# transient IPC (file-IPC legacy; runtime scratch)
+*.tmp
