@@ -27,6 +27,10 @@ function createAuditionModel() {
     failures: [],
     ignoreSetSolo: false,
     ignoreSeek: false,
+    ignorePlaybackStart: false,
+    ignoreStop: false,
+    playStatus: "playing",
+    advancePlayheadOnReadSeconds: 0,
     epoch: 1,
   };
   model.host = {
@@ -66,22 +70,27 @@ function createAuditionModel() {
       }
       if (id === h.playback.__handle__) {
         model.playbackCalls.push([method, ...args]);
-        if (method === "getPlayhead") return model.playhead;
+        if (method === "getPlayhead") {
+          if (model.status !== "stopped") {
+            model.playhead += model.advancePlayheadOnReadSeconds;
+          }
+          return model.playhead;
+        }
         if (method === "getStatus") return model.status;
         if (method === "seek") {
           if (!model.ignoreSeek) model.playhead = args[0];
           return null;
         }
         if (method === "play") {
-          model.status = "playing";
+          if (!model.ignorePlaybackStart) model.status = model.playStatus;
           return null;
         }
         if (method === "loop") {
-          model.status = "looping";
+          if (!model.ignorePlaybackStart) model.status = "looping";
           return null;
         }
         if (method === "stop") {
-          model.status = "stopped";
+          if (!model.ignoreStop) model.status = "stopped";
           return null;
         }
       }
@@ -132,6 +141,38 @@ test("sv_get_audition reads live playback state", async () => {
   assert.equal(status.data.playbackStatus, "playing");
   assert.equal(status.data.playheadSeconds, 0);
   assert.equal(status.data.staleEpoch, false);
+});
+
+test("sv_start_audition stops existing playback before deterministic seek verification", async () => {
+  const model = createAuditionModel();
+  model.status = "playing";
+  model.advancePlayheadOnReadSeconds = 0.05;
+  const result = await createService(model).start({
+    fromBlick: 4 * Q,
+    toBlick: 8 * Q,
+    loop: false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.recovery.savedStatus, "playing");
+  assert.equal(result.data.playbackStatus, "playing");
+  const stopIndex = model.playbackCalls.findIndex(([method]) => method === "stop");
+  const seekIndex = model.playbackCalls.findIndex(([method]) => method === "seek");
+  assert.ok(stopIndex >= 0 && stopIndex < seekIndex);
+});
+
+test("sv_start_audition accepts looping status from play when the host loop region is active", async () => {
+  const model = createAuditionModel();
+  model.playStatus = "looping";
+  const result = await createService(model).start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    loop: false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.playbackStatus, "looping");
+  assert.ok(result.warnings.some((warning) => warning.code === "HOST_LOOP_REGION_ACTIVE"));
 });
 
 test("sv_stop_audition restores only fields the user did not change", async () => {
@@ -228,6 +269,9 @@ test("sv_start_audition compensates mixer and playhead when startup fails mid-wa
   assert.deepEqual(model.solo, [false, true, false]);
   assert.equal(model.playhead, 12.5);
   assert.ok(result.data.recovery.mixerChanges.length > 0);
+  const soloEntry = result.data.restoration.find((entry) => entry.field === "solo");
+  assert.equal(soloEntry.expected, false);
+  assert.equal(result.data.recovery.savedStatus, "stopped");
   const next = await service.start({ fromBlick: 0, toBlick: Q, loop: false });
   assert.equal(next.ok, true);
 });
@@ -320,6 +364,70 @@ test("sv_start_audition compensation verifies the playhead read-back", async () 
   assert.equal(result.data.rollback.verified, false);
   const playheadEntry = result.data.restoration.find((entry) => entry.field === "playhead");
   assert.equal(playheadEntry.restored, false);
+});
+
+test("sv_start_audition rejects silently ignored startup mutations", async () => {
+  const cases = [
+    {
+      configure(model) {
+        model.ignoreSetSolo = true;
+      },
+      request: { fromBlick: 0, toBlick: Q, soloTrackIndices: [0], loop: false },
+    },
+    {
+      configure(model) {
+        model.ignoreSeek = true;
+      },
+      request: { fromBlick: 4 * Q, toBlick: 8 * Q, loop: false },
+    },
+    {
+      configure(model) {
+        model.ignorePlaybackStart = true;
+      },
+      request: { fromBlick: 0, toBlick: Q, loop: true },
+    },
+  ];
+
+  for (const item of cases) {
+    const model = createAuditionModel();
+    item.configure(model);
+    const result = await createService(model).start(item.request);
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "POSTCONDITION_FAILED");
+    assert.equal(result.status, "rolled_back");
+    assert.equal(result.effects, "reverted");
+  }
+});
+
+test("sv_stop_audition reports restore_failed when playback does not stop", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({ fromBlick: 0, toBlick: Q, loop: false });
+  model.ignoreStop = true;
+
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(stopped.status, "restore_failed");
+  assert.equal(stopped.effects, "may_remain");
+  assert.equal(stopped.data.playbackStatus, "playing");
+  assert.equal(stopped.data.playbackStopped, false);
+  assert.ok(stopped.warnings.some((warning) => warning.code === "RESTORE_INCOMPLETE"));
+});
+
+test("sv_start_audition compensation verifies playback stopped", async () => {
+  const model = createAuditionModel();
+  model.ignoreStop = true;
+  // 第一次 getStatus 保存旧状态，第二次在播放开始后失败并触发补偿。
+  model.failures.push({ method: "getStatus", remainingSkips: 1, code: "ARGUMENT_MISMATCH" });
+  const result = await createService(model).start({
+    fromBlick: 0,
+    toBlick: Q,
+    loop: true,
+  });
+
+  assert.equal(result.status, "rollback_failed");
+  const playbackEntry = result.data.restoration.find((entry) => entry.field === "playback");
+  assert.equal(playbackEntry.restored, false);
+  assert.equal(playbackEntry.observed, "looping");
 });
 
 test("sv_stop_audition refuses cross-epoch restores and returns the recovery payload", async () => {

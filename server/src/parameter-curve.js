@@ -466,66 +466,45 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
       evidence: { observedPointCount: observed.length, plannedPointCount: planned.length },
     };
   }
-  // planned 为空时（replace [] = 清空范围），simplify 后范围内必须没有任何残留点。
-  if (planned.length === 0) {
-    return {
-      attempted: true,
-      passed: observed.length === 0,
-      mode: "tolerance_sampled",
-      evidence: {
-        observedPointCount: observed.length,
-        plannedPointCount: 0,
-        maxDeviation: 0,
-        maxResidualDeviation: observed.length === 0 ? 0 : Infinity,
-        tolerance: simplifyThreshold,
-      },
-    };
-  }
   // simplify 合法地移除控制点；验证退化为按计划点位置采样，偏差以 threshold 为界。
-  // 同时检查残留控制点都落在计划曲线的容差内，防止范围内出现计划外的值。
+  // 官方契约保证 simplify 只删除点，因此读回点必须是计划点的子集；这也避免自行模拟
+  // Linear/Cosine/Cubic 插值而产生错误的“已验证”结论。
   let maxDeviation = 0;
   for (const point of planned) {
     const value = await capture.call(automation, "get", [point.blick]);
     maxDeviation = Math.max(maxDeviation, Math.abs(value - point.value));
   }
-  let maxResidualDeviation = 0;
+  const plannedByBlick = new Map(planned.map((point) => [point.blick, point]));
+  let maxObservedPointDeviation = 0;
+  let unexpectedObservedPointCount = 0;
   for (const point of observed) {
-    const expected = interpolateLinear(planned, point.blick);
-    // planned 非空时插值总有定义（端点外取端点值）；这里的 null 只防御性处理。
-    if (expected === null) {
-      maxResidualDeviation = Infinity;
+    const expected = plannedByBlick.get(point.blick);
+    if (!expected) {
+      unexpectedObservedPointCount += 1;
       continue;
     }
-    maxResidualDeviation = Math.max(maxResidualDeviation, Math.abs(point.value - expected));
+    maxObservedPointDeviation = Math.max(
+      maxObservedPointDeviation,
+      Math.abs(point.value - expected.value)
+    );
   }
   const tolerance = simplifyThreshold + VALUE_EPSILON;
   return {
     attempted: true,
-    passed: maxDeviation <= tolerance && maxResidualDeviation <= tolerance,
+    passed:
+      maxDeviation <= tolerance &&
+      maxObservedPointDeviation <= VALUE_EPSILON &&
+      unexpectedObservedPointCount === 0,
     mode: "tolerance_sampled",
     evidence: {
       observedPointCount: observed.length,
       plannedPointCount: planned.length,
       maxDeviation,
-      maxResidualDeviation,
+      maxObservedPointDeviation,
+      unexpectedObservedPointCount,
       tolerance: simplifyThreshold,
     },
   };
-}
-
-function interpolateLinear(points, blick) {
-  if (points.length === 0) return null;
-  if (blick <= points[0].blick) return points[0].value;
-  const last = points[points.length - 1];
-  if (blick >= last.blick) return last.value;
-  for (let index = 1; index < points.length; index += 1) {
-    const a = points[index - 1];
-    const b = points[index];
-    if (blick >= a.blick && blick <= b.blick) {
-      return a.value + ((b.value - a.value) * (blick - a.blick)) / (b.blick - a.blick);
-    }
-  }
-  return null;
 }
 
 async function rollbackCurve(capture, automation, range, journal) {

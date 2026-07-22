@@ -65,6 +65,8 @@ export class NotePatchService {
             data: {
               processedNotes: targets.length,
               plannedChangedNotes: 0,
+              attemptedChangedNotes: 0,
+              remainingChangedNotes: 0,
               actuallyChangedNotes: 0,
               mismatches: expectedMismatches,
             },
@@ -91,6 +93,8 @@ export class NotePatchService {
             data: {
               processedNotes: targets.length,
               plannedChangedNotes,
+              attemptedChangedNotes: 0,
+              remainingChangedNotes: 0,
               actuallyChangedNotes: 0,
               plannedDiff,
               appliedDiff: [],
@@ -113,6 +117,8 @@ export class NotePatchService {
             data: {
               processedNotes: targets.length,
               plannedChangedNotes: 0,
+              attemptedChangedNotes: 0,
+              remainingChangedNotes: 0,
               actuallyChangedNotes: 0,
               plannedDiff: [],
               appliedDiff: [],
@@ -291,6 +297,12 @@ export class NotePatchService {
       } catch (error) {
         const unknown = isUnknownOutcomeError(error);
         const effects = writeAttempted ? (unknown ? "unknown" : "may_remain") : "none";
+        const attemptedChangedNotes = new Set(appliedDiff.map((entry) => entry.noteId)).size;
+        const remainingChangedNotes = writeAttempted
+          ? unknown
+            ? null
+            : attemptedChangedNotes
+          : 0;
         // 已开启但未关闭的 Undo 边界尽力关闭，失败只记警告。
         if (boundaryCalls === 1 && !unknown && resolved) {
           await this._closeUndoBoundary(host, resolved, warnings, () => (boundaryCalls += 1));
@@ -306,7 +318,9 @@ export class NotePatchService {
           data: {
             processedNotes: resolved?.notes.length ?? 0,
             plannedChangedNotes: null,
-            actuallyChangedNotes: new Set(appliedDiff.map((entry) => entry.noteId)).size,
+            attemptedChangedNotes,
+            remainingChangedNotes,
+            actuallyChangedNotes: remainingChangedNotes,
           },
           rollback: { attempted: false, verified: null },
           undo: undoEvidence(boundaryCalls),

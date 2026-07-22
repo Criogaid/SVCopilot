@@ -28,6 +28,7 @@ function createCurveModel() {
     undoCount: 0,
     failures: [],
     groupOnset: 4 * Q,
+    interpolationMethod: "Linear",
     definition: {
       displayName: "Loudness",
       typeName: "loudness",
@@ -92,7 +93,7 @@ function createCurveModel() {
       if (id === h.automation.__handle__) {
         if (method === "getDefinition") return { ...model.definition, range: [...model.definition.range] };
         if (method === "getType") return model.definition.typeName;
-        if (method === "getInterpolationMethod") return "Linear";
+        if (method === "getInterpolationMethod") return model.interpolationMethod;
         if (method === "getAllPoints") return sortPoints().map((point) => [...point]);
         if (method === "getPoints") {
           model.getPointsCalls = (model.getPointsCalls ?? 0) + 1;
@@ -120,6 +121,7 @@ function createCurveModel() {
           return model.points.length !== before;
         }
         if (method === "simplify") {
+          if (model.ignoreSimplify) return false;
           const [from, to, threshold = 0] = args;
           // 朴素实现：移除范围内可被相邻两点线性插值近似的点。
           let changed = false;
@@ -443,7 +445,6 @@ test("sv_patch_parameter_curve rolls back when the read-back getPoints throws", 
 test("sv_patch_parameter_curve simplify verification flags residual out-of-tolerance points", async () => {
   const model = createCurveModel();
   // simplify 一个点都不移除，并偷偷加一个偏离计划曲线的点。
-  const realSimplify = null;
   const service = createService(model);
   const original = model.host.call;
   model.host.call = async (request) => {
@@ -467,8 +468,37 @@ test("sv_patch_parameter_curve simplify verification flags residual out-of-toler
   });
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "POSTCONDITION_FAILED");
-  assert.ok(result.verification.evidence.maxResidualDeviation > 0.01);
+  assert.equal(result.verification.evidence.unexpectedObservedPointCount, 1);
   assert.equal(result.status, "rolled_back");
+});
+
+test("sv_patch_parameter_curve rejects leftover points for non-linear interpolation", async () => {
+  const model = createCurveModel();
+  model.interpolationMethod = "Cosine";
+  model.points = [
+    [0, 0],
+    [Q / 2, 0.25],
+    [2 * Q, 1],
+  ];
+  // 模拟 remove/simplify 都静默未生效；旧实现按 Linear 计算会误把中间点视为合法。
+  model.ignoreRemove = true;
+  model.ignoreSimplify = true;
+  const result = await createService(model).patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+    points: [
+      { blick: 0, value: 0 },
+      { blick: 2 * Q, value: 1 },
+    ],
+    simplifyThreshold: 0.01,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "POSTCONDITION_FAILED");
+  assert.equal(result.verification.evidence.unexpectedObservedPointCount, 1);
+  assert.equal(result.verification.evidence.maxObservedPointDeviation, 0);
 });
 
 test("sv_get_parameter_curve bisects windows on FRAME_TOO_LARGE and completes", async () => {
@@ -527,4 +557,10 @@ test("sv_patch_parameter_curve fails an empty replace when the host silently ign
   // （模型 simplify 合法移除了共线中点，范围内仍剩 2 个残留点。）
   assert.equal(result.verification.passed, false);
   assert.equal(result.verification.evidence.observedPointCount, 2);
+  assert.equal(result.verification.evidence.unexpectedObservedPointCount, 2);
+  assert.ok(
+    Object.values(result.verification.evidence).every(
+      (value) => typeof value !== "number" || Number.isFinite(value)
+    )
+  );
 });

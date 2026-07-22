@@ -186,6 +186,8 @@ test("sv_patch_notes dryRun plans a diff without any host side effect", async ()
   assert.equal(result.effects, "none");
   assert.equal(result.atomicity, "verified_compensation");
   assert.equal(result.data.plannedChangedNotes, 1);
+  assert.equal(result.data.attemptedChangedNotes, 0);
+  assert.equal(result.data.remainingChangedNotes, 0);
   assert.deepEqual(
     result.data.plannedDiff.map((entry) => [entry.field, entry.from, entry.to]),
     [
@@ -260,6 +262,8 @@ test("sv_patch_notes rejects expected mismatches before any write", async () => 
   assert.equal(result.status, "failed");
   assert.equal(result.effects, "none");
   assert.equal(result.error.code, "EXPECTED_MISMATCH");
+  assert.equal(result.data.attemptedChangedNotes, 0);
+  assert.equal(result.data.remainingChangedNotes, 0);
   assert.deepEqual(result.data.mismatches, [
     { noteId: nid(snapshot, 0), field: "lyrics", expected: "wrong", observed: "a" },
   ]);
@@ -277,6 +281,8 @@ test("sv_patch_notes reports no_change without undo records for a no-op set", as
   assert.equal(result.ok, true);
   assert.equal(result.status, "no_change");
   assert.equal(result.effects, "none");
+  assert.equal(result.data.attemptedChangedNotes, 0);
+  assert.equal(result.data.remainingChangedNotes, 0);
   assert.equal(model.undoCount, 0);
 });
 
@@ -362,6 +368,9 @@ test("sv_patch_notes reports outcome_unknown without compensation when the host 
   assert.equal(result.status, "outcome_unknown");
   assert.equal(result.effects, "unknown");
   assert.equal(result.rollback.attempted, false);
+  assert.equal(result.data.attemptedChangedNotes, 1);
+  assert.equal(result.data.remainingChangedNotes, null);
+  assert.equal(result.data.actuallyChangedNotes, null);
   // 宿主断开后不做补偿写入；已生效的 pitch 保留。
   assert.equal(model.notes[0].pitch, 61);
 });

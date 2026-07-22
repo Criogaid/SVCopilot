@@ -62,8 +62,20 @@ export class AuditionService {
         }
 
         const mixerChanges = [];
+        const warnings = [];
         let status;
         try {
+          // 官方 seek 在播放中会立即续播，严格位置读回前必须先进入 stopped。
+          if (savedStatus !== "stopped") {
+            await capture.call(roots.playback, "stop", []);
+            const observedStoppedStatus = await capture.call(roots.playback, "getStatus");
+            if (observedStoppedStatus !== "stopped") {
+              throw codedError(
+                "POSTCONDITION_FAILED",
+                `playback did not stop before audition seek; observed ${observedStoppedStatus}`
+              );
+            }
+          }
           for (const target of mixerTargets) {
             if (target.previousSolo !== true) {
               await capture.call(target.mixer, "setSolo", [true]);
@@ -74,8 +86,22 @@ export class AuditionService {
               previousValue: target.previousSolo,
               setValue: true,
             });
+            const observedSolo = await capture.call(target.mixer, "isSolo");
+            if (observedSolo !== true) {
+              throw codedError(
+                "POSTCONDITION_FAILED",
+                `track ${target.trackIndex} did not enter solo state during audition startup`
+              );
+            }
           }
           await capture.call(roots.playback, "seek", [fromSeconds]);
+          const observedStartPlayhead = await capture.call(roots.playback, "getPlayhead");
+          if (Math.abs(observedStartPlayhead - fromSeconds) > PLAYHEAD_EPSILON_SECONDS) {
+            throw codedError(
+              "POSTCONDITION_FAILED",
+              `playhead did not reach the audition start (${fromSeconds}); observed ${observedStartPlayhead}`
+            );
+          }
           if (input.loop) {
             await capture.call(roots.playback, "loop", [fromSeconds, toSeconds]);
           } else {
@@ -83,6 +109,21 @@ export class AuditionService {
           }
           // getStatus 也在补偿段内：此时播放/solo 已生效，读取失败同样不能残留状态。
           status = await capture.call(roots.playback, "getStatus");
+          const statusAccepted = input.loop
+            ? status === "looping"
+            : status === "playing" || status === "looping";
+          if (!statusAccepted) {
+            throw codedError(
+              "POSTCONDITION_FAILED",
+              `audition playback did not start; observed ${status}`
+            );
+          }
+          if (!input.loop && status === "looping") {
+            warnings.push({
+              code: "HOST_LOOP_REGION_ACTIVE",
+              message: "Playback entered looping mode because the host loop region is active.",
+            });
+          }
         } catch (error) {
           // 启动中途失败：尽力恢复已改的 solo 和 playhead，不留下部分 audition 状态。
           const compensation = await this._compensateStartFailure(
@@ -91,6 +132,7 @@ export class AuditionService {
             mixerTargets,
             mixerChanges,
             savedPlayheadSeconds,
+            savedStatus,
             error
           );
           return compensation;
@@ -124,7 +166,7 @@ export class AuditionService {
             recovery,
             perception: "human_only",
           },
-          warnings: [],
+          warnings,
         };
       } finally {
         await capture.releaseAll();
@@ -138,6 +180,7 @@ export class AuditionService {
     mixerTargets,
     mixerChanges,
     savedPlayheadSeconds,
+    savedStatus,
     cause
   ) {
     const unknown = isUnknownOutcomeError(cause);
@@ -153,19 +196,44 @@ export class AuditionService {
           const observed = await capture.call(target.mixer, "isSolo");
           const restored = observed === change.previousValue;
           if (!restored) compensationVerified = false;
-          restoration.push({ trackIndex: change.trackIndex, field: "solo", restored, observed });
+          restoration.push({
+            trackIndex: change.trackIndex,
+            field: "solo",
+            restored,
+            observed,
+            expected: change.previousValue,
+          });
         } catch (error) {
           compensationVerified = false;
           restoration.push({
             trackIndex: change.trackIndex,
             field: "solo",
             restored: false,
+            expected: change.previousValue,
             error: error instanceof Error ? error.message : String(error),
           });
         }
       }
       try {
         await capture.call(roots.playback, "stop", []);
+        const observedStatus = await capture.call(roots.playback, "getStatus");
+        const playbackStopped = observedStatus === "stopped";
+        if (!playbackStopped) compensationVerified = false;
+        restoration.push({
+          field: "playback",
+          restored: playbackStopped,
+          observed: observedStatus,
+          expected: "stopped",
+        });
+      } catch (error) {
+        compensationVerified = false;
+        restoration.push({
+          field: "playback",
+          restored: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      try {
         await capture.call(roots.playback, "seek", [savedPlayheadSeconds]);
         // 补偿的 playhead 也必须读回确认，不能因为 seek 没抛错就声称已恢复。
         const observedPlayhead = await capture.call(roots.playback, "getPlayhead");
@@ -201,7 +269,7 @@ export class AuditionService {
         rollback: { attempted: !unknown, verified: unknown ? null : compensationVerified },
         restoration,
         // 即使补偿失败也提供 payload，调用方可用 sv_restore_audition 重试。
-        recovery: { version: 1, savedPlayheadSeconds, savedStatus: null, mixerChanges },
+        recovery: { version: 1, savedPlayheadSeconds, savedStatus, mixerChanges },
       },
       warnings: [],
     };
@@ -325,13 +393,14 @@ export class AuditionService {
         await capture.call(roots.playback, "seek", [recovery.savedPlayheadSeconds]);
         const playbackStatus = await capture.call(roots.playback, "getStatus");
         const playheadSeconds = await capture.call(roots.playback, "getPlayhead");
+        const playbackStopped = playbackStatus === "stopped";
         const playheadRestored =
           Math.abs(playheadSeconds - recovery.savedPlayheadSeconds) <= PLAYHEAD_EPSILON_SECONDS;
         const skippedUserChanges = restoration.filter((entry) => entry.reason === "user_modified");
         const failedRestores = restoration.filter(
           (entry) => !entry.restored && entry.reason !== "user_modified"
         );
-        const allRestored = failedRestores.length === 0 && playheadRestored;
+        const allRestored = failedRestores.length === 0 && playbackStopped && playheadRestored;
         const warnings = [];
         if (skippedUserChanges.length > 0) {
           warnings.push({
@@ -343,9 +412,11 @@ export class AuditionService {
         if (!allRestored) {
           warnings.push({
             code: "RESTORE_INCOMPLETE",
-            message: playheadRestored
-              ? "One or more mixer fields did not read back as their pre-audition values."
-              : "The playhead did not read back at the saved position.",
+            message: !playbackStopped
+              ? `Playback did not stop; observed status ${playbackStatus}.`
+              : playheadRestored
+                ? "One or more mixer fields did not read back as their pre-audition values."
+                : "The playhead did not read back at the saved position.",
           });
         }
         return {
@@ -358,6 +429,7 @@ export class AuditionService {
           effects: allRestored ? "verified" : "may_remain",
           data: {
             playbackStatus,
+            playbackStopped,
             playheadSeconds,
             playheadRestored,
             restoration,

@@ -539,7 +539,7 @@ const TOOLS = [
   {
     name: "sv_patch_parameter_curve",
     description:
-      "Edit one Automation parameter curve inside a blick range. replace removes the range and writes explicit points; add/scale shift or scale the existing CONTROL POINTS in the range (not a continuous resampled curve), clamped to the official definition range. Optional simplify after writing. Writes sit inside undo boundaries with journaled previous points; atomic:true restores them on failure (verified compensation, not ACID). Read-back verification is exact without simplify, tolerance-sampled with it.",
+      "Edit one Automation parameter curve inside a blick range. replace removes the range and writes explicit points; add/scale shift or scale the existing CONTROL POINTS in the range (not a continuous resampled curve), clamped to the official definition range. Optional simplify after writing. Writes sit inside undo boundaries with journaled previous points; atomic:true restores them on failure (verified compensation, not ACID). Read-back verification is exact without simplify; with simplify it samples the host-interpolated values and requires every retained control point to belong to the requested point set, which works for Linear, Cosine, and Cubic interpolation.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -657,7 +657,7 @@ const TOOLS = [
   {
     name: "sv_start_audition",
     description:
-      "Non-blocking audition: save playhead and target-track solo state, solo the requested tracks, seek to the range start (absolute blicks converted via TimeAxis), and play or loop. Returns an auditionId plus a recovery payload the caller should keep — if this server crashes, sv_restore_audition can undo solo/playhead changes from the payload alone. MCP cannot hear audio; a human judges the sound.",
+      "Non-blocking audition: save playhead and target-track solo state, stop existing playback when necessary, solo the requested tracks, seek to the range start (absolute blicks converted via TimeAxis), and play or loop. Startup succeeds only after read-back confirms solo, playhead, and an active playback status; silently ignored host writes are compensated and reported as failure. A normal play request may report looping when the host UI loop region is active. Returns an auditionId plus a recovery payload the caller should keep — if this server crashes, sv_restore_audition can undo solo/playhead changes from the payload alone. MCP cannot hear audio; a human judges the sound.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -691,7 +691,7 @@ const TOOLS = [
   {
     name: "sv_stop_audition",
     description:
-      "Stop an audition and restore the saved state: playback stops, solo fields are restored ONLY if they still hold the audition-set value (user changes are left untouched and reported), and the playhead returns to the saved position. Returns per-field restoration evidence.",
+      "Stop an audition and restore the saved state: playback stops, solo fields are restored ONLY if they still hold the audition-set value (user changes are left untouched and reported), and the playhead returns to the saved position. Success requires read-back status stopped plus the saved playhead and mixer values; otherwise restore_failed preserves the audition for retry. Returns per-field restoration evidence.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
