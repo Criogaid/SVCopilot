@@ -1,5 +1,11 @@
 import { createHostScope } from "./snapshot.js";
 import { getVocalModeNames, normalizeVoiceParameters } from "./voice-parameters.js";
+import {
+  musicalToBlick,
+  normalizeMeterMarks,
+  normalizeMusicalPoint,
+  numberToFraction,
+} from "./musical-time.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
@@ -8,6 +14,7 @@ const MIN_VALUE_TOLERANCE = 1e-6;
 const RANGE_RELATIVE_TOLERANCE = 1e-6;
 const MIN_READ_WINDOW_BLICK = 1024;
 const MAX_JOURNAL_POINTS = 4000;
+const MAX_SNAPSHOT_POINTS = 20_000;
 export const BUILTIN_AUTOMATION_PARAMETERS = Object.freeze([
   "pitchDelta",
   "vibratoEnv",
@@ -21,10 +28,41 @@ const BUILTIN_PARAMETER_BY_LOWERCASE = new Map(
   BUILTIN_AUTOMATION_PARAMETERS.map((parameter) => [parameter.toLowerCase(), parameter])
 );
 
+export async function readAutomationSnapshot(
+  capture,
+  target,
+  requestedParameter,
+  range,
+  { maxPoints = MAX_SNAPSHOT_POINTS } = {}
+) {
+  const resolvedParameter = await resolveParameterName(capture, target, requestedParameter);
+  const resolved = await resolveAutomationForTarget(capture, target, resolvedParameter);
+  const localRange = toLocalRange(range, target.groupTimeOffsetBlick);
+  const read = await readPointsInRange(capture, resolved.automation, localRange, { maxPoints });
+  if (read.truncated) {
+    throw codedError(
+      "SNAPSHOT_AUTOMATION_LIMIT_REACHED",
+      `Automation ${resolved.typeName} exceeds the ${maxPoints}-point capture safety limit`
+    );
+  }
+  return {
+    requestedParameter,
+    resolvedParameter: resolved.typeName,
+    definition: resolved.definition,
+    interpolationMethod: resolved.interpolationMethod,
+    points: read.points.map((point) => ({
+      localBlick: point.blick,
+      absoluteBlick: point.blick + target.groupTimeOffsetBlick,
+      value: point.value,
+    })),
+  };
+}
+
 export class ParameterCurveService {
-  constructor(session, { now = () => Date.now() } = {}) {
+  constructor(session, { now = () => Date.now(), snapshotService = null } = {}) {
     this.session = session;
     this.now = now;
+    this.snapshotService = snapshotService;
   }
 
   async getCurve(request) {
@@ -32,8 +70,12 @@ export class ParameterCurveService {
     return this.session.withExclusive(async (host) => {
       const capture = createHostScope(host);
       try {
-        const resolved = await resolveAutomation(capture, input.target, input.parameter);
-        const range = toLocalRange(input.range, resolved.groupTimeOffsetBlick);
+        const resolved = await resolveAutomation(capture, input.target, input.parameter, {
+          snapshotService: this.snapshotService,
+          epoch: host.epoch(),
+          readOnly: true,
+        });
+        const range = await resolveCurveRange(capture, resolved, input.range);
         const read = await readPointsInRange(capture, resolved.automation, range, {
           maxPoints: input.maxPoints,
         });
@@ -66,13 +108,7 @@ export class ParameterCurveService {
               onsetBlick: resolved.groupOnsetBlick,
               timeOffsetBlick: resolved.groupTimeOffsetBlick,
             },
-            range: {
-              coordinate: input.range.coordinate,
-              fromBlick: input.range.fromBlick,
-              toBlick: input.range.toBlick,
-              localFromBlick: range.fromLocal,
-              localToBlick: range.toLocal,
-            },
+            range: formatResolvedRange(input.range, range),
             points,
             stats: pointStats(read.points),
             complete: !read.truncated,
@@ -129,6 +165,8 @@ export class ParameterCurveService {
           serviceStartedAt,
           coordinatorRequestedAt,
           acquiredAt,
+          snapshotService: this.snapshotService,
+          epoch: host.epoch(),
         });
       } finally {
         await capture.releaseAll();
@@ -175,7 +213,11 @@ async function executeCurveTransaction(capture, input, clock) {
   const touched = [];
   try {
     await timed(timings, "preflightReadMs", clock.now, async () => {
-      transaction.target = await resolveCurveTarget(capture, input.target);
+      transaction.target = await resolveCurveTarget(capture, input.target, {
+        ...clock,
+        readOnly: input.dryRun,
+        scanSharedTargets: input.dryRun,
+      });
       if (
         input.target.expectedGroupUuid !== undefined &&
         input.target.expectedGroupUuid !== transaction.target.groupUuid
@@ -253,6 +295,19 @@ async function executeCurveTransaction(capture, input, clock) {
       transaction.ok = true;
       transaction.status = "dry_run";
       for (const plan of transaction.plans) plan.status = "planned";
+      if (
+        Math.max(
+          transaction.target.sharedTargetOccurrences.length,
+          transaction.target.projectTargetOccurrences.length
+        ) > 1 &&
+        input.target.allowSharedTargetMutation !== true
+      ) {
+        transaction.warnings.push({
+          code: "SHARED_TARGET_DRY_RUN",
+          message:
+            "This dry-run is safe, but commit requires allowSharedTargetMutation:true because every occurrence shares one target NoteGroup.",
+        });
+      }
       return finish();
     }
 
@@ -400,9 +455,9 @@ async function executeCurveTransaction(capture, input, clock) {
   }
 }
 
-async function prepareCurvePlan(capture, target, input, index) {
+export async function prepareCurvePlan(capture, target, input, index) {
   const resolved = await resolveAutomationForTarget(capture, target, input.parameter);
-  const range = toLocalRange(input.range, target.groupTimeOffsetBlick);
+  const range = await resolveCurveRange(capture, target, input.range);
   const journalRead = await readPointsInRange(capture, resolved.automation, range, {
     maxPoints: MAX_JOURNAL_POINTS,
   });
@@ -417,15 +472,15 @@ async function prepareCurvePlan(capture, target, input, index) {
   const [minValue, maxValue] = resolved.definition.range;
   let clampedCount = 0;
   let planned;
+  let resolvedInputPoints = [];
   if (input.mode === "replace") {
-    planned = input.points.map((point) => {
-      const local = input.range.coordinate === "absolute"
-        ? point.blick - target.groupTimeOffsetBlick
-        : point.blick;
+    resolvedInputPoints = await resolveCurvePoints(capture, target, input.points, input.range);
+    planned = resolvedInputPoints.map((point) => {
+      const local = point.localBlick;
       if (local < range.fromLocal || local > range.toLocal) {
         throw codedError(
           "INVALID_ARGUMENTS",
-          `replace point at ${point.blick} lies outside the requested range`
+          `replace point at local blick ${local} lies outside the requested range`
         );
       }
       if (point.value < minValue || point.value > maxValue) {
@@ -474,6 +529,7 @@ async function prepareCurvePlan(capture, target, input, index) {
     range,
     journal,
     planned,
+    resolvedInputPoints,
     observed: null,
     simplifyThreshold: input.simplifyThreshold,
     clampedCount,
@@ -484,7 +540,254 @@ async function prepareCurvePlan(capture, target, input, index) {
   };
 }
 
-async function applyCurvePlan(capture, plan) {
+async function resolveCurvePoints(capture, target, points, inputRange) {
+  const resolved = [];
+  for (const point of points) {
+    if (point.kind === "blick") {
+      const coordinate = inputRange.coordinate ?? "local";
+      const localBlick =
+        coordinate === "absolute"
+          ? point.blick - target.groupTimeOffsetBlick
+          : point.blick;
+      resolved.push({
+        source: "blick",
+        input: { blick: point.blick, coordinate },
+        localBlick,
+        absoluteBlick: localBlick + target.groupTimeOffsetBlick,
+        value: point.value,
+      });
+      continue;
+    }
+    if (!target.contextOccurrence || !target.storedContext) {
+      throw codedError(
+        "CONTEXT_REQUIRED",
+        "semantic positions require a target from sv_snapshot_range"
+      );
+    }
+    if (point.kind === "musical") {
+      await ensureLiveMusicalContext(capture, target);
+      const absoluteBlick = musicalToBlick(
+        point.musicalPosition,
+        target.storedContext.context.meterMarks,
+        target.storedContext.context.quarterBlick
+      );
+      resolved.push({
+        source: "musicalPosition",
+        input: { bar: point.musicalPosition.bar, beat: point.musicalPosition.beat },
+        localBlick: absoluteBlick - target.groupTimeOffsetBlick,
+        absoluteBlick,
+        value: point.value,
+      });
+      continue;
+    }
+    if (point.kind === "rangeBoundary") {
+      await ensureLiveMusicalContext(capture, target);
+      const boundaryKey = point.rangeBoundary === "start" ? "from" : "to";
+      const absoluteBlick = target.storedContext.context.range?.[boundaryKey]?.blick;
+      if (!Number.isSafeInteger(absoluteBlick)) {
+        throw codedError("INVALID_CONTEXT", "range context has no usable boundary BLICK");
+      }
+      resolved.push({
+        source: "rangeBoundary",
+        input: point.rangeBoundary,
+        localBlick: absoluteBlick - target.groupTimeOffsetBlick,
+        absoluteBlick,
+        value: point.value,
+      });
+      continue;
+    }
+    if (point.kind === "gap") {
+      const after = findAnchorFingerprint(target, point.gap.afterNoteId);
+      const before = findAnchorFingerprint(target, point.gap.beforeNoteId);
+      if (after.indexInGroup + 1 !== before.indexInGroup) {
+        throw codedError("INVALID_NOTE_GAP", "gap anchors must identify adjacent notes in order");
+      }
+      await verifyAnchoredNote(capture, target, after);
+      await verifyAnchoredNote(capture, target, before);
+      const gapStart = after.onsetBlick + after.durationBlick;
+      const gapEnd = before.onsetBlick;
+      if (gapEnd < gapStart) {
+        throw codedError("INVALID_NOTE_GAP", "adjacent notes overlap and have no non-negative gap");
+      }
+      const localBase = resolveIntervalPosition(gapStart, gapEnd, point.gap.position, "gap");
+      const absoluteBase = localBase + target.groupTimeOffsetBlick;
+      if (point.gap.offset.unit !== "blick") await ensureLiveMusicalContext(capture, target);
+      const offsetBlick = resolveAnchorOffset(
+        point.gap.offset,
+        absoluteBase,
+        target.storedContext.context.meterMarks,
+        target.storedContext.context.quarterBlick
+      );
+      const localBlick = localBase + offsetBlick;
+      resolved.push({
+        source: "noteGap",
+        input: point.gap,
+        localBlick,
+        absoluteBlick: localBlick + target.groupTimeOffsetBlick,
+        value: point.value,
+      });
+      continue;
+    }
+    const fingerprint = findAnchorFingerprint(target, point.anchor.noteId);
+    await verifyAnchoredNote(capture, target, fingerprint);
+    const localBase = resolveIntervalPosition(
+      fingerprint.onsetBlick,
+      fingerprint.onsetBlick + fingerprint.durationBlick,
+      point.anchor.position,
+      "note anchor"
+    );
+    const absoluteBase = localBase + target.groupTimeOffsetBlick;
+    if (point.anchor.offset.unit !== "blick") await ensureLiveMusicalContext(capture, target);
+    const offsetBlick = resolveAnchorOffset(
+      point.anchor.offset,
+      absoluteBase,
+      target.storedContext.context.meterMarks,
+      target.storedContext.context.quarterBlick
+    );
+    const localBlick = localBase + offsetBlick;
+    resolved.push({
+      source: "noteAnchor",
+      input: point.anchor,
+      localBlick,
+      absoluteBlick: localBlick + target.groupTimeOffsetBlick,
+      value: point.value,
+    });
+  }
+  resolved.sort((left, right) => left.localBlick - right.localBlick);
+  for (let index = 1; index < resolved.length; index += 1) {
+    if (resolved[index].localBlick === resolved[index - 1].localBlick) {
+      const error = codedError(
+        "DUPLICATE_RESOLVED_POSITION",
+        `multiple points resolve to local blick ${resolved[index].localBlick}`
+      );
+      error.resolvedPosition = {
+        localBlick: resolved[index].localBlick,
+        absoluteBlick: resolved[index].absoluteBlick,
+      };
+      throw error;
+    }
+  }
+  return resolved;
+}
+
+function findAnchorFingerprint(target, noteId) {
+  const fingerprint = target.contextOccurrence.noteFingerprints.find((item) => item.noteId === noteId);
+  if (!fingerprint) {
+    throw codedError(
+      "UNKNOWN_NOTE_ANCHOR",
+      `noteId is not part of occurrence ${target.contextOccurrence.occurrenceId}`
+    );
+  }
+  return fingerprint;
+}
+
+async function ensureLiveMusicalContext(capture, target) {
+  if (target.liveMusicalContextVerified) return;
+  const timeAxis = await capture.call(target.roots.project, "getTimeAxis", [], {
+    inferredType: "TimeAxis",
+  });
+  const meterMarks = normalizeMeterMarks(
+    await capture.call(timeAxis, "getAllMeasureMarks", [], {
+      resultFormat: "typed-v2",
+      resultShape: "array",
+    })
+  );
+  const quarterBlick = await capture.index("QUARTER");
+  const expectedMarks = target.storedContext.context.meterMarks;
+  const expectedQuarter = target.storedContext.context.quarterBlick;
+  if (
+    quarterBlick !== expectedQuarter ||
+    JSON.stringify(meterMarks) !== JSON.stringify(expectedMarks)
+  ) {
+    throw codedError("STALE_CONTEXT", "the musical timebase or meter map changed after snapshot");
+  }
+  target.liveMusicalContextVerified = true;
+}
+
+async function verifyAnchoredNote(capture, target, expected) {
+  target.anchorFingerprintCache ??= new Map();
+  const cached = target.anchorFingerprintCache.get(expected.noteId);
+  if (cached) return cached;
+  const note = await capture.call(target.group, "getNote", [expected.indexInGroup + 1], {
+    inferredType: "Note",
+  });
+  if (!note?.__handle__) {
+    throw codedError("STALE_CONTEXT", `anchored note ${expected.noteId} no longer exists`);
+  }
+  const observed = {
+    indexInGroup: (await capture.call(note, "getIndexInParent")) - 1,
+    onsetBlick: await capture.call(note, "getOnset"),
+    durationBlick: await capture.call(note, "getDuration"),
+    pitch: await capture.call(note, "getPitch"),
+    lyrics: await capture.call(note, "getLyrics"),
+    phonemesOverride: await capture.call(note, "getPhonemes"),
+    languageOverride: await capture.call(note, "getLanguageOverride"),
+    detuneCents: await capture.call(note, "getDetune"),
+  };
+  const comparableExpected = {
+    indexInGroup: expected.indexInGroup,
+    onsetBlick: expected.onsetBlick,
+    durationBlick: expected.durationBlick,
+    pitch: expected.pitch,
+    lyrics: expected.lyrics,
+    phonemesOverride: expected.phonemesOverride,
+    languageOverride: expected.languageOverride,
+    detuneCents: expected.detuneCents,
+  };
+  if (JSON.stringify(observed) !== JSON.stringify(comparableExpected)) {
+    const error = codedError("STALE_CONTEXT", `anchored note ${expected.noteId} changed after snapshot`);
+    error.expectedFingerprint = comparableExpected;
+    error.observedFingerprint = observed;
+    throw error;
+  }
+  target.anchorFingerprintCache.set(expected.noteId, observed);
+  return observed;
+}
+
+function resolveIntervalPosition(startBlick, endBlick, position, label) {
+  if (position === "onset" || position === "start") return startBlick;
+  if (position === "end") return endBlick;
+  const ratio = position === "center" ? 0.5 : position.ratio;
+  const fraction = numberToFraction(ratio, `${label} ratio`);
+  const length = endBlick - startBlick;
+  const numerator = length * fraction.numerator;
+  if (!Number.isSafeInteger(numerator) || numerator % fraction.denominator !== 0) {
+    throw codedError(
+      "LOSSY_NOTE_ANCHOR",
+      `${label} ratio ${ratio} cannot be represented exactly for interval ${length}`
+    );
+  }
+  return startBlick + numerator / fraction.denominator;
+}
+
+function resolveAnchorOffset(offset, absoluteBase, meterMarks, quarterBlick) {
+  if (offset.unit === "blick") {
+    if (!Number.isSafeInteger(offset.value)) {
+      throw codedError("LOSSY_NOTE_ANCHOR", "blick offsets must be integers");
+    }
+    return offset.value;
+  }
+  let scale = quarterBlick;
+  if (offset.unit === "beat") {
+    let active = meterMarks[0];
+    for (const mark of meterMarks) {
+      if (mark.positionBlick <= absoluteBase) active = mark;
+      else break;
+    }
+    scale = (quarterBlick * 4) / active.denominator;
+  }
+  const fraction = numberToFraction(offset.value, `${offset.unit} offset`);
+  const numerator = fraction.numerator * scale;
+  if (!Number.isSafeInteger(numerator) || numerator % fraction.denominator !== 0) {
+    throw codedError(
+      "LOSSY_NOTE_ANCHOR",
+      `${offset.unit} offset ${offset.value} cannot be represented exactly in integer blicks`
+    );
+  }
+  return numerator / fraction.denominator;
+}
+
+export async function applyCurvePlan(capture, plan) {
   await capture.call(plan.automation, "remove", [plan.range.fromLocal, plan.range.toLocal]);
   for (const point of plan.planned) {
     await capture.call(plan.automation, "add", [point.blick, point.value]);
@@ -498,8 +801,8 @@ async function applyCurvePlan(capture, plan) {
   }
 }
 
-async function resolveAutomation(capture, target, parameter) {
-  const resolvedTarget = await resolveCurveTarget(capture, target);
+async function resolveAutomation(capture, target, parameter, context = {}) {
+  const resolvedTarget = await resolveCurveTarget(capture, target, context);
   const resolvedParameter = await resolveParameterName(capture, resolvedTarget, parameter);
   return {
     ...resolvedTarget,
@@ -509,7 +812,7 @@ async function resolveAutomation(capture, target, parameter) {
   };
 }
 
-async function resolveParameterName(capture, target, requestedParameter) {
+export async function resolveParameterName(capture, target, requestedParameter) {
   const builtin = BUILTIN_PARAMETER_BY_LOWERCASE.get(requestedParameter.toLowerCase());
   if (builtin) return builtin;
   if (!requestedParameter.toLowerCase().startsWith("vocalmode_")) {
@@ -545,32 +848,101 @@ function unknownParameterError(requestedParameter, vocalModeParameters) {
   return error;
 }
 
-async function resolveCurveTarget(capture, target) {
+async function resolveCurveTarget(capture, target, context = {}) {
+  let requestedTarget = target;
+  let contextOccurrence = null;
+  let storedContext = null;
+  if (target.contextId) {
+    if (!context.snapshotService) {
+      throw codedError("CONTEXT_UNAVAILABLE", "range context resolution is not configured");
+    }
+    storedContext = context.snapshotService.getContext(target.contextId, context.epoch);
+    if (storedContext.context?.kind !== "range") {
+      throw codedError("INVALID_CONTEXT", "contextId does not identify a range snapshot");
+    }
+    contextOccurrence = storedContext.context.occurrences.find(
+      (occurrence) => occurrence.occurrenceId === target.occurrenceId
+    );
+    if (!contextOccurrence) {
+      throw codedError(
+        "UNKNOWN_OCCURRENCE",
+        `occurrenceId is not part of context ${target.contextId}`
+      );
+    }
+    if (
+      contextOccurrence.sharedTargetOccurrences.length > 1 &&
+      context.readOnly !== true &&
+      target.allowSharedTargetMutation !== true
+    ) {
+      const error = codedError(
+        "SHARED_TARGET_REQUIRES_CONFIRMATION",
+        "the target NoteGroup is referenced by multiple occurrences; set allowSharedTargetMutation:true to confirm that every reference may change"
+      );
+      error.sharedTargetOccurrences = contextOccurrence.sharedTargetOccurrences;
+      throw error;
+    }
+    requestedTarget = {
+      trackIndex: contextOccurrence.trackIndex,
+      groupIndex: contextOccurrence.groupIndex,
+      expectedGroupUuid: target.expectedGroupUuid ?? contextOccurrence.targetGroupUuid,
+    };
+  }
   const roots = await capture.roots();
   const trackCount = await capture.call(roots.project, "getNumTracks");
-  if (target.trackIndex >= trackCount) {
+  if (requestedTarget.trackIndex >= trackCount) {
     throw codedError(
       "TRACK_INDEX_OUT_OF_RANGE",
-      `trackIndex ${target.trackIndex} is outside 0-${Math.max(0, trackCount - 1)} (native index ${target.trackIndex + 1})`
+      `trackIndex ${requestedTarget.trackIndex} is outside 0-${Math.max(0, trackCount - 1)} (native index ${requestedTarget.trackIndex + 1})`
     );
   }
-  const track = await capture.call(roots.project, "getTrack", [target.trackIndex + 1], {
+  const track = await capture.call(roots.project, "getTrack", [requestedTarget.trackIndex + 1], {
     inferredType: "Track",
   });
   const groupCount = await capture.call(track, "getNumGroups");
-  if (target.groupIndex >= groupCount) {
+  if (requestedTarget.groupIndex >= groupCount) {
     throw codedError(
       "GROUP_INDEX_OUT_OF_RANGE",
-      `groupIndex ${target.groupIndex} is outside 0-${Math.max(0, groupCount - 1)} (native index ${target.groupIndex + 1})`
+      `groupIndex ${requestedTarget.groupIndex} is outside 0-${Math.max(0, groupCount - 1)} (native index ${requestedTarget.groupIndex + 1})`
     );
   }
-  const reference = await capture.call(track, "getGroupReference", [target.groupIndex + 1], {
+  const reference = await capture.call(track, "getGroupReference", [requestedTarget.groupIndex + 1], {
     inferredType: "NoteGroupReference",
   });
   if (await capture.call(reference, "isInstrumental")) {
     throw codedError("INVALID_TARGET", "instrumental groups have no parameter automation");
   }
   const group = await capture.call(reference, "getTarget", [], { inferredType: "NoteGroup" });
+  const groupUuid = await capture.call(group, "getUUID");
+  if (
+    target.contextId &&
+    requestedTarget.expectedGroupUuid !== undefined &&
+    requestedTarget.expectedGroupUuid !== groupUuid
+  ) {
+    throw codedError(
+      target.contextId ? "STALE_CONTEXT" : "TARGET_CONFLICT",
+      `expected group UUID ${requestedTarget.expectedGroupUuid}, observed ${groupUuid}`
+    );
+  }
+  const projectTargetOccurrences =
+    context.readOnly === true && context.scanSharedTargets !== true
+      ? []
+      : await scanTargetOccurrences(capture, roots.project, groupUuid);
+  const knownOccurrenceCount = Math.max(
+    projectTargetOccurrences.length,
+    contextOccurrence?.sharedTargetOccurrences?.length ?? 0
+  );
+  if (
+    knownOccurrenceCount > 1 &&
+    context.readOnly !== true &&
+    target.allowSharedTargetMutation !== true
+  ) {
+    const error = codedError(
+      "SHARED_TARGET_REQUIRES_CONFIRMATION",
+      "the target NoteGroup has multiple project occurrences; set allowSharedTargetMutation:true to confirm a project-wide edit"
+    );
+    error.projectTargetOccurrences = projectTargetOccurrences;
+    throw error;
+  }
   return {
     roots,
     reference,
@@ -578,8 +950,39 @@ async function resolveCurveTarget(capture, target) {
     groupOnsetBlick: await capture.call(reference, "getOnset"),
     // local → absolute 的真正偏移；getOnset 含首音符 onset，不能用。
     groupTimeOffsetBlick: await capture.call(reference, "getTimeOffset"),
-    groupUuid: await capture.call(group, "getUUID"),
+    groupUuid,
+    trackIndex: requestedTarget.trackIndex,
+    groupIndex: requestedTarget.groupIndex,
+    contextOccurrence,
+    storedContext,
+    sharedTargetOccurrences: contextOccurrence?.sharedTargetOccurrences ?? [],
+    projectTargetOccurrences,
   };
+}
+
+export async function scanTargetOccurrences(capture, project, targetUuid) {
+  const occurrences = [];
+  const trackCount = await capture.call(project, "getNumTracks");
+  for (let trackIndex = 0; trackIndex < trackCount; trackIndex += 1) {
+    const track = await capture.call(project, "getTrack", [trackIndex + 1], {
+      inferredType: "Track",
+    });
+    const groupCount = await capture.call(track, "getNumGroups");
+    for (let groupIndex = 0; groupIndex < groupCount; groupIndex += 1) {
+      const reference = await capture.call(track, "getGroupReference", [groupIndex + 1], {
+        inferredType: "NoteGroupReference",
+      });
+      if (await capture.call(reference, "isInstrumental")) continue;
+      const target = await capture.call(reference, "getTarget", [], { inferredType: "NoteGroup" });
+      if ((await capture.call(target, "getUUID")) !== targetUuid) continue;
+      occurrences.push({
+        trackIndex,
+        groupIndex,
+        timeOffsetBlick: await capture.call(reference, "getTimeOffset"),
+      });
+    }
+  }
+  return occurrences;
 }
 
 async function resolveAutomationForTarget(capture, target, parameter) {
@@ -629,7 +1032,7 @@ async function resolveAutomationForTarget(capture, target, parameter) {
 }
 
 // 常见曲线一次 getAllPoints 后本地过滤，使耗时只与点数相关；超帧才按请求范围二分。
-async function readPointsInRange(capture, automation, range, { maxPoints }) {
+export async function readPointsInRange(capture, automation, range, { maxPoints }) {
   try {
     const raw = await capture.call(automation, "getAllPoints", [], {
       resultFormat: "typed-v2",
@@ -695,7 +1098,7 @@ function limitPoints(points, maxPoints) {
   };
 }
 
-async function verifyCurve(
+export async function verifyCurve(
   capture,
   automation,
   planned,
@@ -825,7 +1228,7 @@ function curveValueTolerance(definition) {
   );
 }
 
-async function rollbackCurve(capture, automation, range, journal, definition) {
+export async function rollbackCurve(capture, automation, range, journal, definition) {
   const errors = [];
   try {
     await capture.call(automation, "remove", [range.fromLocal, range.toLocal]);
@@ -900,6 +1303,60 @@ function toLocalRange(range, groupOnsetBlick) {
   return { fromLocal: range.fromBlick - offset, toLocal: range.toBlick - offset };
 }
 
+async function resolveCurveRange(capture, target, range) {
+  if (range.kind !== "semantic") return toLocalRange(range, target.groupTimeOffsetBlick);
+  if (!target.contextOccurrence || !target.storedContext) {
+    throw codedError("CONTEXT_REQUIRED", "semantic ranges require a target from sv_snapshot_range");
+  }
+  const [from] = await resolveCurvePoints(capture, target, [{ ...range.from, value: 0 }], {
+    coordinate: "local",
+  });
+  const [to] = await resolveCurvePoints(capture, target, [{ ...range.to, value: 0 }], {
+    coordinate: "local",
+  });
+  if (to.localBlick <= from.localBlick) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "semantic range end must resolve after its start"
+    );
+  }
+  return {
+    fromLocal: from.localBlick,
+    toLocal: to.localBlick,
+    resolvedFrom: from,
+    resolvedTo: to,
+  };
+}
+
+function formatResolvedRange(inputRange, resolvedRange) {
+  if (inputRange.kind === "semantic") {
+    return {
+      coordinate: "semantic",
+      from: {
+        source: resolvedRange.resolvedFrom.source,
+        input: resolvedRange.resolvedFrom.input,
+        localBlick: resolvedRange.resolvedFrom.localBlick,
+        absoluteBlick: resolvedRange.resolvedFrom.absoluteBlick,
+      },
+      to: {
+        source: resolvedRange.resolvedTo.source,
+        input: resolvedRange.resolvedTo.input,
+        localBlick: resolvedRange.resolvedTo.localBlick,
+        absoluteBlick: resolvedRange.resolvedTo.absoluteBlick,
+      },
+      localFromBlick: resolvedRange.fromLocal,
+      localToBlick: resolvedRange.toLocal,
+    };
+  }
+  return {
+    coordinate: inputRange.coordinate,
+    fromBlick: inputRange.fromBlick,
+    toBlick: inputRange.toBlick,
+    localFromBlick: resolvedRange.fromLocal,
+    localToBlick: resolvedRange.toLocal,
+  };
+}
+
 function normalizePoints(raw) {
   return (Array.isArray(raw) ? raw : [])
     .filter((entry) => Array.isArray(entry) && entry.length >= 2)
@@ -941,6 +1398,7 @@ function formatSingleTransaction(transaction) {
         requestedParameter: plan.requestedParameter,
         resolvedParameter: plan.resolvedParameter,
         mode: plan.mode,
+        range: formatRange(plan),
         before: { pointCount: plan.journal.length, stats: pointStats(plan.journal) },
         planned: {
           pointCount: plan.planned.length,
@@ -948,6 +1406,7 @@ function formatSingleTransaction(transaction) {
           points: inlinePoints(plan.planned, transaction.target.groupTimeOffsetBlick),
         },
         clampedCount: plan.clampedCount,
+        ...formatResolvedInputPositions(plan),
       },
       rollback: { attempted: false, verified: null },
       undo: undoEvidence(0),
@@ -976,6 +1435,7 @@ function formatSingleTransaction(transaction) {
         },
         clampedCount: plan.clampedCount,
         simplified: plan.simplifyThreshold !== undefined,
+        ...formatResolvedInputPositions(plan),
       },
       rollback: { attempted: false, verified: null },
       undo: undoEvidence(transaction.boundaryCalls, {
@@ -1016,6 +1476,12 @@ function formatBatchValidationFailure(request, error, { elapsedMs }) {
   const failure = failureEvidence(error, "validate", null);
   const target = isRecord(request?.target)
     ? {
+        ...(typeof request.target.contextId === "string"
+          ? { contextId: request.target.contextId }
+          : {}),
+        ...(typeof request.target.occurrenceId === "string"
+          ? { occurrenceId: request.target.occurrenceId }
+          : {}),
         ...(Number.isSafeInteger(request.target.trackIndex)
           ? { trackIndex: request.target.trackIndex }
           : {}),
@@ -1100,12 +1566,23 @@ function formatBatchTransaction(transaction, input) {
     indexBase: 0,
     responseMode: input.responseMode,
     target: {
-      trackIndex: input.target.trackIndex,
-      groupIndex: input.target.groupIndex,
+      ...(input.target.contextId ? { contextId: input.target.contextId } : {}),
+      ...(input.target.occurrenceId ? { occurrenceId: input.target.occurrenceId } : {}),
+      ...(transaction.target
+        ? {
+            trackIndex: transaction.target.trackIndex,
+            groupIndex: transaction.target.groupIndex,
+          }
+        : Number.isSafeInteger(input.target.trackIndex)
+          ? { trackIndex: input.target.trackIndex, groupIndex: input.target.groupIndex }
+          : {}),
       ...(input.target.expectedGroupUuid
         ? { expectedGroupUuid: input.target.expectedGroupUuid }
         : {}),
       ...(transaction.target ? { groupUuid: transaction.target.groupUuid } : {}),
+      ...(transaction.target?.sharedTargetOccurrences?.length
+        ? { sharedTargetOccurrences: transaction.target.sharedTargetOccurrences }
+        : {}),
     },
     ...(transaction.target ? { targetUuid: transaction.target.groupUuid } : {}),
     curves,
@@ -1166,6 +1643,7 @@ function formatBatchCurve(plan, input, index, transaction, responseMode) {
       ? { pointCount: plan.observed.length, stats: pointStats(plan.observed) }
       : null;
     output.verification = plan.verification ?? { attempted: false, passed: null };
+    Object.assign(output, formatResolvedInputPositions(plan));
     if (plan.rollback) output.rollback = plan.rollback;
   }
   if (responseMode === "verbose") {
@@ -1180,12 +1658,19 @@ function formatBatchCurve(plan, input, index, transaction, responseMode) {
 }
 
 function formatRange(plan) {
+  return formatResolvedRange(plan.inputRange, plan.range);
+}
+
+function formatResolvedInputPositions(plan) {
+  if (!plan.resolvedInputPoints.some((point) => point.source !== "blick")) return {};
   return {
-    coordinate: plan.inputRange.coordinate,
-    fromBlick: plan.inputRange.fromBlick,
-    toBlick: plan.inputRange.toBlick,
-    localFromBlick: plan.range.fromLocal,
-    localToBlick: plan.range.toLocal,
+    resolvedPositions: plan.resolvedInputPoints.map((point) => ({
+      source: point.source,
+      input: point.input,
+      localBlick: point.localBlick,
+      absoluteBlick: point.absoluteBlick,
+      value: point.value,
+    })),
   };
 }
 
@@ -1329,7 +1814,7 @@ function normalizeBatchPatchRequest(request) {
   };
 }
 
-function normalizeCurveInput(request) {
+export function normalizeCurveInput(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "curve must be an object");
   const parameter = normalizeParameter(request.parameter);
   if (!["replace", "add", "scale"].includes(request.mode)) {
@@ -1345,20 +1830,7 @@ function normalizeCurveInput(request) {
     if (request.points.length > 2000) {
       throw codedError("INVALID_ARGUMENTS", "points must contain at most 2000 items");
     }
-    points = request.points.map((point, index) => {
-      if (
-        !isRecord(point) ||
-        !Number.isFinite(point.blick) ||
-        !Number.isSafeInteger(point.blick) ||
-        !Number.isFinite(point.value)
-      ) {
-        throw codedError(
-          "INVALID_ARGUMENTS",
-          `points[${index}] must be {blick: integer, value: finite number}`
-        );
-      }
-      return { blick: point.blick, value: point.value };
-    });
+    points = request.points.map((point, index) => normalizeCurvePoint(point, index));
   } else {
     if (!Number.isFinite(request.amount)) {
       throw codedError("INVALID_ARGUMENTS", `${request.mode} mode requires a finite amount`);
@@ -1381,7 +1853,147 @@ function normalizeCurveInput(request) {
   };
 }
 
+function normalizeCurvePoint(point, index) {
+  if (!isRecord(point) || !Number.isFinite(point.value)) {
+    throw codedError("INVALID_ARGUMENTS", `points[${index}] must contain a finite value`);
+  }
+  const positionFields = ["blick", "anchor", "musicalPosition", "rangeBoundary", "gap"].filter(
+    (field) => point[field] !== undefined
+  );
+  if (positionFields.length !== 1) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `points[${index}] must specify exactly one position source`
+    );
+  }
+  if (positionFields[0] === "blick") {
+    if (!Number.isSafeInteger(point.blick)) {
+      throw codedError("INVALID_ARGUMENTS", `points[${index}].blick must be an integer`);
+    }
+    return { kind: "blick", blick: point.blick, value: point.value };
+  }
+  if (positionFields[0] === "musicalPosition") {
+    let musicalPosition;
+    try {
+      musicalPosition = normalizeMusicalPoint(
+        point.musicalPosition,
+        `points[${index}].musicalPosition`
+      );
+    } catch (error) {
+      throw codedError(error?.code ?? "INVALID_ARGUMENTS", error.message);
+    }
+    return { kind: "musical", musicalPosition, value: point.value };
+  }
+  if (positionFields[0] === "rangeBoundary") {
+    if (!["start", "end"].includes(point.rangeBoundary)) {
+      throw codedError("INVALID_ARGUMENTS", `points[${index}].rangeBoundary must be start or end`);
+    }
+    return { kind: "rangeBoundary", rangeBoundary: point.rangeBoundary, value: point.value };
+  }
+  if (positionFields[0] === "gap") {
+    return { kind: "gap", gap: normalizeNoteGap(point.gap, index), value: point.value };
+  }
+  return { kind: "anchor", anchor: normalizeNoteAnchor(point.anchor, index), value: point.value };
+}
+
+function normalizeNoteAnchor(anchor, index) {
+  const label = `points[${index}].anchor`;
+  if (!isRecord(anchor) || typeof anchor.noteId !== "string" || !anchor.noteId) {
+    throw codedError("INVALID_ARGUMENTS", `${label}.noteId must be a non-empty string`);
+  }
+  const position = normalizeRelativePosition(anchor.position, label, ["onset", "center", "end"]);
+  const offset = normalizeAnchorOffset(anchor.offset, label);
+  return { noteId: anchor.noteId, position, offset };
+}
+
+function normalizeNoteGap(gap, index) {
+  const label = `points[${index}].gap`;
+  if (
+    !isRecord(gap) ||
+    typeof gap.afterNoteId !== "string" ||
+    !gap.afterNoteId ||
+    typeof gap.beforeNoteId !== "string" ||
+    !gap.beforeNoteId ||
+    gap.afterNoteId === gap.beforeNoteId
+  ) {
+    throw codedError("INVALID_ARGUMENTS", `${label} requires two distinct note IDs`);
+  }
+  return {
+    afterNoteId: gap.afterNoteId,
+    beforeNoteId: gap.beforeNoteId,
+    position: normalizeRelativePosition(gap.position, label, ["start", "center", "end"]),
+    offset: normalizeAnchorOffset(gap.offset, label),
+  };
+}
+
+function normalizeRelativePosition(position, label, names) {
+  if (names.includes(position)) return position;
+  if (
+    isRecord(position) &&
+    Number.isFinite(position.ratio) &&
+    position.ratio >= 0 &&
+    position.ratio <= 1
+  ) {
+    return { ratio: position.ratio };
+  }
+  throw codedError(
+    "INVALID_ARGUMENTS",
+    `${label}.position must be ${names.join(", ")}, or {ratio:0..1}`
+  );
+}
+
+function normalizeAnchorOffset(offset, label) {
+  if (offset === undefined) return { unit: "blick", value: 0 };
+  if (
+    !isRecord(offset) ||
+    !["blick", "quarter", "beat"].includes(offset.unit) ||
+    !Number.isFinite(offset.value)
+  ) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `${label}.offset must be {unit:blick|quarter|beat,value:finite number}`
+    );
+  }
+  return { unit: offset.unit, value: offset.value };
+}
+
 function normalizeTarget(target) {
+  if (
+    isRecord(target) &&
+    (target.contextId !== undefined || target.occurrenceId !== undefined)
+  ) {
+    if (
+      typeof target.contextId !== "string" ||
+      target.contextId.length === 0 ||
+      typeof target.occurrenceId !== "string" ||
+      target.occurrenceId.length === 0
+    ) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        "context targets require non-empty contextId and occurrenceId"
+      );
+    }
+    if (
+      target.expectedGroupUuid !== undefined &&
+      (typeof target.expectedGroupUuid !== "string" || target.expectedGroupUuid.length === 0)
+    ) {
+      throw codedError("INVALID_ARGUMENTS", "target.expectedGroupUuid must be a non-empty string");
+    }
+    if (
+      target.allowSharedTargetMutation !== undefined &&
+      typeof target.allowSharedTargetMutation !== "boolean"
+    ) {
+      throw codedError("INVALID_ARGUMENTS", "allowSharedTargetMutation must be a boolean");
+    }
+    return {
+      contextId: target.contextId,
+      occurrenceId: target.occurrenceId,
+      allowSharedTargetMutation: target.allowSharedTargetMutation === true,
+      ...(target.expectedGroupUuid !== undefined
+        ? { expectedGroupUuid: target.expectedGroupUuid }
+        : {}),
+    };
+  }
   if (
     !isRecord(target) ||
     !Number.isSafeInteger(target.trackIndex) ||
@@ -1400,9 +2012,16 @@ function normalizeTarget(target) {
   ) {
     throw codedError("INVALID_ARGUMENTS", "target.expectedGroupUuid must be a non-empty string");
   }
+  if (
+    target.allowSharedTargetMutation !== undefined &&
+    typeof target.allowSharedTargetMutation !== "boolean"
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "allowSharedTargetMutation must be a boolean");
+  }
   return {
     trackIndex: target.trackIndex,
     groupIndex: target.groupIndex,
+    allowSharedTargetMutation: target.allowSharedTargetMutation === true,
     ...(target.expectedGroupUuid !== undefined
       ? { expectedGroupUuid: target.expectedGroupUuid }
       : {}),
@@ -1426,6 +2045,18 @@ function normalizeParameter(parameter) {
 }
 
 function normalizeRange(range) {
+  if (isRecord(range) && (range.from !== undefined || range.to !== undefined)) {
+    if (!isRecord(range.from) || !isRecord(range.to)) {
+      throw codedError("INVALID_ARGUMENTS", "semantic range requires from and to position objects");
+    }
+    const from = normalizeCurvePoint({ ...range.from, value: 0 }, "range.from");
+    const to = normalizeCurvePoint({ ...range.to, value: 0 }, "range.to");
+    return {
+      kind: "semantic",
+      from: stripSyntheticValue(from),
+      to: stripSyntheticValue(to),
+    };
+  }
   if (
     !isRecord(range) ||
     !Number.isSafeInteger(range.fromBlick) ||
@@ -1441,7 +2072,12 @@ function normalizeRange(range) {
   if (!["local", "absolute"].includes(coordinate)) {
     throw codedError("INVALID_ARGUMENTS", 'range.coordinate must be "local" or "absolute"');
   }
-  return { fromBlick: range.fromBlick, toBlick: range.toBlick, coordinate };
+  return { kind: "blick", fromBlick: range.fromBlick, toBlick: range.toBlick, coordinate };
+}
+
+function stripSyntheticValue(point) {
+  const { value, ...position } = point;
+  return position;
 }
 
 function failedResult(code, message, effects) {

@@ -21,6 +21,9 @@ function createRangeModel() {
     refs: [handle("NoteGroupReference"), handle("NoteGroupReference"), handle("NoteGroupReference")],
     groups: [handle("NoteGroup"), handle("NoteGroup")],
     notes: [handle("Note"), handle("Note"), handle("Note"), handle("Note")],
+    automations: Object.fromEntries(
+      ["pitchDelta", "tension", "loudness", "breathiness"].map((name) => [name, handle("Automation")])
+    ),
   };
   const meterMarks = [
     { position: 0, positionBlick: 0, numerator: 4, denominator: 4 },
@@ -35,7 +38,12 @@ function createRangeModel() {
     { onset: 3 * Q, duration: Q, pitch: 64, lyrics: "mi" }, // 与 re 之间有 1 拍休止
     { onset: 8 * BAR_4_4, duration: Q, pitch: 65, lyrics: "fa" }, // 绝对位置落在 3/4 段
   ];
-  const model = { hostCalls: [], fetchedNotesOfOutOfRangeGroup: false };
+  const model = {
+    hostCalls: [],
+    fetchedNotesOfOutOfRangeGroup: false,
+    secondReferenceInRange: false,
+    noteState,
+  };
   model.host = {
     epoch: () => 1,
     roots: async () => ({ project: h.project, sv: h.sv, mainEditor: h.mainEditor }),
@@ -55,6 +63,12 @@ function createRangeModel() {
       if (id === h.timeAxis.__handle__) {
         if (method === "getAllMeasureMarks") return meterMarks.map((mark) => ({ ...mark }));
         if (method === "getAllTempoMarks") return tempoMarks.map((mark) => ({ ...mark }));
+      }
+      if (id === h.sv.__handle__) {
+        if (method === "getPhonemesForGroup") return ["d ow", "r ey", "m iy", "f aa"];
+        if (method === "getComputedPitchForGroup") {
+          return Array.from({ length: args[3] }, (_, index) => 60 + index / 100);
+        }
       }
       const trackIndex = h.tracks.findIndex((track) => track.__handle__ === id);
       if (trackIndex >= 0) {
@@ -84,6 +98,16 @@ function createRangeModel() {
         if (method === "getVoice") return { paramTension: 0.2 };
       }
       if (id === h.refs[1].__handle__) {
+        if (model.secondReferenceInRange) {
+          if (method === "getOnset") return 2 * BAR_4_4;
+          if (method === "getEnd") return 4 * BAR_4_4;
+          if (method === "getTarget") return h.groups[0];
+          if (method === "isInstrumental") return false;
+          if (method === "isMain") return false;
+          if (method === "getTimeOffset") return 2 * BAR_4_4;
+          if (method === "getPitchOffset") return 0;
+          if (method === "getVoice") return { paramTension: 0.2 };
+        }
         // 完全在范围之后的 group：除 onset/end 外不应被访问。
         if (method === "getOnset") return 40 * BAR_4_4;
         if (method === "getEnd") return 44 * BAR_4_4;
@@ -108,6 +132,25 @@ function createRangeModel() {
         if (method === "getUUID") return "uuid-verse";
         if (method === "getNumNotes") return noteState.length;
         if (method === "getNote") return h.notes[args[0] - 1];
+        if (method === "getParameter") return h.automations[args[0]];
+      }
+      const automationName = Object.entries(h.automations).find(
+        ([, automation]) => automation.__handle__ === id
+      )?.[0];
+      if (automationName) {
+        if (method === "getType") return automationName;
+        if (method === "getDefinition") {
+          return { typeName: automationName, range: [-1, 1], defaultValue: 0 };
+        }
+        if (method === "getInterpolationMethod") return "Linear";
+        if (method === "getAllPoints") {
+          return automationName === "tension"
+            ? [
+                [0, 0.1],
+                [Q, 0.2],
+              ]
+            : [];
+        }
       }
       const noteIndex = h.notes.findIndex((note) => note.__handle__ === id);
       if (noteIndex >= 0) {
@@ -120,6 +163,8 @@ function createRangeModel() {
           getPhonemes: "",
           getLanguageOverride: "",
           getDetune: 0,
+          getIndexInParent: noteIndex + 1,
+          getAttributes: { rapAccent: noteIndex / 10 },
         };
         if (Object.hasOwn(getters, method)) return getters[method];
       }
@@ -129,10 +174,10 @@ function createRangeModel() {
   return model;
 }
 
-function createService(model) {
+function createService(model, options = {}) {
   return new RangeSnapshotService(
     { withExclusive: (task) => task(model.host) },
-    { now: () => 1000 }
+    { now: () => 1000, ...options }
   );
 }
 
@@ -194,6 +239,24 @@ test("range snapshot reports rests, neighbor lyrics, and group uuid per note", a
   assert.ok(notes.every((note) => note.absoluteEndBlick === note.absoluteOnsetBlick + note.durationBlick));
 });
 
+test("range snapshot includes a sustained note that starts before the range", async () => {
+  const model = createRangeModel();
+  model.noteState[0].duration = 2 * Q;
+  const service = createService(model);
+  const result = await service.snapshot({
+    scope: {
+      kind: "range",
+      trackIndices: [0],
+      from: { bar: 2, beat: 2 },
+      to: { bar: 2, beat: 3 },
+    },
+    include: ["notes"],
+  });
+
+  assert.ok(result.data.notes.some((note) => note.indexInGroup === 0));
+  assert.equal(result.data.notes.find((note) => note.indexInGroup === 0).absoluteOnsetBlick, BAR_4_4);
+});
+
 test("range snapshot filters by range, skips out-of-range groups, and honors trackIndices", async () => {
   const model = createRangeModel();
   const service = createService(model);
@@ -223,7 +286,12 @@ test("range snapshot includes mixer state and reports unsupported includes", asy
     solo: true,
   });
   const codes = result.warnings.filter((warning) => warning.code === "UNSUPPORTED_INCLUDE");
-  assert.equal(codes.length, 2);
+  assert.equal(codes.length, 1);
+  assert.equal(result.data.automation.length, 4);
+  assert.equal(
+    result.data.automation.find((curve) => curve.resolvedParameter === "tension").points.length,
+    2
+  );
   // instrumental track 也报告 mixer，但没有 notes。
   assert.deepEqual(result.data.tracks[1].mixer, {
     gainDecibel: -6,
@@ -277,4 +345,145 @@ test("range snapshot validates scope and track indices", async () => {
     }),
     (error) => error.code === "INVALID_ARGUMENTS"
   );
+});
+
+test("range snapshot returns one editable context with all tuning includes", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const result = await service.snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 12 } },
+    include: [
+      "notes",
+      "voiceParameters",
+      "automation",
+      "computedPitch",
+      "attributes",
+      "processing",
+    ],
+    automationParameters: ["tension"],
+    computedPitchSampling: { frames: 4 },
+  });
+
+  assert.match(result.contextId, /^ctx_/);
+  assert.equal(result.data.notes.length, 4);
+  assert.equal(result.data.attributes.length, 4);
+  assert.equal(result.data.automation.length, 1);
+  assert.deepEqual(result.data.automation[0].points[0].musical, {
+    bar: 2,
+    beat: 1,
+    tickInBeatBlick: 0,
+    numerator: 4,
+    denominator: 4,
+  });
+  assert.equal(result.data.computedPitch.length, 1);
+  assert.equal(result.data.computedPitch[0].values.length, 4);
+  assert.equal(result.data.tracks[0].groups[0].processing.state, "ready");
+  const occurrenceId = result.data.tracks[0].groups[0].occurrenceId;
+  assert.ok(result.data.notes.every((note) => note.id.startsWith(`${occurrenceId}:n:`)));
+  const stored = service.store.get(result.contextId);
+  assert.equal(stored.context.kind, "range");
+  assert.equal(stored.context.occurrences[0].targetGroupUuid, "uuid-verse");
+  assert.equal(stored.context.occurrences[0].noteFingerprints.length, 4);
+  assert.ok(Number.isFinite(result.timings.hostReadMs));
+});
+
+test("range snapshot budgets page captured data without repeating host reads", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const first = await service.snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 12 } },
+    include: ["notes", "automation", "computedPitch", "attributes"],
+    automationParameters: ["tension"],
+    computedPitchSampling: { frames: 4 },
+    budgets: { notes: 1, attributes: 1, automationPoints: 1, computedPitchFrames: 1 },
+  });
+  assert.equal(first.page.complete, false);
+  assert.equal(first.page.returned.notes, 1);
+  assert.equal(first.page.returned.automationPoints, 1);
+  const hostCallCount = model.hostCalls.length;
+
+  const second = await service.snapshot({ cursor: first.page.nextCursor });
+  assert.equal(second.page.index, 1);
+  assert.equal(model.hostCalls.length, hostCallCount);
+  assert.equal(second.contextId, first.contextId);
+  assert.equal(second.snapshotToken, first.snapshotToken);
+});
+
+test("range snapshot enforces global Automation and computed-pitch capture limits", async () => {
+  const automationModel = createRangeModel();
+  const automationService = createService(automationModel, {
+    captureLimits: { automationPoints: 1, computedPitchFrames: 20_000 },
+  });
+  await assert.rejects(
+    automationService.snapshot({
+      scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 3 } },
+      include: ["automation"],
+      automationParameters: ["tension"],
+    }),
+    (error) => error.code === "SNAPSHOT_AUTOMATION_LIMIT_REACHED"
+  );
+
+  const pitchModel = createRangeModel();
+  const pitchService = createService(pitchModel, {
+    captureLimits: { automationPoints: 20_000, computedPitchFrames: 1 },
+  });
+  await assert.rejects(
+    pitchService.snapshot({
+      scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 3 } },
+      include: ["computedPitch"],
+      computedPitchSampling: { frames: 2 },
+    }),
+    (error) => error.code === "SNAPSHOT_COMPUTED_PITCH_CAPTURE_LIMIT_REACHED"
+  );
+});
+
+test("compact range snapshot exposes summaries and a detail cursor", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const compact = await service.snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 12 } },
+    include: ["notes", "automation"],
+    automationParameters: ["tension"],
+    responseMode: "compact",
+  });
+  assert.equal(compact.data.notes, undefined);
+  assert.equal(compact.data.summaries.notes.count, 4);
+  assert.equal(compact.data.summaries.automation.points, 2);
+  assert.ok(compact.page.detailCursor);
+  const detail = await service.snapshot({ cursor: compact.page.detailCursor });
+  assert.equal(detail.data.notes.length, 4);
+});
+
+test("range snapshot accepts exact decimal and rational beats", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const decimal = await service.snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 2, beat: 1.5 }, to: { bar: 2, beat: 3 } },
+  });
+  assert.equal(decimal.data.range.from.blick, BAR_4_4 + Q / 2);
+  const rational = await service.snapshot({
+    scope: {
+      kind: "range",
+      trackIndices: [0],
+      from: { bar: 2, beat: { numerator: 3, denominator: 2 } },
+      to: { bar: 2, beat: 3 },
+    },
+  });
+  assert.equal(rational.data.range.from.blick, decimal.data.range.from.blick);
+});
+
+test("range occurrence identity distinguishes references to one shared target", async () => {
+  const model = createRangeModel();
+  model.secondReferenceInRange = true;
+  const result = await createService(model).snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 6 } },
+    include: ["notes"],
+  });
+  const groups = result.data.tracks[0].groups;
+  assert.equal(groups.length, 2);
+  assert.notEqual(groups[0].occurrenceId, groups[1].occurrenceId);
+  assert.deepEqual(groups[0].sharedTargetOccurrences, [
+    groups[0].occurrenceId,
+    groups[1].occurrenceId,
+  ]);
 });

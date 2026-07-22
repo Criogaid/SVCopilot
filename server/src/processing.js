@@ -1,6 +1,7 @@
 import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { createHostScope } from "./snapshot.js";
+import { ServiceTiming } from "./service-timing.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -13,28 +14,39 @@ export class ProcessingService {
   }
 
   async wait(request) {
+    const timer = new ServiceTiming({
+      now: this.now,
+      phaseNames: ["preflightReadMs", "processingWaitMs"],
+    });
     const options = normalizeRequest(request);
+    timer.requestCoordinator();
     return this.session.withExclusive(async (host) => {
+      timer.acquiredCoordinator();
       let resolved;
       let scope;
       try {
-        if (typeof options.contextId === "string") {
-          const stored = this.snapshotService.getContext(options.contextId, host.epoch());
-          resolved = await resolveContextTarget(host, stored, { verify: false });
-          scope = resolved.scope;
-          options.expectedNotes ??= contextGroupNoteCount(stored, resolved.notes.length);
-        } else {
-          scope = createHostScope(host);
-          const roots = await scope.roots();
-          resolved = { roots, group: options.group };
-        }
-        return await waitForProcessing(host, {
-          ...options,
-          roots: resolved.roots,
-          group: resolved.group,
-          sleepFn: this.sleep,
-          now: this.now,
+        await timer.measure("preflightReadMs", async () => {
+          if (typeof options.contextId === "string") {
+            const stored = this.snapshotService.getContext(options.contextId, host.epoch());
+            resolved = await resolveContextTarget(host, stored, { verify: false });
+            scope = resolved.scope;
+            options.expectedNotes ??= contextGroupNoteCount(stored, resolved.notes.length);
+          } else {
+            scope = createHostScope(host);
+            const roots = await scope.roots();
+            resolved = { roots, group: options.group };
+          }
         });
+        const result = await timer.measure("processingWaitMs", () =>
+          waitForProcessing(host, {
+            ...options,
+            roots: resolved.roots,
+            group: resolved.group,
+            sleepFn: this.sleep,
+            now: this.now,
+          })
+        );
+        return { ...result, timings: timer.finish() };
       } finally {
         await scope?.releaseAll();
       }

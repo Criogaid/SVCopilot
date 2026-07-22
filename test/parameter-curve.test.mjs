@@ -13,6 +13,7 @@ function createCurveModel() {
   const h = {
     project: handle("Project"),
     sv: handle("SV"),
+    timeAxis: handle("TimeAxis"),
     track: handle("Track"),
     ref: handle("NoteGroupReference"),
     instrumentalRef: handle("NoteGroupReference"),
@@ -30,6 +31,7 @@ function createCurveModel() {
     failures: [],
     groupOnset: 4 * Q,
     interpolationMethod: "Linear",
+    meterMarks: [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }],
     definition: {
       displayName: "Loudness",
       typeName: "loudness",
@@ -56,7 +58,7 @@ function createCurveModel() {
     epoch: () => 1,
     roots: async () => ({ project: h.project, sv: h.sv }),
     free: async () => {},
-    index: async () => null,
+    index: async ({ field }) => (field === "QUARTER" ? Q : null),
     call: async ({ handle: target, method, args = [] }) => {
       const failure = model.failures.find(
         (item) => item.method === method && item.remainingSkips-- <= 0
@@ -71,7 +73,11 @@ function createCurveModel() {
       if (id === h.project.__handle__) {
         if (method === "getNumTracks") return 1;
         if (method === "getTrack") return h.track;
+        if (method === "getTimeAxis") return h.timeAxis;
         if (method === "newUndoRecord") return ++model.undoCount;
+      }
+      if (id === h.timeAxis.__handle__ && method === "getAllMeasureMarks") {
+        return structuredClone(model.meterMarks);
       }
       if (id === h.track.__handle__) {
         if (method === "getNumGroups") return 2;
@@ -165,6 +171,100 @@ function createService(model) {
     { withExclusive: (task) => task(model.host) },
     { now: () => 1000 }
   );
+}
+
+function createRangeContextService(model, { shared = false } = {}) {
+  const notes = [
+    { __handle__: 850, __type__: "Note", __epoch__: 1 },
+    { __handle__: 851, __type__: "Note", __epoch__: 1 },
+  ];
+  const noteState = {
+    indexInGroup: 0,
+    onsetBlick: 0,
+    durationBlick: 2 * Q,
+    pitch: 60,
+    lyrics: "do",
+    phonemesOverride: "d ow",
+    languageOverride: "english",
+    detuneCents: 0,
+  };
+  const noteStates = [
+    noteState,
+    {
+      indexInGroup: 1,
+      onsetBlick: 3 * Q,
+      durationBlick: Q,
+      pitch: 62,
+      lyrics: "re",
+      phonemesOverride: "r ey",
+      languageOverride: "english",
+      detuneCents: 0,
+    },
+  ];
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    const id = request.handle?.__handle__;
+    if (id === model.handles.group.__handle__ && request.method === "getNote") {
+      return notes[request.args[0] - 1] ?? null;
+    }
+    const noteIndex = notes.findIndex((note) => note.__handle__ === id);
+    if (noteIndex >= 0) {
+      const state = noteStates[noteIndex];
+      const getters = {
+        getIndexInParent: state.indexInGroup + 1,
+        getOnset: state.onsetBlick,
+        getDuration: state.durationBlick,
+        getPitch: state.pitch,
+        getLyrics: state.lyrics,
+        getPhonemes: state.phonemesOverride,
+        getLanguageOverride: state.languageOverride,
+        getDetune: state.detuneCents,
+      };
+      if (Object.hasOwn(getters, request.method)) return getters[request.method];
+    }
+    return originalCall(request);
+  };
+  const contextId = "ctx_range";
+  const occurrenceId = `${contextId}:t:0:r:0`;
+  const sharedTargetOccurrences = shared
+    ? [occurrenceId, `${contextId}:t:0:r:1`]
+    : [occurrenceId];
+  const stored = {
+    epoch: 1,
+    contextId,
+    context: {
+      kind: "range",
+      quarterBlick: Q,
+      meterMarks: [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }],
+      range: { from: { blick: 4 * Q }, to: { blick: 8 * Q } },
+      occurrences: [
+        {
+          occurrenceId,
+          trackIndex: 0,
+          groupIndex: 0,
+          targetGroupUuid: "curve-group",
+          timeOffsetBlick: model.groupOnset,
+          sharedTargetOccurrences,
+          noteFingerprints: noteStates.map((state) => ({
+            ...state,
+            noteId: `${occurrenceId}:n:${state.indexInGroup}`,
+          })),
+        },
+      ],
+    },
+  };
+  const snapshotService = {
+    getContext(requestedContextId, epoch) {
+      if (requestedContextId !== contextId) throw new Error("unknown context");
+      if (epoch !== stored.epoch) throw new Error("stale context");
+      return stored;
+    },
+  };
+  const service = new ParameterCurveService(
+    { withExclusive: (task) => task(model.host) },
+    { now: () => 1000, snapshotService }
+  );
+  return { service, contextId, occurrenceId, noteState, noteStates };
 }
 
 // 在单曲线宿主模型上追加独立 Automation，用于验证跨曲线事务边界。
@@ -1143,4 +1243,222 @@ test("sv_patch_parameter_curves verbose includes point evidence and rejects dupl
   assert.equal(duplicateResult.curves[1].resolvedParameter, "loudness");
   assert.equal(duplicateResult.error.resolvedParameter, "loudness");
   assert.ok(Number.isFinite(duplicateResult.timings.serviceTotalMs));
+});
+
+test("range context resolves note anchors and musical positions in batch dry-run", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId },
+    dryRun: true,
+    responseMode: "standard",
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          {
+            anchor: {
+              noteId: `${occurrenceId}:n:0`,
+              position: "center",
+              offset: { unit: "quarter", value: 0.25 },
+            },
+            value: 1,
+          },
+          { musicalPosition: { bar: 2, beat: 1 }, value: 2 },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.target.contextId, contextId);
+  assert.equal(result.target.trackIndex, 0);
+  assert.deepEqual(
+    result.curves[0].resolvedPositions.map((point) => [point.source, point.localBlick]),
+    [
+      ["musicalPosition", 0],
+      ["noteAnchor", Q + Q / 4],
+    ]
+  );
+  assert.equal(model.undoCount, 0);
+});
+
+test("range context resolves semantic read bounds without exposing raw BLICK inputs", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const noteId = `${occurrenceId}:n:0`;
+  const result = await service.getCurve({
+    target: { contextId, occurrenceId },
+    parameter: "loudness",
+    range: {
+      from: { musicalPosition: { bar: 2, beat: 1 } },
+      to: { anchor: { noteId, position: "end" } },
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.range.coordinate, "semantic");
+  assert.equal(result.data.range.localFromBlick, 0);
+  assert.equal(result.data.range.localToBlick, 2 * Q);
+  assert.equal(result.data.range.from.source, "musicalPosition");
+  assert.equal(result.data.range.to.source, "noteAnchor");
+});
+
+test("single-curve dry-run reports semantic range and resolved point evidence", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const noteId = `${occurrenceId}:n:0`;
+  const result = await service.patchCurve({
+    target: { contextId, occurrenceId },
+    parameter: "loudness",
+    mode: "replace",
+    range: {
+      from: { anchor: { noteId, position: "onset" } },
+      to: { anchor: { noteId, position: "end" } },
+    },
+    points: [{ anchor: { noteId, position: "center" }, value: 1 }],
+    dryRun: true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.range.coordinate, "semantic");
+  assert.equal(result.data.resolvedPositions[0].source, "noteAnchor");
+  assert.equal(result.data.resolvedPositions[0].localBlick, Q);
+  assert.equal(model.undoCount, 0);
+});
+
+test("semantic ranges support snapshot boundaries and adjacent-note gap anchors", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId },
+    dryRun: true,
+    responseMode: "standard",
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { from: { rangeBoundary: "start" }, to: { rangeBoundary: "end" } },
+        points: [
+          {
+            gap: {
+              afterNoteId: `${occurrenceId}:n:0`,
+              beforeNoteId: `${occurrenceId}:n:1`,
+              position: "center",
+            },
+            value: 1,
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.curves[0].range.localFromBlick, 0);
+  assert.equal(result.curves[0].range.localToBlick, 4 * Q);
+  assert.equal(result.curves[0].resolvedPositions[0].source, "noteGap");
+  assert.equal(result.curves[0].resolvedPositions[0].localBlick, 2 * Q + Q / 2);
+});
+
+test("musical positions reject a range context whose meter map changed", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  model.meterMarks = [{ position: 0, positionBlick: 0, numerator: 3, denominator: 4 }];
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [{ musicalPosition: { bar: 2, beat: 1 }, value: 1 }],
+      },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "STALE_CONTEXT");
+  assert.equal(result.effects, "none");
+  assert.equal(model.undoCount, 0);
+});
+
+test("semantic curve points reject duplicate resolved positions before writing", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          { anchor: { noteId: `${occurrenceId}:n:0`, position: "onset" }, value: 1 },
+          { musicalPosition: { bar: 2, beat: 1 }, value: 2 },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "DUPLICATE_RESOLVED_POSITION");
+  assert.equal(result.effects, "none");
+  assert.equal(model.undoCount, 0);
+});
+
+test("note anchors reject stale fingerprints", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId, noteState } = createRangeContextService(model);
+  noteState.pitch = 61;
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          { anchor: { noteId: `${occurrenceId}:n:0`, position: "onset" }, value: 1 },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "STALE_CONTEXT");
+  assert.equal(model.undoCount, 0);
+});
+
+test("shared target occurrences require explicit mutation confirmation", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model, { shared: true });
+  const request = {
+    target: { contextId, occurrenceId },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [{ blick: 0, value: 1 }],
+      },
+    ],
+  };
+  const preview = await service.patchCurves(request);
+  assert.equal(preview.ok, true, JSON.stringify(preview));
+  assert.ok(preview.warnings.some((warning) => warning.code === "SHARED_TARGET_DRY_RUN"));
+  assert.equal(model.undoCount, 0);
+
+  const rejected = await service.patchCurves({ ...request, dryRun: false });
+  assert.equal(rejected.error.code, "SHARED_TARGET_REQUIRES_CONFIRMATION");
+  assert.equal(model.undoCount, 0);
+
+  const accepted = await service.patchCurves({
+    ...request,
+    dryRun: false,
+    target: { ...request.target, allowSharedTargetMutation: true },
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.target.sharedTargetOccurrences.length, 2);
+  assert.equal(model.undoCount, 2);
 });

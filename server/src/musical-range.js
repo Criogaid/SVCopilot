@@ -1,60 +1,82 @@
 import { createHash } from "node:crypto";
 
-import { createHostScope } from "./snapshot.js";
+import {
+  blickToMusical,
+  musicalToBlick,
+  normalizeMeterMarks,
+  normalizeMusicalPoint,
+  publicMusicalPoint,
+} from "./musical-time.js";
+import { readAutomationSnapshot } from "./parameter-curve.js";
+import { analyzePhonemeResult } from "./phoneme-state.js";
+import { ServiceTiming } from "./service-timing.js";
+import { SnapshotStore, createHostScope } from "./snapshot.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 
-const MAX_RANGE_NOTES = 800;
-const SUPPORTED_INCLUDES = new Set(["notes", "tempoMap", "meterMap", "mixer", "voiceParameters"]);
+export const RANGE_CAPTURE_LIMITS = Object.freeze({
+  notes: 2_000,
+  automationPoints: 20_000,
+  computedPitchFrames: 20_000,
+});
+const MAX_CAPTURED_NOTES = RANGE_CAPTURE_LIMITS.notes;
+const MAX_CAPTURED_AUTOMATION_POINTS = RANGE_CAPTURE_LIMITS.automationPoints;
+const MAX_CAPTURED_COMPUTED_PITCH_FRAMES = RANGE_CAPTURE_LIMITS.computedPitchFrames;
+const DEFAULT_AUTOMATION_PARAMETERS = ["pitchDelta", "tension", "loudness", "breathiness"];
+const DEFAULT_BUDGETS = Object.freeze({
+  notes: 200,
+  attributes: 200,
+  automationPoints: 2_000,
+  computedPitchFrames: 2_000,
+  bytes: 48 * 1024,
+});
+const RESPONSE_ENVELOPE_RESERVE_BYTES = 4 * 1024;
+const SUPPORTED_INCLUDES = new Set([
+  "notes",
+  "tempoMap",
+  "meterMap",
+  "mixer",
+  "voiceParameters",
+  "automation",
+  "computedPitch",
+  "attributes",
+  "processing",
+]);
 // 官方 API 尚无法可靠支持的 include；显式报告而不是静默忽略。
-const KNOWN_UNSUPPORTED_INCLUDES = new Set(["automation", "attributes", "retakes"]);
+const KNOWN_UNSUPPORTED_INCLUDES = new Set(["retakes"]);
 
 export class RangeSnapshotService {
-  constructor(session, { now = () => Date.now() } = {}) {
+  constructor(
+    session,
+    {
+      now = () => Date.now(),
+      snapshotService = null,
+      store = snapshotService?.store,
+      captureLimits = {},
+    } = {}
+  ) {
     this.session = session;
     this.now = now;
+    this.store = store ?? new SnapshotStore({ now });
+    this.captureLimits = {
+      automationPoints:
+        captureLimits.automationPoints ?? MAX_CAPTURED_AUTOMATION_POINTS,
+      computedPitchFrames:
+        captureLimits.computedPitchFrames ?? MAX_CAPTURED_COMPUTED_PITCH_FRAMES,
+    };
   }
 
   async snapshot(request = {}) {
+    if (request?.cursor !== undefined) return this._readCursor(request);
+    const timer = new ServiceTiming({
+      now: this.now,
+      phaseNames: ["hostReadMs", "serializationMs"],
+    });
     const input = normalizeRequest(request);
+    timer.requestCoordinator();
     return this.session.withExclusive(async (host) => {
+      timer.acquiredCoordinator();
       const capture = createHostScope(host);
       try {
-        const roots = await capture.roots();
-        const timeAxis = await capture.call(roots.project, "getTimeAxis", [], {
-          inferredType: "TimeAxis",
-        });
-        const meterMarks = normalizeMeterMarks(
-          await capture.call(timeAxis, "getAllMeasureMarks", [], {
-            resultFormat: "typed-v2",
-            resultShape: "array",
-          })
-        );
-        const tempoMarks = normalizeTempoMarks(
-          await capture.call(timeAxis, "getAllTempoMarks", [], {
-            resultFormat: "typed-v2",
-            resultShape: "array",
-          })
-        );
-        // 不缓存或复制常量，避免宿主版本与服务端时间基准发生漂移。
-        const quarterBlick = normalizeQuarterBlick(await capture.index("QUARTER"));
-
-        const fromBlick = musicalToBlick(input.from, meterMarks, quarterBlick);
-        const toBlick = musicalToBlick(input.to, meterMarks, quarterBlick);
-        if (toBlick <= fromBlick) {
-          throw codedError("INVALID_RANGE", "range end must be after range start");
-        }
-
-        const trackCount = await capture.call(roots.project, "getNumTracks");
-        const trackIndices = input.trackIndices ?? [...Array(trackCount).keys()];
-        for (const index of trackIndices) {
-          if (index >= trackCount) {
-            throw codedError(
-              "TRACK_INDEX_OUT_OF_RANGE",
-              `trackIndex ${index} is outside 0-${Math.max(0, trackCount - 1)} (native index ${index + 1})`
-            );
-          }
-        }
-
         const warnings = [];
         for (const item of input.unsupportedIncludes) {
           warnings.push({
@@ -62,163 +84,621 @@ export class RangeSnapshotService {
             message: `include "${item}" is not yet available for range snapshots and was skipped.`,
           });
         }
-
-        const tracks = [];
-        const notes = [];
-        let truncated = false;
-        for (const trackIndex of trackIndices) {
-          if (truncated) break;
-          const trackHandle = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
-            inferredType: "Track",
-          });
-          const track = {
-            index: trackIndex,
-            name: await capture.call(trackHandle, "getName"),
-            groupCount: await capture.call(trackHandle, "getNumGroups"),
-            groups: [],
-          };
-          if (input.include.has("mixer")) {
-            const mixer = await capture.call(trackHandle, "getMixer", [], {
-              inferredType: "TrackMixer",
-            });
-            track.mixer = {
-              gainDecibel: await capture.call(mixer, "getGainDecibel"),
-              pan: await capture.call(mixer, "getPan"),
-              muted: await capture.call(mixer, "isMuted"),
-              solo: await capture.call(mixer, "isSolo"),
-            };
-          }
-
-          const groupEntries = [];
-          for (let groupIndex = 0; groupIndex < track.groupCount; groupIndex += 1) {
-            const reference = await capture.call(trackHandle, "getGroupReference", [groupIndex + 1], {
-              inferredType: "NoteGroupReference",
-            });
-            const onsetBlick = await capture.call(reference, "getOnset");
-            const endBlick = await capture.call(reference, "getEnd");
-            // 范围外 group 只读 onset/end 即跳过，不展开 target 和 notes。
-            if (endBlick <= fromBlick || onsetBlick >= toBlick) continue;
-            groupEntries.push({ groupIndex, reference, onsetBlick, endBlick });
-          }
-          groupEntries.sort((a, b) => a.onsetBlick - b.onsetBlick);
-
-          for (const entry of groupEntries) {
-            if (truncated) break;
-            const group = {
-              index: entry.groupIndex,
-              onsetBlick: entry.onsetBlick,
-              endBlick: entry.endBlick,
-              instrumental: await capture.call(entry.reference, "isInstrumental"),
-              isMain: await capture.call(entry.reference, "isMain"),
-              timeOffsetBlick: await capture.call(entry.reference, "getTimeOffset"),
-              pitchOffsetSemitone: await capture.call(entry.reference, "getPitchOffset"),
-              noteCount: 0,
-            };
-            if (!group.instrumental) {
-              const target = await capture.call(entry.reference, "getTarget", [], {
-                inferredType: "NoteGroup",
-              });
-              group.name = await capture.call(target, "getName");
-              group.uuid = await capture.call(target, "getUUID");
-              group.noteCount = await capture.call(target, "getNumNotes");
-              if (input.include.has("voiceParameters")) {
-                group.voice = {
-                  identityStatus: "unobservable",
-                  parameters: normalizeVoiceParameters(
-                    await capture.call(entry.reference, "getVoice", [], {
-                      resultFormat: "typed-v2",
-                    })
-                  ),
-                };
-              }
-              if (input.include.has("notes")) {
-                const emitted = await readGroupNotes(capture, {
-                  target,
-                  group,
-                  trackIndex,
-                  fromBlick,
-                  toBlick,
-                  meterMarks,
-                  quarterBlick,
-                  remaining: MAX_RANGE_NOTES - notes.length,
-                });
-                notes.push(...emitted.notes);
-                if (emitted.truncated) truncated = true;
-              }
-            }
-            track.groups.push(group);
-          }
-          tracks.push(track);
-        }
-
-        if (truncated) {
-          warnings.push({
-            code: "RANGE_NOTE_LIMIT_REACHED",
-            message: `range snapshot returns at most ${MAX_RANGE_NOTES} notes; traversal stopped early — narrow the range or track list to read the rest.`,
-          });
-        }
-
-        const data = {
-          scope: "range",
-          indexBase: 0,
-          barBase: 1,
-          beatBase: 1,
-          units: { time: "blick", pitch: "midi", detune: "cent" },
-          timebase: { quarterBlick },
-          range: {
-            from: { ...input.from, blick: fromBlick },
-            to: { ...input.to, blick: toBlick },
-          },
-          trackCount,
-          tracks,
-          ...(input.include.has("notes") ? { notes } : {}),
-          ...(input.include.has("tempoMap") ? { tempoMap: tempoMarks } : {}),
-          ...(input.include.has("meterMap")
-            ? {
-                meterMap: meterMarks.map((mark) => ({
-                  bar: mark.position + 1,
-                  positionBlick: mark.positionBlick,
-                  numerator: mark.numerator,
-                  denominator: mark.denominator,
-                })),
-              }
-            : {}),
-          snapshotComplete: !truncated,
-          capabilities: { singerIdentity: "unobservable", hostRevision: "unavailable" },
-        };
+        const captured = await timer.measure("hostReadMs", () =>
+          captureRange(capture, host, input, warnings, this.captureLimits)
+        );
         // token 是内容 hash，不是宿主 revision：相同 token 只说明两次读取内容一致。
-        const snapshotToken = contentToken(data);
+        const snapshotToken = contentToken(captured.data);
+        const stored = this.store.create({
+          epoch: host.epoch(),
+          scope: { kind: "range" },
+          observedAt: new Date(this.now()).toISOString(),
+          context: { kind: "range", occurrences: [] },
+        });
+        const prepared = await timer.measure("serializationMs", async () =>
+          prepareStoredRange(stored, captured, input, snapshotToken, warnings)
+        );
         if (input.sinceToken && input.sinceToken === snapshotToken) {
           return {
             ok: true,
             status: "no_change",
+            contextId: stored.contextId,
             snapshotToken,
-            observedAt: new Date(this.now()).toISOString(),
+            observedAt: stored.observedAt,
             consistency: "best-effort",
             data: null,
+            page: { complete: true, nextCursor: null },
             warnings,
+            timings: timer.finish(),
           };
         }
-        return {
-          ok: true,
-          status: "succeeded",
-          snapshotToken,
-          ...(input.sinceToken ? { changedSinceToken: true } : {}),
-          observedAt: new Date(this.now()).toISOString(),
-          consistency: "best-effort",
-          data,
-          warnings,
-        };
+        return formatStoredRangePage(stored, prepared.initialPage, {
+          changedSinceToken: input.sinceToken !== undefined,
+          timings: timer.finish(),
+        });
       } finally {
         await capture.releaseAll();
       }
     });
   }
+
+  async _readCursor(request) {
+    const timer = new ServiceTiming({ now: this.now, phaseNames: ["serializationMs"] });
+    if (!isRecord(request) || typeof request.cursor !== "string" || !request.cursor) {
+      throw codedError("INVALID_CURSOR", "cursor must be a non-empty string");
+    }
+    const decoded = this.store.decodeCursor(request.cursor);
+    if (!decoded || !["range", "range-detail"].includes(decoded.kind)) {
+      throw codedError("INVALID_CURSOR", "cursor is malformed or is not a range cursor");
+    }
+    const stored = this.store.get(decoded.contextId);
+    if (!stored?.rangePages) throw codedError("EXPIRED_CURSOR", "range cursor has expired");
+    const pageIndex = decoded.kind === "range-detail" ? 0 : decoded.offset;
+    const page = stored.rangePages[pageIndex];
+    if (!page) throw codedError("STALE_CURSOR", "range cursor is past the final page");
+    timer.requestCoordinator();
+    const result = await timer.measure("serializationMs", async () =>
+      formatStoredRangePage(stored, page)
+    );
+    return { ...result, timings: timer.finish() };
+  }
+}
+
+async function captureRange(capture, host, input, warnings, captureLimits) {
+  const roots = await capture.roots();
+  const timeAxis = await capture.call(roots.project, "getTimeAxis", [], {
+    inferredType: "TimeAxis",
+  });
+  const meterMarks = normalizeMeterMarks(
+    await capture.call(timeAxis, "getAllMeasureMarks", [], {
+      resultFormat: "typed-v2",
+      resultShape: "array",
+    })
+  );
+  const tempoMarks = normalizeTempoMarks(
+    await capture.call(timeAxis, "getAllTempoMarks", [], {
+      resultFormat: "typed-v2",
+      resultShape: "array",
+    })
+  );
+  // 不缓存宿主常量，避免 Studio 版本变化后继续使用旧时间基准。
+  const quarterBlick = normalizeQuarterBlick(await capture.index("QUARTER"));
+  const fromBlick = musicalToBlick(input.from, meterMarks, quarterBlick);
+  const toBlick = musicalToBlick(input.to, meterMarks, quarterBlick);
+  if (toBlick <= fromBlick) throw codedError("INVALID_RANGE", "range end must be after range start");
+
+  const trackCount = await capture.call(roots.project, "getNumTracks");
+  const trackIndices = input.trackIndices ?? [...Array(trackCount).keys()];
+  for (const index of trackIndices) {
+    if (index >= trackCount) {
+      throw codedError(
+        "TRACK_INDEX_OUT_OF_RANGE",
+        `trackIndex ${index} is outside 0-${Math.max(0, trackCount - 1)} (native index ${index + 1})`
+      );
+    }
+  }
+
+  const tracks = [];
+  const notes = [];
+  const attributes = [];
+  const automation = [];
+  const computedPitch = [];
+  const occurrences = [];
+  let capturedAutomationPoints = 0;
+  let capturedComputedPitchFrames = 0;
+  for (const trackIndex of trackIndices) {
+    const trackHandle = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
+      inferredType: "Track",
+    });
+    const track = {
+      index: trackIndex,
+      name: await capture.call(trackHandle, "getName"),
+      groupCount: await capture.call(trackHandle, "getNumGroups"),
+      groups: [],
+    };
+    if (input.include.has("mixer")) {
+      const mixer = await capture.call(trackHandle, "getMixer", [], {
+        inferredType: "TrackMixer",
+      });
+      track.mixer = {
+        gainDecibel: await capture.call(mixer, "getGainDecibel"),
+        pan: await capture.call(mixer, "getPan"),
+        muted: await capture.call(mixer, "isMuted"),
+        solo: await capture.call(mixer, "isSolo"),
+      };
+    }
+
+    const groupEntries = [];
+    for (let groupIndex = 0; groupIndex < track.groupCount; groupIndex += 1) {
+      const reference = await capture.call(trackHandle, "getGroupReference", [groupIndex + 1], {
+        inferredType: "NoteGroupReference",
+      });
+      const onsetBlick = await capture.call(reference, "getOnset");
+      const endBlick = await capture.call(reference, "getEnd");
+      if (endBlick <= fromBlick || onsetBlick >= toBlick) continue;
+      groupEntries.push({ groupIndex, reference, onsetBlick, endBlick });
+    }
+    groupEntries.sort((left, right) => left.onsetBlick - right.onsetBlick);
+
+    for (const entry of groupEntries) {
+      const occurrenceKey = `${trackIndex}:${entry.groupIndex}`;
+      const group = {
+        index: entry.groupIndex,
+        onsetBlick: entry.onsetBlick,
+        endBlick: entry.endBlick,
+        instrumental: await capture.call(entry.reference, "isInstrumental"),
+        isMain: await capture.call(entry.reference, "isMain"),
+        timeOffsetBlick: await capture.call(entry.reference, "getTimeOffset"),
+        pitchOffsetSemitone: await capture.call(entry.reference, "getPitchOffset"),
+        noteCount: 0,
+      };
+      const occurrence = {
+        occurrenceKey,
+        trackIndex,
+        groupIndex: entry.groupIndex,
+        targetGroupUuid: null,
+        timeOffsetBlick: group.timeOffsetBlick,
+        noteFingerprints: [],
+        group,
+      };
+      occurrences.push(occurrence);
+
+      if (!group.instrumental) {
+        const target = await capture.call(entry.reference, "getTarget", [], {
+          inferredType: "NoteGroup",
+        });
+        group.name = await capture.call(target, "getName");
+        group.uuid = await capture.call(target, "getUUID");
+        group.targetGroupUuid = group.uuid;
+        group.noteCount = await capture.call(target, "getNumNotes");
+        occurrence.targetGroupUuid = group.uuid;
+        if (input.include.has("voiceParameters") || input.include.has("automation")) {
+          group.voice = {
+            identityStatus: "unobservable",
+            parameters: normalizeVoiceParameters(
+              await capture.call(entry.reference, "getVoice", [], { resultFormat: "typed-v2" })
+            ),
+          };
+        }
+
+        if (input.include.has("notes") || input.include.has("attributes")) {
+          const emitted = await readGroupNotes(capture, {
+            target,
+            group,
+            occurrenceKey,
+            trackIndex,
+            fromBlick,
+            toBlick,
+            meterMarks,
+            quarterBlick,
+            includeAttributes: input.include.has("attributes"),
+            remaining: MAX_CAPTURED_NOTES - notes.length,
+          });
+          if (emitted.truncated) {
+            throw codedError(
+              "SNAPSHOT_NOTE_CAPTURE_LIMIT_REACHED",
+              `range contains more than ${MAX_CAPTURED_NOTES} notes; narrow the range or track list`
+            );
+          }
+          notes.push(...emitted.notes);
+          attributes.push(...emitted.attributes);
+          occurrence.noteFingerprints = emitted.fingerprints;
+        }
+
+        if (input.include.has("processing")) {
+          const phonemes = await capture.call(roots.sv, "getPhonemesForGroup", [entry.reference], {
+            resultFormat: "typed-v2",
+            resultShape: "array",
+            resultLength: group.noteCount,
+          });
+          group.processing = {
+            ...analyzePhonemeResult(phonemes, group.noteCount),
+          };
+        }
+
+        const curveTarget = {
+          roots,
+          reference: entry.reference,
+          group: target,
+          groupOnsetBlick: entry.onsetBlick,
+          groupTimeOffsetBlick: group.timeOffsetBlick,
+          groupUuid: group.uuid,
+        };
+        if (input.include.has("automation")) {
+          for (const parameter of input.automationParameters) {
+            const remainingPoints = captureLimits.automationPoints - capturedAutomationPoints;
+            const curve = await readAutomationSnapshot(
+              capture,
+              curveTarget,
+              parameter,
+              { coordinate: "absolute", fromBlick, toBlick },
+              { maxPoints: remainingPoints }
+            );
+            capturedAutomationPoints += curve.points.length;
+            automation.push({
+              occurrenceKey,
+              ...curve,
+              points: curve.points.map((point) => ({
+                ...point,
+                musical: blickToMusical(point.absoluteBlick, meterMarks, quarterBlick),
+              })),
+            });
+          }
+        }
+        if (input.include.has("computedPitch")) {
+          const sampling = computedPitchSampling(input.computedPitchSampling, {
+            fromBlick,
+            toBlick,
+            timeOffsetBlick: group.timeOffsetBlick,
+          });
+          if (
+            capturedComputedPitchFrames + sampling.frames >
+            captureLimits.computedPitchFrames
+          ) {
+            throw codedError(
+              "SNAPSHOT_COMPUTED_PITCH_CAPTURE_LIMIT_REACHED",
+              `range requests more than ${captureLimits.computedPitchFrames} computed-pitch frames; narrow the range, track list, or sampling`
+            );
+          }
+          const raw = await capture.call(
+            roots.sv,
+            "getComputedPitchForGroup",
+            [entry.reference, sampling.startBlick, sampling.intervalBlick, sampling.frames],
+            {
+              resultFormat: "typed-v2",
+              resultShape: "array",
+              resultLength: sampling.frames,
+            }
+          );
+          const values = normalizeComputedPitch(raw, sampling.frames);
+          capturedComputedPitchFrames += values.length;
+          const numericValues = values.filter(Number.isFinite);
+          computedPitch.push({
+            occurrenceKey,
+            ...sampling,
+            values,
+            evidence: {
+              requestedFrames: sampling.frames,
+              observedFrames: numericValues.length,
+              nullFrameIndices: values.flatMap((value, index) =>
+                Number.isFinite(value) ? [] : [index]
+              ),
+            },
+          });
+        }
+      }
+      track.groups.push(group);
+    }
+    tracks.push(track);
+  }
+
+  const data = {
+    scope: "range",
+    indexBase: 0,
+    barBase: 1,
+    beatBase: 1,
+    units: { time: "blick", pitch: "midi", detune: "cent" },
+    timebase: { quarterBlick },
+    range: {
+      from: { ...publicMusicalPoint(input.from), blick: fromBlick },
+      to: { ...publicMusicalPoint(input.to), blick: toBlick },
+    },
+    trackCount,
+    tracks,
+    ...(input.include.has("notes") ? { notes } : {}),
+    ...(input.include.has("attributes") ? { attributes } : {}),
+    ...(input.include.has("automation") ? { automation } : {}),
+    ...(input.include.has("computedPitch") ? { computedPitch } : {}),
+    ...(input.include.has("tempoMap") ? { tempoMap: tempoMarks } : {}),
+    ...(input.include.has("meterMap")
+      ? {
+          meterMap: meterMarks.map((mark) => ({
+            bar: mark.position + 1,
+            positionBlick: mark.positionBlick,
+            numerator: mark.numerator,
+            denominator: mark.denominator,
+          })),
+        }
+      : {}),
+    captureComplete: true,
+    capabilities: { singerIdentity: "unobservable", hostRevision: "unavailable" },
+  };
+  return {
+    data,
+    occurrences,
+    meterMarks,
+    tempoMarks,
+    quarterBlick,
+    epoch: host.epoch(),
+  };
+}
+
+function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
+  const occurrenceByKey = new Map();
+  const occurrencesByTarget = new Map();
+  for (const occurrence of captured.occurrences) {
+    const occurrenceId = `${stored.contextId}:t:${occurrence.trackIndex}:r:${occurrence.groupIndex}`;
+    occurrence.occurrenceId = occurrenceId;
+    occurrence.group.occurrenceId = occurrenceId;
+    occurrenceByKey.set(occurrence.occurrenceKey, occurrence);
+    if (occurrence.targetGroupUuid) {
+      const list = occurrencesByTarget.get(occurrence.targetGroupUuid) ?? [];
+      list.push(occurrenceId);
+      occurrencesByTarget.set(occurrence.targetGroupUuid, list);
+    }
+  }
+  for (const occurrence of captured.occurrences) {
+    const sharedTargetOccurrences = occurrence.targetGroupUuid
+      ? occurrencesByTarget.get(occurrence.targetGroupUuid)
+      : [];
+    occurrence.group.sharedTargetOccurrences = sharedTargetOccurrences;
+    const noteFingerprints = occurrence.noteFingerprints.map((fingerprint) => {
+      const noteId = `${occurrence.occurrenceId}:n:${fingerprint.indexInGroup}`;
+      return { ...fingerprint, noteId };
+    });
+    stored.context.occurrences.push({
+      occurrenceId: occurrence.occurrenceId,
+      trackIndex: occurrence.trackIndex,
+      groupIndex: occurrence.groupIndex,
+      targetGroupUuid: occurrence.targetGroupUuid,
+      timeOffsetBlick: occurrence.timeOffsetBlick,
+      sharedTargetOccurrences,
+      noteFingerprints,
+    });
+  }
+  for (const collectionName of ["notes", "attributes", "automation", "computedPitch"]) {
+    for (const item of captured.data[collectionName] ?? []) {
+      const occurrence = occurrenceByKey.get(item.occurrenceKey);
+      item.occurrenceId = occurrence.occurrenceId;
+      if (Number.isSafeInteger(item.indexInGroup)) {
+        item.noteId = `${occurrence.occurrenceId}:n:${item.indexInGroup}`;
+        if (collectionName === "notes") item.id = item.noteId;
+      }
+      delete item.occurrenceKey;
+    }
+  }
+  stored.context.range = captured.data.range;
+  stored.context.quarterBlick = captured.quarterBlick;
+  stored.context.meterMarks = captured.meterMarks;
+  stored.context.snapshotToken = snapshotToken;
+  stored.snapshotToken = snapshotToken;
+  stored.warnings = warnings;
+  stored.responseMode = input.responseMode;
+  stored.rangePages = buildRangePages(captured.data, input.budgets, stored);
+
+  if (input.responseMode === "compact") {
+    return { initialPage: compactRangePage(captured.data, stored) };
+  }
+  return { initialPage: stored.rangePages[0] };
+}
+
+function formatStoredRangePage(stored, page, { changedSinceToken = false, timings } = {}) {
+  return {
+    ok: true,
+    status: "succeeded",
+    contextId: stored.contextId,
+    snapshotToken: stored.snapshotToken,
+    ...(changedSinceToken ? { changedSinceToken: true } : {}),
+    observedAt: stored.observedAt,
+    consistency: "best-effort",
+    data: page.data,
+    page: page.page,
+    warnings: stored.warnings ?? [],
+    ...(timings ? { timings } : {}),
+  };
+}
+
+function compactRangePage(data, stored) {
+  const automation = data.automation ?? [];
+  const computedPitch = data.computedPitch ?? [];
+  return {
+    data: {
+      ...rangeBaseData(data),
+      summaries: {
+        notes: { count: data.notes?.length ?? 0 },
+        attributes: { count: data.attributes?.length ?? 0 },
+        automation: {
+          curves: automation.length,
+          points: automation.reduce((sum, curve) => sum + curve.points.length, 0),
+          parameters: [...new Set(automation.map((curve) => curve.resolvedParameter))],
+        },
+        computedPitch: {
+          groups: computedPitch.length,
+          frames: computedPitch.reduce((sum, item) => sum + item.values.length, 0),
+          observedFrames: computedPitch.reduce(
+            (sum, item) => sum + item.evidence.observedFrames,
+            0
+          ),
+        },
+      },
+      snapshotComplete: true,
+    },
+    page: {
+      complete: true,
+      nextCursor: null,
+      detailCursor: stored.storeCursor ?? null,
+      returned: { notes: 0, attributes: 0, automationPoints: 0, computedPitchFrames: 0 },
+    },
+  };
+}
+
+function buildRangePages(data, initialBudgets, stored) {
+  let budgets = { ...initialBudgets };
+  while (true) {
+    const pages = paginateRangeData(data, budgets);
+    const largest = Math.max(...pages.map((page) => Buffer.byteLength(JSON.stringify(page), "utf8")));
+    const pageByteLimit = budgets.bytes - RESPONSE_ENVELOPE_RESERVE_BYTES;
+    if (largest <= pageByteLimit) {
+      for (let index = 0; index < pages.length; index += 1) {
+        pages[index].page.nextCursor =
+          index + 1 < pages.length
+            ? storedCursor(stored, index + 1, "range")
+            : null;
+        pages[index].page.complete = index + 1 === pages.length;
+        pages[index].data.snapshotComplete = index + 1 === pages.length;
+      }
+      stored.storeCursor = storedCursor(stored, 0, "range-detail");
+      return pages;
+    }
+    const next = {
+      ...budgets,
+      notes: Math.max(1, Math.floor(budgets.notes / 2)),
+      attributes: Math.max(1, Math.floor(budgets.attributes / 2)),
+      automationPoints: Math.max(1, Math.floor(budgets.automationPoints / 2)),
+      computedPitchFrames: Math.max(1, Math.floor(budgets.computedPitchFrames / 2)),
+    };
+    if (
+      next.notes === budgets.notes &&
+      next.attributes === budgets.attributes &&
+      next.automationPoints === budgets.automationPoints &&
+      next.computedPitchFrames === budgets.computedPitchFrames
+    ) {
+      throw codedError(
+        "SNAPSHOT_RESPONSE_BUDGET_TOO_SMALL",
+        "range metadata alone exceeds the requested byte budget; narrow the range or track list"
+      );
+    }
+    budgets = next;
+  }
+}
+
+function paginateRangeData(data, budgets) {
+  const notes = data.notes ?? [];
+  const attributes = data.attributes ?? [];
+  const emptyAutomation = (data.automation ?? [])
+    .filter((item) => item.points.length === 0)
+    .map((item) => ({ ...item, offset: 0, points: [] }));
+  const emptyComputedPitch = (data.computedPitch ?? [])
+    .filter((item) => item.values.length === 0)
+    .map((item) => ({ ...item, offset: 0, values: [] }));
+  const automation = flattenSeries(data.automation ?? [], "points");
+  const computedPitch = flattenSeries(data.computedPitch ?? [], "values");
+  const pageCount = Math.max(
+    1,
+    Math.ceil(notes.length / budgets.notes),
+    Math.ceil(attributes.length / budgets.attributes),
+    Math.ceil(automation.length / budgets.automationPoints),
+    Math.ceil(computedPitch.length / budgets.computedPitchFrames)
+  );
+  const pages = [];
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const pageNotes = notes.slice(pageIndex * budgets.notes, (pageIndex + 1) * budgets.notes);
+    const pageAttributes = attributes.slice(
+      pageIndex * budgets.attributes,
+      (pageIndex + 1) * budgets.attributes
+    );
+    const pageAutomation = groupSeries(
+      automation.slice(
+        pageIndex * budgets.automationPoints,
+        (pageIndex + 1) * budgets.automationPoints
+      ),
+      "points"
+    );
+    if (pageIndex === 0) pageAutomation.unshift(...emptyAutomation);
+    const pageComputedPitch = groupSeries(
+      computedPitch.slice(
+        pageIndex * budgets.computedPitchFrames,
+        (pageIndex + 1) * budgets.computedPitchFrames
+      ),
+      "values"
+    );
+    if (pageIndex === 0) pageComputedPitch.unshift(...emptyComputedPitch);
+    pages.push({
+      data: {
+        ...rangeBaseData(data),
+        ...(Object.hasOwn(data, "notes") ? { notes: pageNotes } : {}),
+        ...(Object.hasOwn(data, "attributes") ? { attributes: pageAttributes } : {}),
+        ...(Object.hasOwn(data, "automation") ? { automation: pageAutomation } : {}),
+        ...(Object.hasOwn(data, "computedPitch") ? { computedPitch: pageComputedPitch } : {}),
+        snapshotComplete: false,
+      },
+      page: {
+        index: pageIndex,
+        complete: false,
+        nextCursor: null,
+        returned: {
+          notes: pageNotes.length,
+          attributes: pageAttributes.length,
+          automationPoints: pageAutomation.reduce((sum, item) => sum + item.points.length, 0),
+          computedPitchFrames: pageComputedPitch.reduce((sum, item) => sum + item.values.length, 0),
+        },
+      },
+    });
+  }
+  return pages;
+}
+
+function rangeBaseData(data) {
+  const { notes, attributes, automation, computedPitch, snapshotComplete, ...base } = data;
+  return base;
+}
+
+function flattenSeries(items, field) {
+  const flattened = [];
+  for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+    const { [field]: values, ...metadata } = items[itemIndex];
+    for (let valueIndex = 0; valueIndex < values.length; valueIndex += 1) {
+      flattened.push({ itemIndex, valueIndex, metadata, value: values[valueIndex] });
+    }
+  }
+  return flattened;
+}
+
+function groupSeries(flattened, field) {
+  const groups = [];
+  for (const item of flattened) {
+    let group = groups.at(-1);
+    if (!group || group._itemIndex !== item.itemIndex) {
+      group = {
+        ...item.metadata,
+        _itemIndex: item.itemIndex,
+        offset: item.valueIndex,
+        [field]: [],
+      };
+      groups.push(group);
+    }
+    group[field].push(item.value);
+  }
+  for (const group of groups) delete group._itemIndex;
+  return groups;
+}
+
+function storedCursor(stored, offset, kind) {
+  return Buffer.from(
+    JSON.stringify({ contextId: stored.contextId, offset, kind }),
+    "utf8"
+  ).toString("base64url");
+}
+
+function computedPitchSampling(request, range) {
+  const frames = request.frames;
+  const startBlick = request.startBlick ?? Math.max(0, range.fromBlick - range.timeOffsetBlick);
+  const localEnd = Math.max(startBlick + 1, range.toBlick - range.timeOffsetBlick);
+  const intervalBlick =
+    request.intervalBlick ?? Math.max(1, Math.ceil((localEnd - startBlick) / frames));
+  return { startBlick, intervalBlick, frames };
+}
+
+function normalizeComputedPitch(raw, frames) {
+  const source = Array.isArray(raw) ? raw : [];
+  return Array.from({ length: frames }, (_, index) =>
+    Number.isFinite(source[index]) ? source[index] : null
+  );
 }
 
 async function readGroupNotes(capture, options) {
-  const { target, group, trackIndex, fromBlick, toBlick, meterMarks, quarterBlick, remaining } =
-    options;
+  const {
+    target,
+    group,
+    occurrenceKey,
+    trackIndex,
+    fromBlick,
+    toBlick,
+    meterMarks,
+    quarterBlick,
+    includeAttributes,
+    remaining,
+  } = options;
   // 为了计算休止和相邻歌词需要整组音符；只有落入范围的音符会被输出。
   const all = [];
   for (let noteIndex = 0; noteIndex < group.noteCount; noteIndex += 1) {
@@ -232,23 +712,45 @@ async function readGroupNotes(capture, options) {
       durationBlick,
       endBlick: onsetBlick + durationBlick,
     });
+    // getNote 按组内时间顺序返回；保留终点后的首项作为 nextLyrics 后即可停止。
+    if (group.timeOffsetBlick + onsetBlick >= toBlick) break;
   }
   all.sort((a, b) => a.onsetBlick - b.onsetBlick);
 
   const emitted = [];
+  const attributes = [];
+  const fingerprints = [];
   let truncated = false;
   for (let position = 0; position < all.length; position += 1) {
     const item = all[position];
     // 官方语义：绝对位置 = 组内位置 + getTimeOffset()；getOnset() 已含首音符 onset。
     const absoluteOnset = group.timeOffsetBlick + item.onsetBlick;
-    if (absoluteOnset < fromBlick || absoluteOnset >= toBlick) continue;
+    const absoluteEnd = group.timeOffsetBlick + item.endBlick;
+    if (absoluteEnd <= fromBlick || absoluteOnset >= toBlick) continue;
     if (emitted.length >= remaining) {
       truncated = true;
       break;
     }
     const previous = all[position - 1] ?? null;
     const next = all[position + 1] ?? null;
+    const lyrics = await capture.call(item.handle, "getLyrics");
+    const phonemesOverride = await capture.call(item.handle, "getPhonemes");
+    const languageOverride = await capture.call(item.handle, "getLanguageOverride");
+    const pitch = await capture.call(item.handle, "getPitch");
+    const detuneCents = await capture.call(item.handle, "getDetune");
+    const fingerprint = {
+      indexInGroup: item.indexInGroup,
+      onsetBlick: item.onsetBlick,
+      durationBlick: item.durationBlick,
+      pitch,
+      lyrics,
+      phonemesOverride,
+      languageOverride,
+      detuneCents,
+    };
+    fingerprints.push(fingerprint);
     emitted.push({
+      occurrenceKey,
       trackIndex,
       groupIndex: group.index,
       groupUuid: group.uuid ?? null,
@@ -257,84 +759,31 @@ async function readGroupNotes(capture, options) {
       durationBlick: item.durationBlick,
       endBlick: item.endBlick,
       absoluteOnsetBlick: absoluteOnset,
-      absoluteEndBlick: group.timeOffsetBlick + item.endBlick,
-      pitch: await capture.call(item.handle, "getPitch"),
-      lyrics: await capture.call(item.handle, "getLyrics"),
-      phonemesOverride: await capture.call(item.handle, "getPhonemes"),
-      languageOverride: await capture.call(item.handle, "getLanguageOverride"),
-      detuneCents: await capture.call(item.handle, "getDetune"),
+      absoluteEndBlick: absoluteEnd,
+      pitch,
+      lyrics,
+      phonemesOverride,
+      languageOverride,
+      detuneCents,
       musical: blickToMusical(absoluteOnset, meterMarks, quarterBlick),
       restBeforeBlick: previous ? Math.max(0, item.onsetBlick - previous.endBlick) : null,
       restAfterBlick: next ? Math.max(0, next.onsetBlick - item.endBlick) : null,
       prevLyrics: previous ? await capture.call(previous.handle, "getLyrics") : null,
       nextLyrics: next ? await capture.call(next.handle, "getLyrics") : null,
     });
+    if (includeAttributes) {
+      attributes.push({
+        occurrenceKey,
+        trackIndex,
+        groupIndex: group.index,
+        indexInGroup: item.indexInGroup,
+        attributes: await capture.call(item.handle, "getAttributes", [], {
+          resultFormat: "typed-v2",
+        }),
+      });
+    }
   }
-  return { notes: emitted, truncated };
-}
-
-// 宿主 measure 号为 0 基；对外 bar/beat 一律 1 基，barBase/beatBase 显式返回。
-function musicalToBlick(point, meterMarks, quarterBlick) {
-  const hostMeasure = point.bar - 1;
-  let active = meterMarks[0];
-  for (const mark of meterMarks) {
-    if (mark.position <= hostMeasure) active = mark;
-    else break;
-  }
-  if (!active) throw codedError("INVALID_RANGE", "the project has no measure marks");
-  const wholeBlick = quarterBlick * 4;
-  const barLength = (active.numerator * wholeBlick) / active.denominator;
-  const beatLength = wholeBlick / active.denominator;
-  return (
-    active.positionBlick + (hostMeasure - active.position) * barLength + (point.beat - 1) * beatLength
-  );
-}
-
-function blickToMusical(blick, meterMarks, quarterBlick) {
-  let active = meterMarks[0];
-  for (const mark of meterMarks) {
-    if (mark.positionBlick <= blick) active = mark;
-    else break;
-  }
-  const wholeBlick = quarterBlick * 4;
-  const barLength = (active.numerator * wholeBlick) / active.denominator;
-  const beatLength = wholeBlick / active.denominator;
-  const offset = blick - active.positionBlick;
-  const barInSegment = Math.floor(offset / barLength);
-  const withinBar = offset - barInSegment * barLength;
-  const beat = Math.floor(withinBar / beatLength);
-  return {
-    bar: active.position + barInSegment + 1,
-    beat: beat + 1,
-    tickInBeatBlick: withinBar - beat * beatLength,
-    numerator: active.numerator,
-    denominator: active.denominator,
-  };
-}
-
-function normalizeMeterMarks(raw) {
-  const marks = (Array.isArray(raw) ? raw : [])
-    .filter(isRecord)
-    .map((mark) => ({
-      position: mark.position,
-      positionBlick: mark.positionBlick,
-      numerator: mark.numerator,
-      denominator: mark.denominator,
-    }))
-    .filter(
-      (mark) =>
-        Number.isSafeInteger(mark.position) &&
-        Number.isFinite(mark.positionBlick) &&
-        Number.isSafeInteger(mark.numerator) &&
-        mark.numerator >= 1 &&
-        Number.isSafeInteger(mark.denominator) &&
-        mark.denominator >= 1
-    )
-    .sort((a, b) => a.position - b.position);
-  if (marks.length === 0) {
-    throw codedError("HOST_DATA_INVALID", "TimeAxis returned no usable measure marks");
-  }
-  return marks;
+  return { notes: emitted, attributes, fingerprints, truncated };
 }
 
 function normalizeTempoMarks(raw) {
@@ -375,8 +824,15 @@ function normalizeRequest(request) {
   if (!isRecord(scope) || scope.kind !== "range") {
     throw codedError("INVALID_SCOPE", 'scope.kind must be "range"');
   }
-  const from = normalizePoint(scope.from, "scope.from");
-  const to = normalizePoint(scope.to, "scope.to");
+  let from;
+  let to;
+  try {
+    from = normalizeMusicalPoint(scope.from, "scope.from");
+    to = normalizeMusicalPoint(scope.to, "scope.to");
+  } catch (error) {
+    if (error?.code === "INVALID_MUSICAL_POSITION") error.code = "INVALID_SCOPE";
+    throw error;
+  }
   let trackIndices = null;
   if (scope.trackIndices !== undefined) {
     if (
@@ -393,9 +849,10 @@ function normalizeRequest(request) {
   }
   const include = new Set();
   const unsupportedIncludes = [];
-  const requested = Array.isArray(request.include)
-    ? request.include
-    : ["notes", "tempoMap", "meterMap"];
+  if (request.include !== undefined && !Array.isArray(request.include)) {
+    throw codedError("INVALID_ARGUMENTS", "include must be an array");
+  }
+  const requested = request.include ?? ["notes", "tempoMap", "meterMap"];
   for (const item of requested) {
     if (SUPPORTED_INCLUDES.has(item)) include.add(item);
     else if (KNOWN_UNSUPPORTED_INCLUDES.has(item)) unsupportedIncludes.push(item);
@@ -404,19 +861,118 @@ function normalizeRequest(request) {
   if (request.sinceToken !== undefined && typeof request.sinceToken !== "string") {
     throw codedError("INVALID_ARGUMENTS", "sinceToken must be a string");
   }
-  return { from, to, trackIndices, include, unsupportedIncludes, sinceToken: request.sinceToken };
+  const responseMode = request.responseMode ?? "standard";
+  if (!["compact", "standard", "verbose"].includes(responseMode)) {
+    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
+  }
+  const automationParameters = normalizeStringList(
+    request.automationParameters,
+    DEFAULT_AUTOMATION_PARAMETERS,
+    "automationParameters",
+    16
+  );
+  const computedPitchSampling = normalizeComputedPitchSampling(request.computedPitchSampling);
+  const budgets = normalizeBudgets(request.budgets);
+  return {
+    from,
+    to,
+    trackIndices,
+    include,
+    unsupportedIncludes,
+    sinceToken: request.sinceToken,
+    responseMode,
+    automationParameters,
+    computedPitchSampling,
+    budgets,
+  };
 }
 
-function normalizePoint(point, label) {
-  if (!isRecord(point)) throw codedError("INVALID_SCOPE", `${label} must be {bar, beat?}`);
-  const { bar, beat = 1 } = point;
-  if (!Number.isSafeInteger(bar) || bar < 1) {
-    throw codedError("INVALID_SCOPE", `${label}.bar must be an integer >= 1 (bars are 1-based)`);
+function normalizeComputedPitchSampling(value) {
+  if (value === undefined) return { frames: 160 };
+  if (!isRecord(value)) {
+    throw codedError("INVALID_ARGUMENTS", "computedPitchSampling must be an object");
   }
-  if (!Number.isSafeInteger(beat) || beat < 1) {
-    throw codedError("INVALID_SCOPE", `${label}.beat must be an integer >= 1 (beats are 1-based)`);
+  return {
+    frames: clampInteger(value.frames, 1, 2_000, 160, "computedPitchSampling.frames"),
+    ...(value.startBlick === undefined
+      ? {}
+      : {
+          startBlick: clampInteger(
+            value.startBlick,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            undefined,
+            "computedPitchSampling.startBlick"
+          ),
+        }),
+    ...(value.intervalBlick === undefined
+      ? {}
+      : {
+          intervalBlick: clampInteger(
+            value.intervalBlick,
+            1,
+            Number.MAX_SAFE_INTEGER,
+            undefined,
+            "computedPitchSampling.intervalBlick"
+          ),
+        }),
+  };
+}
+
+function normalizeBudgets(value) {
+  if (value !== undefined && !isRecord(value)) {
+    throw codedError("INVALID_ARGUMENTS", "budgets must be an object");
   }
-  return { bar, beat };
+  const source = value ?? {};
+  return {
+    notes: clampInteger(source.notes, 1, 2_000, DEFAULT_BUDGETS.notes, "budgets.notes"),
+    attributes: clampInteger(
+      source.attributes,
+      1,
+      2_000,
+      DEFAULT_BUDGETS.attributes,
+      "budgets.attributes"
+    ),
+    automationPoints: clampInteger(
+      source.automationPoints,
+      1,
+      20_000,
+      DEFAULT_BUDGETS.automationPoints,
+      "budgets.automationPoints"
+    ),
+    computedPitchFrames: clampInteger(
+      source.computedPitchFrames,
+      1,
+      20_000,
+      DEFAULT_BUDGETS.computedPitchFrames,
+      "budgets.computedPitchFrames"
+    ),
+    bytes: clampInteger(source.bytes, 8_192, 60 * 1024, DEFAULT_BUDGETS.bytes, "budgets.bytes"),
+  };
+}
+
+function normalizeStringList(value, fallback, label, maximum) {
+  if (value === undefined) return [...fallback];
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > maximum ||
+    !value.every((item) => typeof item === "string" && item.length > 0)
+  ) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `${label} must contain between 1 and ${maximum} non-empty strings`
+    );
+  }
+  return [...new Set(value)];
+}
+
+function clampInteger(value, minimum, maximum, fallback, label) {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw codedError("INVALID_ARGUMENTS", `${label} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
 }
 
 function codedError(code, message) {

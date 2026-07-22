@@ -107,6 +107,41 @@ function createService(model) {
   );
 }
 
+function createAutoStopService(model) {
+  let now = 1_000;
+  let timer = null;
+  let acquireDelayMs = 0;
+  const session = {
+    async withExclusive(task) {
+      if (acquireDelayMs > 0) {
+        now += acquireDelayMs;
+        acquireDelayMs = 0;
+      }
+      return task(model.host);
+    },
+  };
+  const service = new AuditionService(session, {
+    now: () => now,
+    setTimeoutFn(callback, delay) {
+      timer = { callback, delay, cleared: false };
+      return timer;
+    },
+    clearTimeoutFn(handle) {
+      handle.cleared = true;
+    },
+  });
+  return {
+    service,
+    timer: () => timer,
+    advance(ms) {
+      now += ms;
+    },
+    delayNextAcquire(ms) {
+      acquireDelayMs = ms;
+    },
+  };
+}
+
 test("sv_start_audition saves state, solos tracks, seeks, and loops", async () => {
   const model = createAuditionModel();
   const service = createService(model);
@@ -209,6 +244,46 @@ test("sv_stop_audition restores only fields the user did not change", async () =
     service.get({ auditionId: started.data.auditionId }),
     (error) => error.code === "UNKNOWN_AUDITION"
   );
+});
+
+test("sv_stop_audition restores the pre-audition playing state", async () => {
+  const model = createAuditionModel();
+  model.status = "playing";
+  model.playStatus = "playing";
+  const service = createService(model);
+  const started = await service.start({ fromBlick: 0, toBlick: 2 * Q, loop: false });
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.status, "succeeded");
+  assert.equal(stopped.data.expectedPlaybackStatus, "playing");
+  assert.equal(stopped.data.playbackStateRestored, true);
+  assert.equal(model.status, "playing");
+  assert.equal(model.playhead, 12.5);
+});
+
+test("sv_stop_audition restores looping when the retained host loop region permits it", async () => {
+  const model = createAuditionModel();
+  model.status = "looping";
+  model.playStatus = "looping";
+  const service = createService(model);
+  const started = await service.start({ fromBlick: 0, toBlick: 2 * Q, loop: false });
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(stopped.status, "succeeded");
+  assert.equal(stopped.data.playbackStatus, "looping");
+  assert.equal(stopped.data.playbackStateRestored, true);
+});
+
+test("sv_stop_audition reports restore_failed when playback cannot resume", async () => {
+  const model = createAuditionModel();
+  model.status = "playing";
+  const service = createService(model);
+  const started = await service.start({ fromBlick: 0, toBlick: 2 * Q, loop: false });
+  model.ignorePlaybackStart = true;
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(stopped.status, "restore_failed");
+  assert.equal(stopped.data.expectedPlaybackStatus, "playing");
+  assert.equal(stopped.data.playbackStatus, "stopped");
+  assert.equal(stopped.data.playbackStateRestored, false);
 });
 
 test("sv_restore_audition works from the recovery payload alone", async () => {
@@ -456,4 +531,161 @@ test("sv_stop_audition refuses cross-epoch restores and returns the recovery pay
   const restored = await service.restore({ recovery: stopped.data.recovery });
   assert.equal(restored.ok, true);
   assert.deepEqual(model.solo, [false, true, false]);
+});
+
+test("auto-stop schedules without holding the host queue and restores at the endpoint", async () => {
+  const model = createAuditionModel();
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    soloTrackIndices: [0],
+    loop: false,
+    autoStop: true,
+    restore: true,
+    stopToleranceMs: 100,
+  });
+  assert.equal(started.data.endPolicy, "auto_stop");
+  assert.equal(started.data.state, "playing");
+  assert.equal(harness.timer().delay, 2_000);
+  assert.equal(model.status, "playing");
+
+  model.playhead = 2.12;
+  harness.advance(2_120);
+  await harness.timer().callback();
+  const terminal = await harness.service.get({ auditionId: started.data.auditionId });
+  assert.equal(terminal.status, "restored");
+  assert.equal(terminal.data.autoStop.timerDelayMs, 120);
+  assert.equal(terminal.data.autoStop.queueDelayMs, 0);
+  assert.ok(Math.abs(terminal.data.autoStop.overrunMs - 120) < 1e-6);
+  assert.deepEqual(
+    terminal.data.transitionHistory.map((transition) => transition.state),
+    ["scheduled", "playing", "stop_requested", "stopped", "restored"]
+  );
+  assert.equal(model.status, "stopped");
+  assert.equal(model.playhead, 12.5);
+  assert.deepEqual(model.solo, [false, true, false]);
+  assert.ok(terminal.warnings.some((warning) => warning.code === "AUDITION_STOP_OVERRUN"));
+});
+
+test("auto-stop reports coordinator queue delay separately", async () => {
+  const model = createAuditionModel();
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 2 * Q,
+    autoStop: true,
+  });
+  model.playhead = 1;
+  harness.advance(1_000);
+  harness.delayNextAcquire(350);
+  await harness.timer().callback();
+  const terminal = await harness.service.get({ auditionId: started.data.auditionId });
+  assert.equal(terminal.data.autoStop.timerDelayMs, 0);
+  assert.equal(terminal.data.autoStop.queueDelayMs, 350);
+  assert.equal(terminal.data.autoStop.hostDispatchAt, terminal.data.autoStop.stopRequestedAt + 350);
+});
+
+test("auto-stop distinguishes a user stop and still restores temporary mixer state", async () => {
+  const model = createAuditionModel();
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    soloTrackIndices: [0],
+    autoStop: true,
+  });
+  model.status = "stopped";
+  model.playhead = 0.75;
+  const terminal = await harness.service.get({ auditionId: started.data.auditionId });
+  assert.equal(terminal.status, "stopped_by_user");
+  assert.equal(terminal.data.autoStop.timerFiredAt, null);
+  assert.equal(terminal.data.autoStop.overrunMs, null);
+  assert.deepEqual(
+    terminal.data.transitionHistory.map((transition) => transition.state),
+    ["scheduled", "playing", "stop_requested", "stopped", "stopped_by_user"]
+  );
+  assert.equal(harness.timer().cleared, true);
+  assert.deepEqual(model.solo, [false, true, false]);
+  assert.equal(model.playhead, 12.5);
+});
+
+test("auto-stop preserves a manual stop instead of resuming saved playback", async () => {
+  const model = createAuditionModel();
+  model.status = "playing";
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    soloTrackIndices: [0],
+    autoStop: true,
+  });
+  model.status = "stopped";
+
+  const terminal = await harness.service.get({ auditionId: started.data.auditionId });
+
+  assert.equal(terminal.status, "stopped_by_user");
+  assert.equal(terminal.data.savedPlaybackStatus, "playing");
+  assert.equal(terminal.data.expectedPlaybackStatus, "stopped");
+  assert.equal(terminal.data.userStopPreserved, true);
+  assert.equal(model.status, "stopped");
+  assert.ok(terminal.warnings.some((warning) => warning.code === "USER_STOP_PRESERVED"));
+});
+
+test("auto-stop can stop without restoring when restore is false", async () => {
+  const model = createAuditionModel();
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 2 * Q,
+    soloTrackIndices: [0],
+    autoStop: true,
+    restore: false,
+  });
+  model.playhead = 1;
+  harness.advance(1_000);
+  await harness.timer().callback();
+  const terminal = await harness.service.get({ auditionId: started.data.auditionId });
+  assert.equal(terminal.status, "stopped");
+  assert.equal(model.status, "stopped");
+  assert.equal(model.playhead, 1);
+  assert.deepEqual(model.solo, [true, true, false]);
+});
+
+test("timer and explicit stop share one auto-stop completion", async () => {
+  const model = createAuditionModel();
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 2 * Q,
+    autoStop: true,
+  });
+  harness.advance(1_000);
+  const timerCompletion = harness.timer().callback();
+  const explicitStop = harness.service.stop({ auditionId: started.data.auditionId });
+  await Promise.all([timerCompletion, explicitStop]);
+  const stopCalls = model.playbackCalls.filter(([method]) => method === "stop");
+  assert.equal(stopCalls.length, 1);
+});
+
+test("auto-stop failure remains a reusable structured terminal result", async () => {
+  const model = createAuditionModel();
+  const harness = createAutoStopService(model);
+  const started = await harness.service.start({
+    fromBlick: 0,
+    toBlick: 2 * Q,
+    autoStop: true,
+  });
+  model.failures.push({ method: "getStatus", remainingSkips: 0, code: "HOST_CALL_FAILED" });
+  harness.advance(1_000);
+
+  const timerResult = await harness.timer().callback();
+  const fromGet = await harness.service.get({ auditionId: started.data.auditionId });
+  const fromStop = await harness.service.stop({ auditionId: started.data.auditionId });
+
+  assert.equal(timerResult.status, "restore_failed");
+  assert.equal(fromGet.error.code, "HOST_CALL_FAILED");
+  assert.equal(fromStop.error.code, "HOST_CALL_FAILED");
+  assert.equal(fromGet.data.auditionId, started.data.auditionId);
+  assert.deepEqual(fromGet.data.transitionHistory, fromStop.data.transitionHistory);
 });

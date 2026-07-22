@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { collectHandleRefs } from "./wire-codec.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
+import { ServiceTiming } from "./service-timing.js";
 
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 200;
@@ -77,8 +78,9 @@ export class SnapshotService {
   }
 
   async snapshot(request = {}) {
+    const timer = new ServiceTiming({ now: this.now, phaseNames: ["hostReadMs", "serializationMs"] });
     const pageSize = normalizePageSize(request.pageSize);
-    if (request.cursor !== undefined) return this._readCursor(request.cursor, pageSize);
+    if (request.cursor !== undefined) return this._readCursor(request.cursor, pageSize, timer);
 
     const scope = normalizeScope(request.scope);
     const include = new Set(
@@ -89,10 +91,12 @@ export class SnapshotService {
           : ["structure"]
     );
 
+    timer.requestCoordinator();
     return this.session.withExclusive(async (host) => {
+      timer.acquiredCoordinator();
       const capture = createHostScope(host);
       try {
-        const roots = await capture.roots();
+        const roots = await timer.measure("hostReadMs", () => capture.roots());
         const observedAt = new Date(this.now()).toISOString();
         if (scope.kind === "project") {
           const trackCount = await capture.call(roots.project, "getNumTracks");
@@ -114,12 +118,16 @@ export class SnapshotService {
             include: [...include],
           });
           // 必须等待整页结束；外层 finally 会释放本页登记的全部 handle。
-          return await captureProjectPage(capture, roots, stored, pageSize, this.store);
+          const result = await timer.measure("hostReadMs", () =>
+            captureProjectPage(capture, roots, stored, pageSize, this.store)
+          );
+          return { ...result, timings: timer.finish() };
         }
-        const captured =
+        const captured = await timer.measure("hostReadMs", () =>
           scope.kind === "selection"
-            ? await captureSelection(capture, roots, include)
-            : await captureGroup(capture, roots, scope, include);
+            ? captureSelection(capture, roots, include)
+            : captureGroup(capture, roots, scope, include)
+        );
         const stored = this.store.create({
           epoch: host.epoch(),
           scope,
@@ -128,7 +136,10 @@ export class SnapshotService {
           notes: captured.notes,
           context: captured.context,
         });
-        return formatSnapshotPage(stored, 0, pageSize, this.store);
+        const result = await timer.measure("serializationMs", async () =>
+          formatSnapshotPage(stored, 0, pageSize, this.store)
+        );
+        return { ...result, timings: timer.finish() };
       } finally {
         await capture.releaseAll();
       }
@@ -147,7 +158,7 @@ export class SnapshotService {
     return entry;
   }
 
-  async _readCursor(cursor, pageSize) {
+  async _readCursor(cursor, pageSize, timer) {
     if (typeof cursor !== "string" || !cursor) {
       throw codedError("INVALID_CURSOR", "cursor must be a non-empty string");
     }
@@ -159,7 +170,9 @@ export class SnapshotService {
       if (decoded.kind !== "project" || decoded.offset !== stored.traversal.page) {
         throw codedError("STALE_CURSOR", "project cursor has already been consumed");
       }
+      timer.requestCoordinator();
       return this.session.withExclusive(async (host) => {
+        timer.acquiredCoordinator();
         if (stored.epoch !== host.epoch()) {
           throw codedError(
             "STALE_CONTEXT",
@@ -169,13 +182,19 @@ export class SnapshotService {
         const capture = createHostScope(host);
         try {
           const roots = await capture.roots();
-          return await captureProjectPage(capture, roots, stored, pageSize, this.store);
+          const result = await timer.measure("hostReadMs", () =>
+            captureProjectPage(capture, roots, stored, pageSize, this.store)
+          );
+          return { ...result, timings: timer.finish() };
         } finally {
           await capture.releaseAll();
         }
       });
     }
-    return formatSnapshotPage(stored, decoded.offset, pageSize, this.store);
+    const result = await timer.measure("serializationMs", async () =>
+      formatSnapshotPage(stored, decoded.offset, pageSize, this.store)
+    );
+    return { ...result, timings: timer.finish() };
   }
 }
 

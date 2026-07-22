@@ -21,7 +21,7 @@ import {
 import { HostSession } from "./host-session.js";
 import { AuditionService } from "./audition.js";
 import { LyricsService } from "./lyrics.js";
-import { RangeSnapshotService } from "./musical-range.js";
+import { RANGE_CAPTURE_LIMITS, RangeSnapshotService } from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
 import { NoteStructureService } from "./note-structure.js";
 import {
@@ -29,6 +29,7 @@ import {
   ParameterCurveService,
 } from "./parameter-curve.js";
 import { ProcessingService } from "./processing.js";
+import { PhraseEditService } from "./phrase-edit.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
 import { VoiceProfileService } from "./voice-profile.js";
@@ -41,11 +42,12 @@ const workflowExecutor = new WorkflowExecutor(hostSession);
 const processingService = new ProcessingService(hostSession, snapshotService);
 const lyricsService = new LyricsService(hostSession, snapshotService);
 const notePatchService = new NotePatchService(hostSession, snapshotService);
-const rangeSnapshotService = new RangeSnapshotService(hostSession);
-const parameterCurveService = new ParameterCurveService(hostSession);
+const rangeSnapshotService = new RangeSnapshotService(hostSession, { snapshotService });
+const parameterCurveService = new ParameterCurveService(hostSession, { snapshotService });
 const noteStructureService = new NoteStructureService(hostSession, snapshotService);
 const auditionService = new AuditionService(hostSession);
 const voiceProfileService = new VoiceProfileService(hostSession);
+const phraseEditService = new PhraseEditService(hostSession, snapshotService);
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -84,6 +86,162 @@ const LOCAL_REFERENCE_SCHEMA = {
     },
   },
   required: ["$ref"],
+};
+const MUSICAL_BEAT_SCHEMA = {
+  anyOf: [
+    { type: "number", minimum: 1 },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        numerator: { type: "integer", minimum: 1 },
+        denominator: { type: "integer", minimum: 1 },
+      },
+      required: ["numerator", "denominator"],
+    },
+  ],
+};
+const CURVE_TARGET_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        trackIndex: { type: "integer", minimum: 0 },
+        groupIndex: { type: "integer", minimum: 0 },
+        expectedGroupUuid: { type: "string", minLength: 1 },
+        allowSharedTargetMutation: { type: "boolean", default: false },
+      },
+      required: ["trackIndex", "groupIndex"],
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: { type: "string", minLength: 1 },
+        occurrenceId: { type: "string", minLength: 1 },
+        expectedGroupUuid: { type: "string", minLength: 1 },
+        allowSharedTargetMutation: { type: "boolean", default: false },
+      },
+      required: ["contextId", "occurrenceId"],
+    },
+  ],
+};
+const NOTE_ANCHOR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    noteId: { type: "string", minLength: 1 },
+    position: {
+      anyOf: [
+        { enum: ["onset", "center", "end"] },
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: { ratio: { type: "number", minimum: 0, maximum: 1 } },
+          required: ["ratio"],
+        },
+      ],
+    },
+    offset: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        unit: { enum: ["blick", "quarter", "beat"] },
+        value: { type: "number" },
+      },
+      required: ["unit", "value"],
+    },
+  },
+  required: ["noteId", "position"],
+};
+const NOTE_GAP_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    afterNoteId: { type: "string", minLength: 1 },
+    beforeNoteId: { type: "string", minLength: 1 },
+    position: {
+      anyOf: [
+        { enum: ["start", "center", "end"] },
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: { ratio: { type: "number", minimum: 0, maximum: 1 } },
+          required: ["ratio"],
+        },
+      ],
+    },
+    offset: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        unit: { enum: ["blick", "quarter", "beat"] },
+        value: { type: "number" },
+      },
+      required: ["unit", "value"],
+    },
+  },
+  required: ["afterNoteId", "beforeNoteId", "position"],
+};
+const MUSICAL_POSITION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: { bar: { type: "integer", minimum: 1 }, beat: MUSICAL_BEAT_SCHEMA },
+  required: ["bar"],
+};
+const CURVE_POSITION_PROPERTIES = {
+  blick: { type: "integer" },
+  anchor: NOTE_ANCHOR_SCHEMA,
+  musicalPosition: MUSICAL_POSITION_SCHEMA,
+  rangeBoundary: { enum: ["start", "end"] },
+  gap: NOTE_GAP_SCHEMA,
+};
+const CURVE_POSITION_ALTERNATIVES = [
+  { required: ["blick"] },
+  { required: ["anchor"] },
+  { required: ["musicalPosition"] },
+  { required: ["rangeBoundary"] },
+  { required: ["gap"] },
+];
+const CURVE_POSITION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: CURVE_POSITION_PROPERTIES,
+  oneOf: CURVE_POSITION_ALTERNATIVES,
+};
+const CURVE_POINT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...CURVE_POSITION_PROPERTIES,
+    value: { type: "number" },
+  },
+  required: ["value"],
+  oneOf: CURVE_POSITION_ALTERNATIVES,
+};
+const CURVE_RANGE_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        fromBlick: { type: "integer" },
+        toBlick: { type: "integer" },
+        coordinate: { enum: ["local", "absolute"], default: "local" },
+      },
+      required: ["fromBlick", "toBlick"],
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        from: CURVE_POSITION_SCHEMA,
+        to: CURVE_POSITION_SCHEMA,
+      },
+      required: ["from", "to"],
+    },
+  ],
 };
 
 const TOOLS = [
@@ -438,7 +596,7 @@ const TOOLS = [
   {
     name: "sv_snapshot_range",
     description:
-      "Read a musical range (1-based bar/beat, converted with the host-reported SV.QUARTER timebase and project meter map) across selected tracks as canonical 0-based data with both blick and bar/beat coordinates, per-note rests and neighbor lyrics, tempo and meter maps, and optional mixer state. Returns timebase.quarterBlick as conversion evidence and a content-hash snapshotToken (not a host revision): pass it back as sinceToken to get no_change when the observed content is identical. Read-only; use sv_snapshot (selection/group) to obtain an editable contextId.",
+      "Capture one editable musical-range context with occurrence and note identities, including notes sustained across the range start. A single host lease can include notes, voice parameters, Automation, computed pitch, attributes, processing, tempo/meter maps, and mixer state. Decimal or rational beats are converted exactly with host SV.QUARTER. Independent response budgets page already-captured pure data through cursor without rereading the host; global capture limits are published in svcopilot://capabilities. snapshotToken is a content hash, not a host revision; sinceToken still reads and hashes before returning no_change.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -459,7 +617,7 @@ const TOOLS = [
               additionalProperties: false,
               properties: {
                 bar: { type: "integer", minimum: 1 },
-                beat: { type: "integer", minimum: 1 },
+                beat: MUSICAL_BEAT_SCHEMA,
               },
               required: ["bar"],
             },
@@ -468,7 +626,7 @@ const TOOLS = [
               additionalProperties: false,
               properties: {
                 bar: { type: "integer", minimum: 1 },
-                beat: { type: "integer", minimum: 1 },
+                beat: MUSICAL_BEAT_SCHEMA,
               },
               required: ["bar"],
               description: "Exclusive end of the range (bar/beat are 1-based).",
@@ -487,19 +645,57 @@ const TOOLS = [
               "mixer",
               "voiceParameters",
               "automation",
+              "computedPitch",
               "attributes",
+              "processing",
               "retakes",
             ],
           },
           description:
-            "Defaults to notes, tempoMap, meterMap. automation/attributes/retakes are not yet available and produce an UNSUPPORTED_INCLUDE warning instead of failing.",
+            "Defaults to notes, tempoMap, meterMap. retakes is capability-blocked and produces an UNSUPPORTED_INCLUDE warning.",
         },
+        automationParameters: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description:
+            "Automation names to capture; defaults to pitchDelta, tension, loudness, and breathiness. Names use the same validated resolver as curve writes.",
+        },
+        computedPitchSampling: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            frames: { type: "integer", minimum: 1, maximum: 2000, default: 160 },
+            startBlick: { type: "integer", minimum: 0 },
+            intervalBlick: { type: "integer", minimum: 1 },
+          },
+        },
+        budgets: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            notes: { type: "integer", minimum: 1, maximum: 2000 },
+            attributes: { type: "integer", minimum: 1, maximum: 2000 },
+            automationPoints: { type: "integer", minimum: 1, maximum: 20000 },
+            computedPitchFrames: { type: "integer", minimum: 1, maximum: 20000 },
+            bytes: { type: "integer", minimum: 8192, maximum: 61440 },
+          },
+          description: "Independent per-page data budgets; overflow returns page.nextCursor.",
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         sinceToken: {
           type: "string",
           description: "snapshotToken from a previous read; identical content returns no_change.",
         },
+        cursor: {
+          type: "string",
+          minLength: 1,
+          description: "Opaque range page or compact detail cursor; cursor reads do not revisit SynthV.",
+        },
       },
-      required: ["scope"],
+      anyOf: [{ required: ["scope"] }, { required: ["cursor"] }],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
@@ -512,15 +708,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            trackIndex: { type: "integer", minimum: 0 },
-            groupIndex: { type: "integer", minimum: 0 },
-          },
-          required: ["trackIndex", "groupIndex"],
-        },
+        target: CURVE_TARGET_SCHEMA,
         parameter: {
           type: "string",
           minLength: 1,
@@ -528,16 +716,7 @@ const TOOLS = [
           description:
             "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
         },
-        range: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            fromBlick: { type: "integer" },
-            toBlick: { type: "integer" },
-            coordinate: { enum: ["local", "absolute"], default: "local" },
-          },
-          required: ["fromBlick", "toBlick"],
-        },
+        range: CURVE_RANGE_SCHEMA,
         maxPoints: { type: "integer", minimum: 1, maximum: 2000 },
       },
       required: ["target", "parameter", "range"],
@@ -553,16 +732,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            trackIndex: { type: "integer", minimum: 0 },
-            groupIndex: { type: "integer", minimum: 0 },
-            expectedGroupUuid: { type: "string", minLength: 1 },
-          },
-          required: ["trackIndex", "groupIndex"],
-        },
+        target: CURVE_TARGET_SCHEMA,
         parameter: {
           type: "string",
           minLength: 1,
@@ -571,29 +741,13 @@ const TOOLS = [
             "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
         },
         mode: { enum: ["replace", "add", "scale"] },
-        range: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            fromBlick: { type: "integer" },
-            toBlick: { type: "integer" },
-            coordinate: { enum: ["local", "absolute"], default: "local" },
-          },
-          required: ["fromBlick", "toBlick"],
-        },
+        range: CURVE_RANGE_SCHEMA,
         points: {
           type: "array",
           maxItems: 2000,
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              blick: { type: "integer" },
-              value: { type: "number" },
-            },
-            required: ["blick", "value"],
-          },
-          description: "replace mode only; blick uses range.coordinate.",
+          items: CURVE_POINT_SCHEMA,
+          description:
+            "replace mode only; use blick, a musicalPosition, or a note anchor from the target range context.",
         },
         amount: { type: "number", description: "add/scale mode only." },
         simplifyThreshold: { type: "number", minimum: 0 },
@@ -613,16 +767,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            trackIndex: { type: "integer", minimum: 0 },
-            groupIndex: { type: "integer", minimum: 0 },
-            expectedGroupUuid: { type: "string", minLength: 1 },
-          },
-          required: ["trackIndex", "groupIndex"],
-        },
+        target: CURVE_TARGET_SCHEMA,
         curves: {
           type: "array",
           minItems: 1,
@@ -639,29 +784,13 @@ const TOOLS = [
                   "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
               },
               mode: { enum: ["replace", "add", "scale"] },
-              range: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  fromBlick: { type: "integer" },
-                  toBlick: { type: "integer" },
-                  coordinate: { enum: ["local", "absolute"], default: "local" },
-                },
-                required: ["fromBlick", "toBlick"],
-              },
+              range: CURVE_RANGE_SCHEMA,
               points: {
                 type: "array",
                 maxItems: 2000,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    blick: { type: "integer" },
-                    value: { type: "number" },
-                  },
-                  required: ["blick", "value"],
-                },
-                description: "replace mode only; blick uses range.coordinate.",
+                items: CURVE_POINT_SCHEMA,
+                description:
+                  "replace mode only; use blick, a musicalPosition, or a note anchor from the target range context.",
               },
               amount: { type: "number", description: "add/scale mode only." },
               simplifyThreshold: { type: "number", minimum: 0 },
@@ -679,6 +808,145 @@ const TOOLS = [
         },
       },
       required: ["target", "curves"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_edit_phrase",
+    description:
+      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. A detached NoteGroup clone validates the complete note/structure/curve plan before any project write. Commit then journals and replays the verified plan onto the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared targets therefore require allowSharedTargetMutation:true and intentionally affect every occurrence. Any commit failure restores notes, curves, voice, and target identity with read-back verification. noteId/occurrenceId must come from the same sv_snapshot_range context.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            contextId: { type: "string", minLength: 1 },
+            occurrenceId: { type: "string", minLength: 1 },
+            expectedGroupUuid: { type: "string", minLength: 1 },
+            allowSharedTargetMutation: { type: "boolean", default: false },
+          },
+          required: ["contextId", "occurrenceId"],
+        },
+        notePatches: {
+          type: "array",
+          maxItems: 200,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              noteId: { type: "string", minLength: 1 },
+              expected: { type: "object" },
+              set: {
+                type: "object",
+                additionalProperties: false,
+                minProperties: 1,
+                properties: {
+                  lyrics: { type: "string" },
+                  phonemesOverride: { type: "string" },
+                  languageOverride: { type: "string" },
+                  pitch: { type: "integer", minimum: 0, maximum: 127 },
+                  onsetBlick: { type: "integer", minimum: 0 },
+                  durationBlick: { type: "integer", minimum: 1 },
+                  detuneCents: { type: "number" },
+                  attributes: { type: "object", minProperties: 1 },
+                },
+              },
+            },
+            required: ["noteId", "set"],
+          },
+        },
+        structureOperations: {
+          type: "array",
+          maxItems: 100,
+          items: {
+            oneOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  op: { const: "insert" },
+                  note: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      onsetBlick: { type: "integer", minimum: 0 },
+                      durationBlick: { type: "integer", minimum: 1 },
+                      pitch: { type: "integer", minimum: 0, maximum: 127 },
+                      lyrics: { type: "string" },
+                      phonemesOverride: { type: "string" },
+                      languageOverride: { type: "string" },
+                      detuneCents: { type: "number" },
+                      attributes: { type: "object" },
+                    },
+                    required: ["onsetBlick", "durationBlick", "pitch"],
+                  },
+                },
+                required: ["op", "note"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: { op: { const: "delete" }, noteId: { type: "string", minLength: 1 } },
+                required: ["op", "noteId"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  op: { const: "split" },
+                  noteId: { type: "string", minLength: 1 },
+                  atBlick: { type: "integer" },
+                  secondLyrics: { type: "string" },
+                },
+                required: ["op", "noteId", "atBlick"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  op: { const: "merge" },
+                  noteIds: { type: "array", minItems: 2, items: { type: "string", minLength: 1 } },
+                  lyricsJoin: { enum: ["first", "concat"], default: "first" },
+                },
+                required: ["op", "noteIds"],
+              },
+            ],
+          },
+        },
+        curves: {
+          type: "array",
+          maxItems: 16,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              parameter: { type: "string", minLength: 1, maxLength: 200 },
+              mode: { enum: ["replace", "add", "scale"] },
+              range: CURVE_RANGE_SCHEMA,
+              points: { type: "array", maxItems: 2000, items: CURVE_POINT_SCHEMA },
+              amount: { type: "number" },
+              simplifyThreshold: { type: "number", minimum: 0 },
+            },
+            required: ["parameter", "mode", "range"],
+          },
+        },
+        voicePatch: {
+          type: "object",
+          description:
+            "Recursive partial patch limited to fields and vocal modes observable in this occurrence's getVoice result.",
+        },
+        dryRun: { type: "boolean", default: false },
+        atomic: { type: "boolean", default: true },
+        waitFor: { enum: ["none", "phonemes", "computedAttributes"], default: "none" },
+        timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+        pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["target"],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -751,7 +1019,7 @@ const TOOLS = [
   {
     name: "sv_start_audition",
     description:
-      "Non-blocking audition: save playhead and target-track solo state, stop existing playback when necessary, solo the requested tracks, seek to the range start (absolute blicks converted via TimeAxis), and play or loop. Startup succeeds only after read-back confirms solo, playhead, and an active playback status; silently ignored host writes are compensated and reported as failure. For loop:false, toBlick describes the requested range but PlaybackControl has no bounded-play primitive: data.endPolicy is caller_stop and the caller must invoke sv_stop_audition. A normal play request may report looping when the host UI loop region is active. Returns an auditionId plus a recovery payload the caller should keep — if this server crashes, sv_restore_audition can undo solo/playhead changes from the payload alone. MCP cannot hear audio; a human judges the sound.",
+      "Non-blocking audition with verified startup and recovery. autoStop:true schedules a server timer without holding the host coordinator; when it fires, stop/restore is dispatched through the queue and the terminal state reports timer delay, queue delay, host stop time, and playhead overrun. User stops become stopped_by_user. Temporary solo/playhead values are restored only when the user has not changed them. The recovery payload remains the crash-recovery escape hatch. MCP cannot hear audio; a human judges the sound.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -764,6 +1032,23 @@ const TOOLS = [
           description: "0-based tracks to solo for the audition; omit to leave the mixer untouched.",
         },
         loop: { type: "boolean", default: false },
+        autoStop: {
+          type: "boolean",
+          default: false,
+          description: "For loop:false, stop at the requested endpoint without occupying the host queue while waiting.",
+        },
+        restore: {
+          type: "boolean",
+          default: true,
+          description: "After an automatic stop, restore temporary solo and saved playhead state.",
+        },
+        stopToleranceMs: {
+          type: "integer",
+          minimum: 0,
+          maximum: 2000,
+          default: 100,
+          description: "Report AUDITION_STOP_OVERRUN when playhead overrun exceeds this threshold.",
+        },
       },
       required: ["fromBlick", "toBlick"],
     },
@@ -785,7 +1070,7 @@ const TOOLS = [
   {
     name: "sv_stop_audition",
     description:
-      "Stop an audition and restore the saved state: playback stops, solo fields are restored ONLY if they still hold the audition-set value (user changes are left untouched and reported), and the playhead returns to the saved position. Success requires read-back status stopped plus the saved playhead and mixer values; otherwise restore_failed preserves the audition for retry. Returns per-field restoration evidence.",
+      "Stop an audition and restore its saved playback status (stopped, playing, or looping), playhead, and temporary solo fields. Mixer fields are restored ONLY if they still hold the audition-set value; user changes are left untouched and reported. Success requires every requested value to read back correctly, otherwise restore_failed preserves recovery evidence for retry.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -852,7 +1137,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.3.0" },
+  { name: "sv-copilot", version: "0.4.0" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -961,6 +1246,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_patch_parameter_curves":
         result = await parameterCurveService.patchCurves(args);
         break;
+      case "sv_edit_phrase":
+        result = await phraseEditService.edit(args);
+        break;
       case "sv_restructure_notes":
         result = await noteStructureService.restructureNotes(args);
         break;
@@ -1059,7 +1347,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.3.0",
+    interfaceVersion: "0.4.0",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1072,6 +1360,7 @@ function capabilities() {
       maxSnapshotPageSize: 200,
       maxProjectPageItems: MAX_PROJECT_PAGE_ITEMS,
       projectPageUnit: "traversalItems",
+      rangeCapture: RANGE_CAPTURE_LIMITS,
       singleInFlight: true,
     },
     interfaces: {
@@ -1084,6 +1373,7 @@ function capabilities() {
         "sv_get_parameter_curve",
         "sv_patch_parameter_curve",
         "sv_patch_parameter_curves",
+        "sv_edit_phrase",
       ],
       audition: [
         "sv_start_audition",
@@ -1103,6 +1393,11 @@ function capabilities() {
         installedCatalogObservable: false,
         activeIdentityObservable: false,
         assignmentObservable: false,
+      },
+      audioRendering: {
+        status: "capability_blocked",
+        reason: "official_script_api_has_no_audio_bytes_or_offline_render_primitive",
+        uiAutomationFallback: false,
       },
       automationParameters: {
         builtIn: BUILTIN_AUTOMATION_PARAMETERS,

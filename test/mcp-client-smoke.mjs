@@ -83,6 +83,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
+  assert.equal(client.getServerVersion()?.version, "0.4.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -91,6 +92,7 @@ try {
   });
 
   const listed = await client.listTools();
+  assert.equal(listed.tools.length, 24);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -106,11 +108,31 @@ try {
   const batchCurveTool = listed.tools.find(
     (tool) => tool.name === "sv_patch_parameter_curves"
   );
+  const phraseTool = listed.tools.find((tool) => tool.name === "sv_edit_phrase");
+  const rangeTool = listed.tools.find((tool) => tool.name === "sv_snapshot_range");
+  const auditionTool = listed.tools.find((tool) => tool.name === "sv_start_audition");
   assert.equal(waitTool.inputSchema.properties.requireNonEmpty.default, false);
   assert.equal(setLyricsTool.inputSchema.properties.requireNonEmptyPhonemes.default, false);
   assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
   assert.equal(batchCurveTool.inputSchema.properties.responseMode.default, "standard");
-  assert.ok(batchCurveTool.inputSchema.properties.target.properties.expectedGroupUuid);
+  const directCurveTarget = batchCurveTool.inputSchema.properties.target.anyOf.find(
+    (schema) => schema.properties?.trackIndex
+  );
+  const contextCurveTarget = batchCurveTool.inputSchema.properties.target.anyOf.find(
+    (schema) => schema.properties?.contextId
+  );
+  assert.ok(directCurveTarget.properties.expectedGroupUuid);
+  assert.ok(contextCurveTarget.properties.occurrenceId);
+  assert.ok(contextCurveTarget.properties.allowSharedTargetMutation);
+  assert.ok(phraseTool);
+  assert.ok(phraseTool.inputSchema.properties.notePatches);
+  assert.ok(phraseTool.inputSchema.properties.structureOperations);
+  assert.ok(phraseTool.inputSchema.properties.curves);
+  assert.ok(phraseTool.inputSchema.properties.voicePatch);
+  assert.match(phraseTool.description, /does not allow changing an existing reference target/);
+  assert.ok(rangeTool.inputSchema.properties.budgets.properties.automationPoints);
+  assert.ok(rangeTool.inputSchema.properties.computedPitchSampling);
+  assert.equal(auditionTool.inputSchema.properties.autoStop.default, false);
 
   const resources = await client.listResources();
   assert.ok(resources.resources.some((resource) => resource.uri === "svapi://manifest"));
@@ -133,8 +155,16 @@ try {
     capabilities.knownLimits.automationParameters.vocalModes,
     "dynamic_from_target_voice"
   );
+  assert.equal(capabilities.knownLimits.audioRendering.status, "capability_blocked");
+  assert.ok(capabilities.interfaces.music.includes("sv_edit_phrase"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
+  assert.equal(capabilities.interfaceVersion, "0.4.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
+  assert.deepEqual(capabilities.limits.rangeCapture, {
+    notes: 2000,
+    automationPoints: 20000,
+    computedPitchFrames: 20000,
+  });
   assert.equal(capabilities.knownLimits.singer.installedCatalogObservable, false);
   const resourceTemplates = await client.listResourceTemplates();
   assert.ok(
@@ -384,6 +414,7 @@ try {
     })
   );
   assert.equal(rangeSnapshot.ok, true);
+  assert.match(rangeSnapshot.contextId, /^ctx_/);
   assert.equal(rangeSnapshot.data.barBase, 1);
   assert.equal(rangeSnapshot.data.range.to.blick, 4 * Q);
   assert.equal(rangeSnapshot.data.timebase.quarterBlick, Q);
@@ -399,6 +430,38 @@ try {
   assert.equal(rangeSnapshot.data.meterMap[0].numerator, 4);
   assert.equal(rangeSnapshot.data.tracks[0].mixer.muted, false);
   assert.ok(rangeSnapshot.warnings.some((warning) => warning.code === "UNSUPPORTED_INCLUDE"));
+  assert.match(rangeSnapshot.data.tracks[0].groups[0].occurrenceId, /^ctx_/);
+  assert.match(rangeSnapshot.data.notes[0].id, /:n:0$/);
+  assert.ok(Number.isFinite(rangeSnapshot.timings.serviceTotalMs));
+
+  const anchorDryRun = parseToolResult(
+    await client.callTool({
+      name: "sv_patch_parameter_curves",
+      arguments: {
+        target: {
+          contextId: rangeSnapshot.contextId,
+          occurrenceId: rangeSnapshot.data.tracks[0].groups[0].occurrenceId,
+        },
+        curves: [
+          {
+            parameter: "loudness",
+            mode: "replace",
+            range: { fromBlick: 0, toBlick: 2 * Q },
+            points: [
+              {
+                anchor: { noteId: rangeSnapshot.data.notes[0].id, position: "onset" },
+                value: 1,
+              },
+            ],
+          },
+        ],
+        dryRun: true,
+      },
+    })
+  );
+  assert.equal(anchorDryRun.status, "dry_run");
+  assert.equal(anchorDryRun.curves[0].resolvedPositions[0].localBlick, 0);
+  assert.ok(anchorDryRun.warnings.some((warning) => warning.code === "SHARED_TARGET_DRY_RUN"));
   const rangeAgain = parseToolResult(
     await client.callTool({
       name: "sv_snapshot_range",
@@ -433,7 +496,7 @@ try {
     await client.callTool({
       name: "sv_patch_parameter_curve",
       arguments: {
-        target: { trackIndex: 0, groupIndex: 0 },
+        target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
         parameter: "loudness",
         mode: "replace",
         range: { fromBlick: 0, toBlick: 2 * Q },
@@ -460,6 +523,7 @@ try {
           trackIndex: 0,
           groupIndex: 0,
           expectedGroupUuid: "pipe-group-1",
+          allowSharedTargetMutation: true,
         },
         curves: [
           {
@@ -539,7 +603,7 @@ try {
     await client.callTool({
       name: "sv_patch_parameter_curve",
       arguments: {
-        target: { trackIndex: 0, groupIndex: 0 },
+        target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
         parameter: "loudness",
         mode: "replace",
         range: { fromBlick: 0, toBlick: Q },
@@ -646,6 +710,23 @@ try {
   );
   assert.equal(deleteResult.ok, true);
   assert.equal(deleteResult.data.finalNoteCount, 2);
+
+  const autoAudition = parseToolResult(
+    await client.callTool({
+      name: "sv_start_audition",
+      arguments: { fromBlick: 0, toBlick: Q, loop: false, autoStop: true },
+    })
+  );
+  assert.equal(autoAudition.data.endPolicy, "auto_stop");
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  const autoAuditionDone = parseToolResult(
+    await client.callTool({
+      name: "sv_get_audition",
+      arguments: { auditionId: autoAudition.data.auditionId },
+    })
+  );
+  assert.ok(["restored", "stopped_by_user"].includes(autoAuditionDone.status));
+  assert.ok(Number.isFinite(autoAuditionDone.data.autoStop.timerDelayMs));
 
   // 试听闭环：start（solo + loop）→ get → stop（恢复 solo 与 playhead）。
   const auditionStart = parseToolResult(
