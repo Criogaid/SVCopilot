@@ -62,6 +62,7 @@ export class AuditionService {
         }
 
         const mixerChanges = [];
+        let status;
         try {
           for (const target of mixerTargets) {
             if (target.previousSolo !== true) {
@@ -80,6 +81,8 @@ export class AuditionService {
           } else {
             await capture.call(roots.playback, "play", []);
           }
+          // getStatus 也在补偿段内：此时播放/solo 已生效，读取失败同样不能残留状态。
+          status = await capture.call(roots.playback, "getStatus");
         } catch (error) {
           // 启动中途失败：尽力恢复已改的 solo 和 playhead，不留下部分 audition 状态。
           const compensation = await this._compensateStartFailure(
@@ -92,7 +95,6 @@ export class AuditionService {
           );
           return compensation;
         }
-        const status = await capture.call(roots.playback, "getStatus");
 
         const auditionId = `aud_${randomUUID()}`;
         const recovery = {
@@ -165,6 +167,17 @@ export class AuditionService {
       try {
         await capture.call(roots.playback, "stop", []);
         await capture.call(roots.playback, "seek", [savedPlayheadSeconds]);
+        // 补偿的 playhead 也必须读回确认，不能因为 seek 没抛错就声称已恢复。
+        const observedPlayhead = await capture.call(roots.playback, "getPlayhead");
+        const playheadRestored =
+          Math.abs(observedPlayhead - savedPlayheadSeconds) <= PLAYHEAD_EPSILON_SECONDS;
+        if (!playheadRestored) compensationVerified = false;
+        restoration.push({
+          field: "playhead",
+          restored: playheadRestored,
+          observed: observedPlayhead,
+          expected: savedPlayheadSeconds,
+        });
       } catch (error) {
         compensationVerified = false;
         restoration.push({
@@ -228,7 +241,25 @@ export class AuditionService {
     const auditionId = requireAuditionId(request);
     const audition = this.auditions.get(auditionId);
     if (!audition) throw codedError("UNKNOWN_AUDITION", `audition not found: ${auditionId}`);
-    const result = await this._restore(audition.recovery);
+    const result = await this._restore(audition.recovery, { expectedEpoch: audition.epoch });
+    if (result.status === "stale_epoch") {
+      // 跨 epoch 自动恢复可能把旧工程的索引/solo/播放头写进新工程；拒绝并交还 payload。
+      this.auditions.delete(auditionId);
+      return {
+        ok: false,
+        status: "failed",
+        effects: "none",
+        error: {
+          code: "STALE_AUDITION",
+          message:
+            "the bridge reconnected after this audition started; automatic restore is refused. If the same project is still open, call sv_restore_audition with data.recovery explicitly.",
+          outcome: "unchanged",
+          retryable: false,
+        },
+        data: { auditionId, recovery: audition.recovery },
+        warnings: [],
+      };
+    }
     // 恢复未完全成功时保留 audition 记录，调用方可凭 recovery 重试。
     if (result.status !== "restore_failed") this.auditions.delete(auditionId);
     return { ...result, data: { ...result.data, auditionId } };
@@ -250,8 +281,12 @@ export class AuditionService {
     return this._restore(recovery);
   }
 
-  async _restore(recovery) {
+  async _restore(recovery, { expectedEpoch } = {}) {
     return this.session.withExclusive(async (host) => {
+      // stop 携带 audition 的 epoch；sv_restore_audition 是显式逃生通道，不带该约束。
+      if (expectedEpoch !== undefined && host.epoch() !== expectedEpoch) {
+        return { status: "stale_epoch" };
+      }
       const capture = createHostScope(host);
       try {
         const roots = await capture.roots();

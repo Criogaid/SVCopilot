@@ -4,8 +4,11 @@ import { createHostScope } from "./snapshot.js";
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
 const MAX_INLINE_POINTS = 200;
 const VALUE_EPSILON = 1e-9;
-// PIPE 单帧上限 64 KiB；一次 getPoints 的窗口必须保证结果帧远小于该上限。
+// PIPE 单帧上限 64 KiB。窗口大小不能先验保证结果帧不超限（单窗口点数无上限），
+// 因此依赖 Relay 把超限 result 变成本命令的 FRAME_TOO_LARGE 稳定错误（连接保持），
+// 读取端按该错误二分缩小窗口；到最小窗口仍超限时以 CURVE_TOO_DENSE 显式拒绝。
 const READ_WINDOW_BLICK = 8 * 705600;
+const MIN_READ_WINDOW_BLICK = 1024;
 const MAX_JOURNAL_POINTS = 4000;
 
 export class ParameterCurveService {
@@ -204,7 +207,8 @@ export class ParameterCurveService {
               resolved.automation,
               planned,
               observed,
-              input.simplifyThreshold
+              input.simplifyThreshold,
+              observedRead.truncated
             );
           } catch (error) {
             verifyError = error;
@@ -393,16 +397,32 @@ async function resolveAutomation(capture, target, parameter) {
   };
 }
 
-// 按固定窗口分段调用 getPoints，保证任何一次宿主返回都远小于 64 KiB 帧上限。
+// 分段调用 getPoints：窗口遇 FRAME_TOO_LARGE 时二分重试，成功后逐步恢复窗口大小。
 async function readPointsChunked(capture, automation, range, { maxPoints }) {
   const points = [];
   let windowStart = range.fromLocal;
+  let windowSize = READ_WINDOW_BLICK;
   while (windowStart <= range.toLocal) {
-    const windowEnd = Math.min(windowStart + READ_WINDOW_BLICK - 1, range.toLocal);
-    const raw = await capture.call(automation, "getPoints", [windowStart, windowEnd], {
-      resultFormat: "typed-v2",
-      resultShape: "array",
-    });
+    const windowEnd = Math.min(windowStart + windowSize - 1, range.toLocal);
+    let raw;
+    try {
+      raw = await capture.call(automation, "getPoints", [windowStart, windowEnd], {
+        resultFormat: "typed-v2",
+        resultShape: "array",
+      });
+    } catch (error) {
+      if (error?.code === "FRAME_TOO_LARGE") {
+        if (windowSize <= MIN_READ_WINDOW_BLICK) {
+          throw codedError(
+            "CURVE_TOO_DENSE",
+            `curve density exceeds the pipe frame limit even within a ${MIN_READ_WINDOW_BLICK}-blick window`
+          );
+        }
+        windowSize = Math.max(MIN_READ_WINDOW_BLICK, Math.floor(windowSize / 2));
+        continue;
+      }
+      throw error;
+    }
     for (const point of normalizePoints(raw)) {
       if (points.length >= maxPoints) {
         return { points, truncated: true, nextFromBlick: point.blick };
@@ -410,11 +430,27 @@ async function readPointsChunked(capture, automation, range, { maxPoints }) {
       points.push(point);
     }
     windowStart = windowEnd + 1;
+    if (windowSize < READ_WINDOW_BLICK) {
+      windowSize = Math.min(READ_WINDOW_BLICK, windowSize * 2);
+    }
   }
   return { points, truncated: false, nextFromBlick: null };
 }
 
-async function verifyCurve(capture, automation, planned, observed, simplifyThreshold) {
+async function verifyCurve(capture, automation, planned, observed, simplifyThreshold, observedTruncated) {
+  // 读回被截断说明范围内点数远超计划，本身就是后置条件失败。
+  if (observedTruncated) {
+    return {
+      attempted: true,
+      passed: false,
+      mode: simplifyThreshold === undefined ? "exact" : "tolerance_sampled",
+      evidence: {
+        observedPointCount: observed.length,
+        plannedPointCount: planned.length,
+        observationTruncated: true,
+      },
+    };
+  }
   if (simplifyThreshold === undefined) {
     const passed =
       observed.length === planned.length &&
@@ -430,6 +466,21 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
       evidence: { observedPointCount: observed.length, plannedPointCount: planned.length },
     };
   }
+  // planned 为空时（replace [] = 清空范围），simplify 后范围内必须没有任何残留点。
+  if (planned.length === 0) {
+    return {
+      attempted: true,
+      passed: observed.length === 0,
+      mode: "tolerance_sampled",
+      evidence: {
+        observedPointCount: observed.length,
+        plannedPointCount: 0,
+        maxDeviation: 0,
+        maxResidualDeviation: observed.length === 0 ? 0 : Infinity,
+        tolerance: simplifyThreshold,
+      },
+    };
+  }
   // simplify 合法地移除控制点；验证退化为按计划点位置采样，偏差以 threshold 为界。
   // 同时检查残留控制点都落在计划曲线的容差内，防止范围内出现计划外的值。
   let maxDeviation = 0;
@@ -440,7 +491,11 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
   let maxResidualDeviation = 0;
   for (const point of observed) {
     const expected = interpolateLinear(planned, point.blick);
-    if (expected === null) continue;
+    // planned 非空时插值总有定义（端点外取端点值）；这里的 null 只防御性处理。
+    if (expected === null) {
+      maxResidualDeviation = Infinity;
+      continue;
+    }
     maxResidualDeviation = Math.max(maxResidualDeviation, Math.abs(point.value - expected));
   }
   const tolerance = simplifyThreshold + VALUE_EPSILON;

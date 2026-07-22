@@ -498,3 +498,44 @@ test("sv_patch_notes accepts fractional detuneCents", async () => {
   assert.equal(result.ok, true);
   assert.equal(model.notes[0].detune, -7.5);
 });
+
+test("sv_patch_notes reports rollback_failed when new attribute keys cannot be removed", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // pitch setter 被忽略触发回滚；attributes 已写入新 key，setAttributes(old) 删不掉它。
+  model.ignoreSetters.add("setPitch");
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    patches: [
+      {
+        noteId: nid(snapshot, 0),
+        set: { pitch: 61, attributes: { brandNewKey: 0.7 } },
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rollback_failed");
+  assert.equal(result.rollback.verified, false);
+  // attempted/remaining 拆分：曾写过 1 个音符，回滚后仍有 1 个偏离原状态。
+  assert.equal(result.data.attemptedChangedNotes, 1);
+  assert.equal(result.data.remainingChangedNotes, 1);
+  assert.equal(result.data.actuallyChangedNotes, 1);
+  assert.equal(model.notes[0].attributes.brandNewKey, 0.7);
+});
+
+test("sv_patch_notes reports zero remaining changes after a verified rollback", async () => {
+  const { model, service, snapshot } = await createFixture();
+  injectFailure(model, "setLyrics", { code: "ARGUMENT_MISMATCH" });
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    patches: [
+      { noteId: nid(snapshot, 0), set: { pitch: 61 } },
+      { noteId: nid(snapshot, 1), set: { lyrics: "mi" } },
+    ],
+  });
+
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.data.attemptedChangedNotes, 1);
+  assert.equal(result.data.remainingChangedNotes, 0);
+  assert.equal(result.data.actuallyChangedNotes, 0);
+});

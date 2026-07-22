@@ -178,7 +178,7 @@ export class NotePatchService {
               ...failed(failure.code, failure.message, "unknown"),
               status: "outcome_unknown",
               atomicity,
-              data: patchResultData(targets, plannedDiff, appliedDiff),
+              data: patchResultData(targets, plannedDiff, appliedDiff, null),
               rollback: { attempted: false, verified: null },
               undo: undoEvidence(boundaryCalls),
               warnings,
@@ -217,7 +217,12 @@ export class NotePatchService {
             ),
             status: rollback.verified ? "rolled_back" : "rollback_failed",
             atomicity,
-            data: patchResultData(targets, plannedDiff, appliedDiff),
+            data: patchResultData(
+              targets,
+              plannedDiff,
+              appliedDiff,
+              rollback.outcomeUnknown ? null : (rollback.unrestoredNoteIds?.length ?? 0)
+            ),
             rollback: {
               attempted: true,
               verified: rollback.verified,
@@ -347,6 +352,7 @@ export class NotePatchService {
             verified: false,
             evidence,
             outcomeUnknown: true,
+            unrestoredNoteIds: [...new Set(appliedDiff.map((entry) => entry.noteId))],
             error: {
               code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
               message: error instanceof Error ? error.message : String(error),
@@ -362,16 +368,29 @@ export class NotePatchService {
       }
     }
     let verified = errors.length === 0;
+    const unrestoredNoteIds = new Set(
+      errors.filter((entry) => entry.noteId).map((entry) => entry.noteId)
+    );
     try {
       for (const entry of appliedDiff) {
         const spec = FIELD_BY_NAME.get(entry.field);
         const value = await readField(host, targetByPosition.get(entry.position).note, spec);
         evidence.restored[entry.noteId] = evidence.restored[entry.noteId] ?? {};
         evidence.restored[entry.noteId][entry.field] = value;
-        if (!fieldMatches(spec, entry.from, value)) verified = false;
+        // 回滚验证要求恢复到完整旧值：attributes 也做全量比较，而不是部分 key 匹配。
+        // patch 新增的 key 可能无法通过 setAttributes(old) 删除，此时如实报告未恢复。
+        const restoredMatches =
+          spec.kind === "attributes"
+            ? jsonValueEquals(value, entry.from)
+            : fieldMatches(spec, entry.from, value);
+        if (!restoredMatches) {
+          verified = false;
+          unrestoredNoteIds.add(entry.noteId);
+        }
       }
     } catch (error) {
       verified = false;
+      for (const entry of appliedDiff) unrestoredNoteIds.add(entry.noteId);
       errors.push({
         code: typeof error?.code === "string" ? error.code : "ROLLBACK_VERIFY_FAILED",
         message: error instanceof Error ? error.message : String(error),
@@ -381,6 +400,7 @@ export class NotePatchService {
       verified,
       evidence,
       outcomeUnknown: false,
+      unrestoredNoteIds: [...unrestoredNoteIds],
       ...(errors.length > 0 ? { error: errors[0], errors } : {}),
     };
   }
@@ -533,11 +553,17 @@ function jsonValueEquals(a, b) {
   return false;
 }
 
-function patchResultData(targets, plannedDiff, appliedDiff) {
+// attemptedChangedNotes 是"曾写过"的音符数；remainingChangedNotes 是最终仍偏离原值的数量
+// （成功 = attempted；已验证回滚 = 0；结果不可知 = null）。actuallyChangedNotes 与后者同义。
+function patchResultData(targets, plannedDiff, appliedDiff, remainingChangedNotes) {
+  const attempted = new Set(appliedDiff.map((entry) => entry.noteId)).size;
+  const remaining = remainingChangedNotes === undefined ? attempted : remainingChangedNotes;
   return {
     processedNotes: targets.length,
     plannedChangedNotes: new Set(plannedDiff.map((entry) => entry.noteId)).size,
-    actuallyChangedNotes: new Set(appliedDiff.map((entry) => entry.noteId)).size,
+    attemptedChangedNotes: attempted,
+    remainingChangedNotes: remaining,
+    actuallyChangedNotes: remaining,
     plannedDiff,
     appliedDiff,
   };

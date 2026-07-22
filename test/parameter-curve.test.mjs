@@ -96,7 +96,14 @@ function createCurveModel() {
         if (method === "getAllPoints") return sortPoints().map((point) => [...point]);
         if (method === "getPoints") {
           model.getPointsCalls = (model.getPointsCalls ?? 0) + 1;
-          return inRange(args[0], args[1]).map((point) => [...point]);
+          const slice = inRange(args[0], args[1]);
+          // 模拟 Relay 帧上限：单次返回点数超过 maxPointsPerCall 时命令失败但连接存活。
+          if (model.maxPointsPerCall !== undefined && slice.length > model.maxPointsPerCall) {
+            const error = new Error("SynthV bridge result exceeds 65536 bytes");
+            error.code = "FRAME_TOO_LARGE";
+            throw error;
+          }
+          return slice.map((point) => [...point]);
         }
         if (method === "get") return interpolate(args[0]);
         if (method === "add") {
@@ -107,6 +114,7 @@ function createCurveModel() {
           return true;
         }
         if (method === "remove") {
+          if (model.ignoreRemove) return false;
           const before = model.points.length;
           model.points = model.points.filter(([b]) => b < args[0] || b > args[1]);
           return model.points.length !== before;
@@ -461,4 +469,62 @@ test("sv_patch_parameter_curve simplify verification flags residual out-of-toler
   assert.equal(result.error.code, "POSTCONDITION_FAILED");
   assert.ok(result.verification.evidence.maxResidualDeviation > 0.01);
   assert.equal(result.status, "rolled_back");
+});
+
+test("sv_get_parameter_curve bisects windows on FRAME_TOO_LARGE and completes", async () => {
+  const model = createCurveModel();
+  // 2000 个点均匀分布在 2 个默认窗口内；单帧最多 300 点，必须二分才能读完。
+  model.points = Array.from({ length: 2000 }, (_, index) => [
+    Math.floor(index * ((2 * WINDOW) / 2000)),
+    index % 5,
+  ]);
+  model.maxPointsPerCall = 300;
+  const service = createService(model);
+  const result = await service.getCurve({
+    target: TARGET,
+    parameter: "loudness",
+    range: { fromBlick: 0, toBlick: 2 * WINDOW },
+    maxPoints: 2000,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.complete, true);
+  assert.equal(result.data.points.length, 2000);
+  assert.ok(model.getPointsCalls > 2);
+});
+
+test("sv_get_parameter_curve reports CURVE_TOO_DENSE when even the minimum window overflows", async () => {
+  const model = createCurveModel();
+  model.points = Array.from({ length: 50 }, (_, index) => [index, 0]);
+  model.maxPointsPerCall = 0;
+  const service = createService(model);
+  await assert.rejects(
+    service.getCurve({
+      target: TARGET,
+      parameter: "loudness",
+      range: { fromBlick: 0, toBlick: 8 * Q },
+    }),
+    (error) => error.code === "CURVE_TOO_DENSE"
+  );
+});
+
+test("sv_patch_parameter_curve fails an empty replace when the host silently ignores remove", async () => {
+  const model = createCurveModel();
+  model.ignoreRemove = true;
+  const service = createService(model);
+  const result = await service.patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+    points: [],
+    simplifyThreshold: 0.01,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "POSTCONDITION_FAILED");
+  // planned 为空时残留点必须判为失败，而不是因插值无定义被跳过。
+  // （模型 simplify 合法移除了共线中点，范围内仍剩 2 个残留点。）
+  assert.equal(result.verification.passed, false);
+  assert.equal(result.verification.evidence.observedPointCount, 2);
 });

@@ -355,6 +355,22 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
     if (operation.note.lyrics !== undefined) {
       checks.push({ op: "insert", note, getter: "getLyrics", expected: operation.note.lyrics });
     }
+    if (operation.note.phonemesOverride !== undefined) {
+      checks.push({
+        op: "insert",
+        note,
+        getter: "getPhonemes",
+        expected: operation.note.phonemesOverride,
+      });
+    }
+    if (operation.note.languageOverride !== undefined) {
+      checks.push({
+        op: "insert",
+        note,
+        getter: "getLanguageOverride",
+        expected: operation.note.languageOverride,
+      });
+    }
     return { op: "insert", hostIndex, indexInGroup: hostIndex - 1 };
   }
   if (operation.op === "delete") {

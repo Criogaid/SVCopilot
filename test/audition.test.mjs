@@ -26,9 +26,11 @@ function createAuditionModel() {
     muted: [false, false, false],
     failures: [],
     ignoreSetSolo: false,
+    ignoreSeek: false,
+    epoch: 1,
   };
   model.host = {
-    epoch: () => 1,
+    epoch: () => model.epoch,
     roots: async () => ({ project: h.project, sv: h.sv, playback: h.playback }),
     free: async () => {},
     index: async () => null,
@@ -67,7 +69,7 @@ function createAuditionModel() {
         if (method === "getPlayhead") return model.playhead;
         if (method === "getStatus") return model.status;
         if (method === "seek") {
-          model.playhead = args[0];
+          if (!model.ignoreSeek) model.playhead = args[0];
           return null;
         }
         if (method === "play") {
@@ -265,4 +267,82 @@ test("sv_stop_audition reports restore_failed when the host ignores setSolo", as
   // audition 记录保留，可再次用 recovery 重试。
   const status = await service.get({ auditionId: started.data.auditionId });
   assert.equal(status.ok, true);
+});
+
+test("sv_start_audition compensates when getStatus fails after playback started", async () => {
+  const model = createAuditionModel();
+  // setSolo/seek/loop 都已生效，最后的 getStatus 失败也不能残留状态。
+  model.failures.push({ method: "getStatus", remainingSkips: 1, code: "ARGUMENT_MISMATCH" });
+  const service = createService(model);
+  const result = await service.start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    soloTrackIndices: [0],
+    loop: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.deepEqual(model.solo, [false, true, false]);
+  assert.equal(model.playhead, 12.5);
+  assert.equal(model.status, "stopped");
+  assert.ok(result.data.recovery);
+});
+
+test("sv_start_audition compensation verifies the playhead read-back", async () => {
+  const model = createAuditionModel();
+  model.failures.push({ method: "loop", remainingSkips: 0, code: "ARGUMENT_MISMATCH" });
+  // 宿主静默忽略 seek：补偿必须读回发现 playhead 未恢复。
+  const service = createService(model);
+  const originalCall = model.host.call;
+  let sawStartSeek = false;
+  model.host.call = async (request) => {
+    if (request.method === "seek" && !sawStartSeek) {
+      sawStartSeek = true;
+      model.playhead = request.args[0];
+      return null;
+    }
+    if (request.method === "seek") {
+      // 补偿阶段的 seek 被忽略。
+      return null;
+    }
+    return originalCall(request);
+  };
+  const result = await service.start({
+    fromBlick: 4 * Q,
+    toBlick: 8 * Q,
+    soloTrackIndices: [0],
+    loop: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rollback_failed");
+  assert.equal(result.data.rollback.verified, false);
+  const playheadEntry = result.data.restoration.find((entry) => entry.field === "playhead");
+  assert.equal(playheadEntry.restored, false);
+});
+
+test("sv_stop_audition refuses cross-epoch restores and returns the recovery payload", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({
+    fromBlick: 0,
+    toBlick: Q,
+    soloTrackIndices: [0],
+    loop: false,
+  });
+  // 桥重连：epoch 变化后，旧 audition 的索引/solo 不能自动写进新工程。
+  model.epoch = 2;
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+
+  assert.equal(stopped.ok, false);
+  assert.equal(stopped.error.code, "STALE_AUDITION");
+  assert.equal(stopped.effects, "none");
+  assert.deepEqual(stopped.data.recovery.mixerChanges, started.data.recovery.mixerChanges);
+  // 未做任何宿主写入。
+  assert.deepEqual(model.solo, [true, true, false]);
+  // 显式 sv_restore_audition 仍可用（调用方自行判断工程一致性）。
+  const restored = await service.restore({ recovery: stopped.data.recovery });
+  assert.equal(restored.ok, true);
+  assert.deepEqual(model.solo, [false, true, false]);
 });

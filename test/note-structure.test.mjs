@@ -339,3 +339,33 @@ test("sv_restructure_notes rolls back when the verification getter throws", asyn
   assert.equal(model.groupNotes.length, 3);
   assert.equal(model.undoCount, 2);
 });
+
+test("sv_restructure_notes verifies inserted phoneme and language overrides", async () => {
+  const { model, service, snapshot } = await createFixture();
+  model.ignoreSetters.add("setPhonemes");
+  const result = await service.restructureNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    operations: [
+      {
+        op: "insert",
+        note: {
+          onsetBlick: 5 * Q,
+          durationBlick: Q,
+          pitch: 65,
+          lyrics: "e",
+          phonemesOverride: "e h",
+          languageOverride: "japanese",
+        },
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "POSTCONDITION_FAILED");
+  assert.ok(
+    result.verification.evidence.fieldMismatches.some((entry) => entry.getter === "getPhonemes")
+  );
+  assert.equal(result.status, "rolled_back");
+  assert.equal(model.groupNotes.length, 3);
+});

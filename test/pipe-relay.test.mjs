@@ -137,3 +137,50 @@ test("control pipe requests bridge shutdown", async (t) => {
   writeFrame(fromSv, { type: "poll" });
   assert.deepEqual(JSON.parse(await nextReply()), { type: "shutdown" });
 });
+
+test("oversized result frames fail the command without detaching the bridge", async (t) => {
+  const session = `relay-oversize-${process.pid}-${Date.now()}`;
+  const relay = new PipeRelay({ session, timeoutMs: 2000 });
+  await relay.init();
+  const toSv = await connect(relay.paths.toSv);
+  const fromSv = await connect(relay.paths.fromSv);
+  const nextReply = createLineReader(toSv);
+  t.after(async () => {
+    toSv.destroy();
+    fromSv.destroy();
+    await relay.close();
+  });
+
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
+  JSON.parse(await nextReply());
+  let detached = false;
+  relay.on("detach", () => {
+    detached = true;
+  });
+
+  const first = relay.call({ op: "call", method: "getPoints" });
+  writeFrame(fromSv, { type: "poll" });
+  const command = JSON.parse(await nextReply());
+  assert.equal(command.type, "command");
+
+  // 超过 64 KiB 的 result 行：命令以 FRAME_TOO_LARGE 失败，但连接保持锁步存活。
+  writeFrame(fromSv, {
+    type: "result",
+    id: command.id,
+    ok: true,
+    result: "x".repeat(70 * 1024),
+  });
+  await assert.rejects(first, (error) => error.code === "FRAME_TOO_LARGE");
+  const afterOversize = JSON.parse(await nextReply());
+  assert.equal(afterOversize.type, "noop");
+  assert.equal(detached, false);
+
+  const second = relay.call({ op: "call", method: "ping" });
+  writeFrame(fromSv, { type: "poll" });
+  const command2 = JSON.parse(await nextReply());
+  assert.equal(command2.type, "command");
+  writeFrame(fromSv, { type: "result", id: command2.id, ok: true, result: "pong" });
+  assert.equal(await second, "pong");
+  assert.equal(JSON.parse(await nextReply()).type, "noop");
+  assert.equal(relay.getStatus().state, "attached");
+});

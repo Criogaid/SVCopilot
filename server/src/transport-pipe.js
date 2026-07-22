@@ -44,6 +44,7 @@ export class PipeRelay extends EventEmitter {
     this.toSvSocket = null;
     this.fromSvSocket = null;
     this.fromSvBuffer = "";
+    this.discardingOversized = false;
     this.pendingReply = null;
     this.handshakeComplete = false;
     this.shutdownRequested = false;
@@ -145,6 +146,7 @@ export class PipeRelay extends EventEmitter {
     if (this.fromSvSocket) this._detach("from-sv pipe replaced");
     this.fromSvSocket = socket;
     this.fromSvBuffer = "";
+    this.discardingOversized = false;
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => this._onFromSvData(chunk));
     socket.on("error", () => {});
@@ -180,17 +182,52 @@ export class PipeRelay extends EventEmitter {
 
   _onFromSvData(chunk) {
     this.fromSvBuffer += chunk;
-    if (Buffer.byteLength(this.fromSvBuffer, "utf8") > this.maxFrameBytes) {
-      this._sendReply({ type: "error", code: "FRAME_TOO_LARGE" });
-      this._detach(`bridge frame exceeds ${this.maxFrameBytes} bytes`);
-      return;
-    }
-
-    let newline;
-    while ((newline = this.fromSvBuffer.indexOf("\n")) >= 0) {
+    while (true) {
+      const newline = this.fromSvBuffer.indexOf("\n");
+      // 超限行进入丢弃模式：只找行尾，不再缓冲内容，内存有界。
+      if (this.discardingOversized) {
+        if (newline < 0) {
+          this.fromSvBuffer = "";
+          return;
+        }
+        this.fromSvBuffer = this.fromSvBuffer.slice(newline + 1);
+        this.discardingOversized = false;
+        // 被丢弃的行是桥在本轮写出的帧（锁步下只能是 in-flight 的 result）；
+        // 命令已被拒绝，这里必须回包让 Lua 的阻塞读取继续，连接保持存活。
+        if (this.handshakeComplete) this._reply();
+        else this._sendReply({ type: "error", code: "FRAME_TOO_LARGE" });
+        continue;
+      }
+      if (newline < 0) {
+        if (Buffer.byteLength(this.fromSvBuffer, "utf8") > this.maxFrameBytes) {
+          this.discardingOversized = true;
+          this.fromSvBuffer = "";
+          this._rejectInflightOversized();
+        }
+        return;
+      }
       const line = this.fromSvBuffer.slice(0, newline);
       this.fromSvBuffer = this.fromSvBuffer.slice(newline + 1);
+      if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
+        // 行已完整但超限：拒绝命令并回包，不解析超大 JSON，也不断连。
+        this._rejectInflightOversized();
+        if (this.handshakeComplete) this._reply();
+        else this._sendReply({ type: "error", code: "FRAME_TOO_LARGE" });
+        continue;
+      }
       if (line.trim()) this._onFrame(line);
+    }
+  }
+
+  _rejectInflightOversized() {
+    for (const [id, entry] of this.inflight) {
+      clearTimeout(entry.timer);
+      const error = new Error(
+        `SynthV bridge result exceeds ${this.maxFrameBytes} bytes; narrow the request window`
+      );
+      error.code = "FRAME_TOO_LARGE";
+      entry.reject(error);
+      this.inflight.delete(id);
     }
   }
 
@@ -296,6 +333,7 @@ export class PipeRelay extends EventEmitter {
     this.toSvSocket = null;
     this.fromSvSocket = null;
     this.fromSvBuffer = "";
+    this.discardingOversized = false;
     this.pendingReply = null;
     this.handshakeComplete = false;
     this.shutdownRequested = false;
