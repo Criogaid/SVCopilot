@@ -120,6 +120,7 @@ test("sv_start_audition saves state, solos tracks, seeks, and loops", async () =
   assert.equal(result.ok, true);
   assert.match(result.data.auditionId, /^aud_/);
   assert.equal(result.data.playbackStatus, "looping");
+  assert.equal(result.data.endPolicy, "host_loop");
   assert.equal(result.data.range.fromSeconds, 4);
   assert.equal(result.data.range.toSeconds, 8);
   // track0 原来 false → 设 true；track1 原来已是 true → 不重复写。
@@ -139,6 +140,8 @@ test("sv_get_audition reads live playback state", async () => {
   const started = await service.start({ fromBlick: 0, toBlick: 4 * Q, loop: false });
   const status = await service.get({ auditionId: started.data.auditionId });
   assert.equal(status.data.playbackStatus, "playing");
+  assert.equal(started.data.endPolicy, "caller_stop");
+  assert.equal(status.data.endPolicy, "caller_stop");
   assert.equal(status.data.playheadSeconds, 0);
   assert.equal(status.data.staleEpoch, false);
 });

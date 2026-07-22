@@ -151,6 +151,7 @@ export class AuditionService {
           recovery,
           range: { fromBlick: input.fromBlick, toBlick: input.toBlick, fromSeconds, toSeconds },
           loop: input.loop,
+          endPolicy: input.loop ? "host_loop" : "caller_stop",
         });
 
         return {
@@ -161,6 +162,7 @@ export class AuditionService {
             playbackStatus: status,
             range: { fromBlick: input.fromBlick, toBlick: input.toBlick, fromSeconds, toSeconds },
             loop: input.loop,
+            endPolicy: input.loop ? "host_loop" : "caller_stop",
             soloTrackIndices: input.soloTrackIndices,
             // 调用方应保存 recovery；server 重启后可用 sv_restore_audition 恢复。
             recovery,
@@ -294,6 +296,7 @@ export class AuditionService {
             playheadSeconds,
             range: audition.range,
             loop: audition.loop,
+            endPolicy: audition.endPolicy,
             elapsedMs: this.now() - audition.createdAt,
             staleEpoch: audition.epoch !== host.epoch(),
           },

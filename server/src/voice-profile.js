@@ -1,4 +1,5 @@
 import { createHostScope } from "./snapshot.js";
+import { getVocalModeNames, normalizeVoiceParameters } from "./voice-parameters.js";
 
 // 官方 API 无 singer 枚举/身份/分配接口；这里只暴露可观测的 voice 参数，
 // singer 身份一律报告 unobservable / host_opaque，不伪造。
@@ -34,12 +35,12 @@ export class VoiceProfileService {
             groups.push({ index: groupIndex, instrumental: true, voice: null });
             continue;
           }
-          const voice = await capture.call(reference, "getVoice", [], {
-            resultFormat: "typed-v2",
-          });
-          const vocalModeNames = isRecord(voice?.vocalModeParams)
-            ? Object.keys(voice.vocalModeParams)
-            : [];
+          const voice = normalizeVoiceParameters(
+            await capture.call(reference, "getVoice", [], {
+              resultFormat: "typed-v2",
+            })
+          );
+          const vocalModeNames = getVocalModeNames(voice);
           groups.push({
             index: groupIndex,
             instrumental: false,

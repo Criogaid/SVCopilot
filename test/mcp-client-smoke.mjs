@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 
+const Q = 705600000;
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const productDir = path.resolve(testDir, "..", "..");
 const serverScript = path.join(productDir, "SVCopilot", "server", "src", "index.js");
@@ -365,7 +366,8 @@ try {
   );
   assert.equal(rangeSnapshot.ok, true);
   assert.equal(rangeSnapshot.data.barBase, 1);
-  assert.equal(rangeSnapshot.data.range.to.blick, 4 * 705600);
+  assert.equal(rangeSnapshot.data.range.to.blick, 4 * Q);
+  assert.equal(rangeSnapshot.data.timebase.quarterBlick, Q);
   assert.deepEqual(
     rangeSnapshot.data.notes.map((note) => [note.lyrics, note.musical.bar, note.musical.beat]),
     [
@@ -398,7 +400,7 @@ try {
       arguments: {
         target: { trackIndex: 0, groupIndex: 0 },
         parameter: "loudness",
-        range: { fromBlick: 0, toBlick: 2 * 705600 },
+        range: { fromBlick: 0, toBlick: 2 * Q },
       },
     })
   );
@@ -406,7 +408,7 @@ try {
   assert.deepEqual(curve.data.definition.range, [-24, 24]);
   assert.equal(curve.data.interpolationMethod, "Linear");
   assert.equal(curve.data.stats.count, 2);
-  assert.equal(curve.data.points[1].localBlick, 705600);
+  assert.equal(curve.data.points[1].localBlick, Q);
 
   const curvePatch = parseToolResult(
     await client.callTool({
@@ -415,10 +417,10 @@ try {
         target: { trackIndex: 0, groupIndex: 0 },
         parameter: "loudness",
         mode: "replace",
-        range: { fromBlick: 0, toBlick: 2 * 705600 },
+        range: { fromBlick: 0, toBlick: 2 * Q },
         points: [
           { blick: 0, value: 2 },
-          { blick: 705600, value: -3 },
+          { blick: Q, value: -3 },
         ],
       },
     })
@@ -437,7 +439,7 @@ try {
         target: { trackIndex: 0, groupIndex: 0 },
         parameter: "loudness",
         mode: "replace",
-        range: { fromBlick: 0, toBlick: 705600 },
+        range: { fromBlick: 0, toBlick: Q },
         points: [{ blick: 0, value: 999 }],
       },
     })
@@ -501,8 +503,8 @@ try {
   assert.deepEqual(
     insertSnapshot.data.notes.map((note) => [note.lyrics, note.durationBlick]),
     [
-      ["ら", 705600],
-      ["よ", 705600],
+      ["ら", Q],
+      ["よ", Q],
     ]
   );
   const insertResult = parseToolResult(
@@ -512,7 +514,7 @@ try {
         contextId: insertSnapshot.contextId,
         waitFor: "none",
         operations: [
-          { op: "insert", note: { onsetBlick: 1411200, durationBlick: 705600, pitch: 64, lyrics: "ん" } },
+          { op: "insert", note: { onsetBlick: 2 * Q, durationBlick: Q, pitch: 64, lyrics: "ん" } },
         ],
       },
     })
@@ -546,7 +548,7 @@ try {
   const auditionStart = parseToolResult(
     await client.callTool({
       name: "sv_start_audition",
-      arguments: { fromBlick: 0, toBlick: 4 * 705600, soloTrackIndices: [0], loop: true },
+      arguments: { fromBlick: 0, toBlick: 4 * Q, soloTrackIndices: [0], loop: true },
     })
   );
   assert.equal(auditionStart.ok, true);
@@ -665,7 +667,7 @@ try {
   assert.equal(fileName, "PipeProject");
   // 前面的 sv_clone_track_from_template 已把轨道数从 3 增加到 4。
   assert.equal(trackCount, 4);
-  assert.equal(quarter, 705600);
+  assert.equal(quarter, Q);
 
   const stop = spawn(luaBin, [stopHarness, stopScript], {
     env: childEnv,

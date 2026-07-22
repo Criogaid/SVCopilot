@@ -108,9 +108,9 @@ test("PipeRelay validates handshake and preserves lockstep serialization", async
   assert.equal(secondCommand.op, "index");
   assert.equal(await first, "pong");
 
-  writeFrame(fromSv, { type: "result", id: secondCommand.id, ok: true, result: 705600 });
+  writeFrame(fromSv, { type: "result", id: secondCommand.id, ok: true, result: 705600000 });
   assert.deepEqual(JSON.parse(await nextReply()), { type: "noop" });
-  assert.equal(await second, 705600);
+  assert.equal(await second, 705600000);
 });
 
 test("control pipe requests bridge shutdown", async (t) => {

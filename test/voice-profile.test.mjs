@@ -112,6 +112,20 @@ test("sv_get_voice_profile reports parameters and explicit unobservability", asy
   assert.equal(result.data.capabilities.singerIdentity, "unobservable");
 });
 
+test("sv_get_voice_profile normalizes an empty typed Lua table as no vocal modes", async () => {
+  const model = createVoiceModel();
+  model.tracks[0].groups[0].voice.vocalModeParams = {
+    $sv: "table",
+    shape: "unknown",
+    entries: [],
+  };
+
+  const result = await createService(model).getProfile({ trackIndex: 0, groupIndex: 0 });
+  const voice = result.data.groups[0].voice;
+  assert.deepEqual(voice.parameters.vocalModeParams, {});
+  assert.deepEqual(voice.vocalModeNames, []);
+});
+
 test("sv_get_voice_profile validates indices", async () => {
   const model = createVoiceModel();
   const service = createService(model);

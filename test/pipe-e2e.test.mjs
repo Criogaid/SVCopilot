@@ -82,7 +82,7 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
     await relay.call({ op: "call", handle: projectHandle, method: "getFileName", args: [] }),
     "PipeProject"
   );
-  assert.equal(await relay.call({ op: "index", field: "QUARTER" }), 705600);
+  assert.equal(await relay.call({ op: "index", field: "QUARTER" }), 705600000);
   assert.deepEqual(
     await relay.call({ op: "call", handle: projectHandle, method: "getStruct", args: [] }),
     { bpm: 160, position: 0 }

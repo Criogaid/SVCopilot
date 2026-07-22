@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
 
 import { createHostScope } from "./snapshot.js";
+import { normalizeVoiceParameters } from "./voice-parameters.js";
 
-// SV.QUARTER 的官方常量；一个 blick 全音符 = 4 * QUARTER。
-const QUARTER_BLICK = 705600;
-const WHOLE_BLICK = QUARTER_BLICK * 4;
 const MAX_RANGE_NOTES = 800;
 const SUPPORTED_INCLUDES = new Set(["notes", "tempoMap", "meterMap", "mixer", "voiceParameters"]);
 // 官方 API 尚无法可靠支持的 include；显式报告而不是静默忽略。
@@ -37,9 +35,11 @@ export class RangeSnapshotService {
             resultShape: "array",
           })
         );
+        // 不缓存或复制常量，避免宿主版本与服务端时间基准发生漂移。
+        const quarterBlick = normalizeQuarterBlick(await capture.index("QUARTER"));
 
-        const fromBlick = musicalToBlick(input.from, meterMarks);
-        const toBlick = musicalToBlick(input.to, meterMarks);
+        const fromBlick = musicalToBlick(input.from, meterMarks, quarterBlick);
+        const toBlick = musicalToBlick(input.to, meterMarks, quarterBlick);
         if (toBlick <= fromBlick) {
           throw codedError("INVALID_RANGE", "range end must be after range start");
         }
@@ -124,9 +124,11 @@ export class RangeSnapshotService {
               if (input.include.has("voiceParameters")) {
                 group.voice = {
                   identityStatus: "unobservable",
-                  parameters: await capture.call(entry.reference, "getVoice", [], {
-                    resultFormat: "typed-v2",
-                  }),
+                  parameters: normalizeVoiceParameters(
+                    await capture.call(entry.reference, "getVoice", [], {
+                      resultFormat: "typed-v2",
+                    })
+                  ),
                 };
               }
               if (input.include.has("notes")) {
@@ -137,6 +139,7 @@ export class RangeSnapshotService {
                   fromBlick,
                   toBlick,
                   meterMarks,
+                  quarterBlick,
                   remaining: MAX_RANGE_NOTES - notes.length,
                 });
                 notes.push(...emitted.notes);
@@ -161,6 +164,7 @@ export class RangeSnapshotService {
           barBase: 1,
           beatBase: 1,
           units: { time: "blick", pitch: "midi", detune: "cent" },
+          timebase: { quarterBlick },
           range: {
             from: { ...input.from, blick: fromBlick },
             to: { ...input.to, blick: toBlick },
@@ -213,7 +217,8 @@ export class RangeSnapshotService {
 }
 
 async function readGroupNotes(capture, options) {
-  const { target, group, trackIndex, fromBlick, toBlick, meterMarks, remaining } = options;
+  const { target, group, trackIndex, fromBlick, toBlick, meterMarks, quarterBlick, remaining } =
+    options;
   // 为了计算休止和相邻歌词需要整组音符；只有落入范围的音符会被输出。
   const all = [];
   for (let noteIndex = 0; noteIndex < group.noteCount; noteIndex += 1) {
@@ -258,7 +263,7 @@ async function readGroupNotes(capture, options) {
       phonemesOverride: await capture.call(item.handle, "getPhonemes"),
       languageOverride: await capture.call(item.handle, "getLanguageOverride"),
       detuneCents: await capture.call(item.handle, "getDetune"),
-      musical: blickToMusical(absoluteOnset, meterMarks),
+      musical: blickToMusical(absoluteOnset, meterMarks, quarterBlick),
       restBeforeBlick: previous ? Math.max(0, item.onsetBlick - previous.endBlick) : null,
       restAfterBlick: next ? Math.max(0, next.onsetBlick - item.endBlick) : null,
       prevLyrics: previous ? await capture.call(previous.handle, "getLyrics") : null,
@@ -269,7 +274,7 @@ async function readGroupNotes(capture, options) {
 }
 
 // 宿主 measure 号为 0 基；对外 bar/beat 一律 1 基，barBase/beatBase 显式返回。
-function musicalToBlick(point, meterMarks) {
+function musicalToBlick(point, meterMarks, quarterBlick) {
   const hostMeasure = point.bar - 1;
   let active = meterMarks[0];
   for (const mark of meterMarks) {
@@ -277,21 +282,23 @@ function musicalToBlick(point, meterMarks) {
     else break;
   }
   if (!active) throw codedError("INVALID_RANGE", "the project has no measure marks");
-  const barLength = (active.numerator * WHOLE_BLICK) / active.denominator;
-  const beatLength = WHOLE_BLICK / active.denominator;
+  const wholeBlick = quarterBlick * 4;
+  const barLength = (active.numerator * wholeBlick) / active.denominator;
+  const beatLength = wholeBlick / active.denominator;
   return (
     active.positionBlick + (hostMeasure - active.position) * barLength + (point.beat - 1) * beatLength
   );
 }
 
-function blickToMusical(blick, meterMarks) {
+function blickToMusical(blick, meterMarks, quarterBlick) {
   let active = meterMarks[0];
   for (const mark of meterMarks) {
     if (mark.positionBlick <= blick) active = mark;
     else break;
   }
-  const barLength = (active.numerator * WHOLE_BLICK) / active.denominator;
-  const beatLength = WHOLE_BLICK / active.denominator;
+  const wholeBlick = quarterBlick * 4;
+  const barLength = (active.numerator * wholeBlick) / active.denominator;
+  const beatLength = wholeBlick / active.denominator;
   const offset = blick - active.positionBlick;
   const barInSegment = Math.floor(offset / barLength);
   const withinBar = offset - barInSegment * barLength;
@@ -340,6 +347,13 @@ function normalizeTempoMarks(raw) {
     }))
     .filter((mark) => Number.isFinite(mark.positionBlick) && Number.isFinite(mark.bpm))
     .sort((a, b) => a.positionBlick - b.positionBlick);
+}
+
+function normalizeQuarterBlick(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw codedError("HOST_DATA_INVALID", "SV.QUARTER must be a positive safe integer");
+  }
+  return value;
 }
 
 function contentToken(data) {

@@ -3,11 +3,8 @@ import { createHostScope } from "./snapshot.js";
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
 const MAX_INLINE_POINTS = 200;
-const VALUE_EPSILON = 1e-9;
-// PIPE 单帧上限 64 KiB。窗口大小不能先验保证结果帧不超限（单窗口点数无上限），
-// 因此依赖 Relay 把超限 result 变成本命令的 FRAME_TOO_LARGE 稳定错误（连接保持），
-// 读取端按该错误二分缩小窗口；到最小窗口仍超限时以 CURVE_TOO_DENSE 显式拒绝。
-const READ_WINDOW_BLICK = 8 * 705600;
+const MIN_VALUE_TOLERANCE = 1e-6;
+const RANGE_RELATIVE_TOLERANCE = 1e-6;
 const MIN_READ_WINDOW_BLICK = 1024;
 const MAX_JOURNAL_POINTS = 4000;
 
@@ -24,7 +21,7 @@ export class ParameterCurveService {
       try {
         const resolved = await resolveAutomation(capture, input.target, input.parameter);
         const range = toLocalRange(input.range, resolved.groupTimeOffsetBlick);
-        const read = await readPointsChunked(capture, resolved.automation, range, {
+        const read = await readPointsInRange(capture, resolved.automation, range, {
           maxPoints: input.maxPoints,
         });
         const points = read.points.map((point) => ({
@@ -88,9 +85,8 @@ export class ParameterCurveService {
         const range = toLocalRange(input.range, resolved.groupTimeOffsetBlick);
         const [minValue, maxValue] = resolved.definition.range;
 
-        // 补偿日志：范围内的全部现有控制点。分段读取以避免超过 PIPE 单帧上限；
-        // 超过硬上限的密集范围直接拒绝，而不是带着不完整日志去写。
-        const journalRead = await readPointsChunked(capture, resolved.automation, range, {
+        // 补偿日志必须完整；超过硬上限的密集范围直接拒绝，不带残缺日志写入。
+        const journalRead = await readPointsInRange(capture, resolved.automation, range, {
           maxPoints: MAX_JOURNAL_POINTS,
         });
         if (journalRead.truncated) {
@@ -198,7 +194,7 @@ export class ParameterCurveService {
         let verification = null;
         if (!applyError) {
           try {
-            const observedRead = await readPointsChunked(capture, resolved.automation, range, {
+            const observedRead = await readPointsInRange(capture, resolved.automation, range, {
               maxPoints: MAX_JOURNAL_POINTS,
             });
             observed = observedRead.points;
@@ -207,6 +203,7 @@ export class ParameterCurveService {
               resolved.automation,
               planned,
               observed,
+              resolved.definition,
               input.simplifyThreshold,
               observedRead.truncated
             );
@@ -251,7 +248,13 @@ export class ParameterCurveService {
               timing: { elapsedMs: this.now() - startedAt },
             };
           }
-          const rollback = await rollbackCurve(capture, resolved.automation, range, journal);
+          const rollback = await rollbackCurve(
+            capture,
+            resolved.automation,
+            range,
+            journal,
+            resolved.definition
+          );
           await closeBoundary(capture, resolved, warnings, () => (boundaryCalls += 1));
           return {
             ...failedResult(
@@ -397,13 +400,30 @@ async function resolveAutomation(capture, target, parameter) {
   };
 }
 
-// 分段调用 getPoints：窗口遇 FRAME_TOO_LARGE 时二分重试，成功后逐步恢复窗口大小。
+// 常见曲线一次 getAllPoints 后本地过滤，使耗时只与点数相关；超帧才按请求范围二分。
+async function readPointsInRange(capture, automation, range, { maxPoints }) {
+  try {
+    const raw = await capture.call(automation, "getAllPoints", [], {
+      resultFormat: "typed-v2",
+      resultShape: "array",
+    });
+    return limitPoints(
+      normalizePoints(raw).filter(
+        (point) => point.blick >= range.fromLocal && point.blick <= range.toLocal
+      ),
+      maxPoints
+    );
+  } catch (error) {
+    if (error?.code !== "FRAME_TOO_LARGE") throw error;
+    return readPointsChunked(capture, automation, range, { maxPoints });
+  }
+}
+
 async function readPointsChunked(capture, automation, range, { maxPoints }) {
   const points = [];
-  let windowStart = range.fromLocal;
-  let windowSize = READ_WINDOW_BLICK;
-  while (windowStart <= range.toLocal) {
-    const windowEnd = Math.min(windowStart + windowSize - 1, range.toLocal);
+  const windows = [{ from: range.fromLocal, to: range.toLocal }];
+  while (windows.length > 0) {
+    const { from: windowStart, to: windowEnd } = windows.pop();
     let raw;
     try {
       raw = await capture.call(automation, "getPoints", [windowStart, windowEnd], {
@@ -412,13 +432,16 @@ async function readPointsChunked(capture, automation, range, { maxPoints }) {
       });
     } catch (error) {
       if (error?.code === "FRAME_TOO_LARGE") {
-        if (windowSize <= MIN_READ_WINDOW_BLICK) {
+        if (windowEnd - windowStart + 1 <= MIN_READ_WINDOW_BLICK) {
           throw codedError(
             "CURVE_TOO_DENSE",
             `curve density exceeds the pipe frame limit even within a ${MIN_READ_WINDOW_BLICK}-blick window`
           );
         }
-        windowSize = Math.max(MIN_READ_WINDOW_BLICK, Math.floor(windowSize / 2));
+        const midpoint = windowStart + Math.floor((windowEnd - windowStart) / 2);
+        // 栈中先放右侧，保证弹出后仍按 blick 升序输出。
+        windows.push({ from: midpoint + 1, to: windowEnd });
+        windows.push({ from: windowStart, to: midpoint });
         continue;
       }
       throw error;
@@ -429,15 +452,31 @@ async function readPointsChunked(capture, automation, range, { maxPoints }) {
       }
       points.push(point);
     }
-    windowStart = windowEnd + 1;
-    if (windowSize < READ_WINDOW_BLICK) {
-      windowSize = Math.min(READ_WINDOW_BLICK, windowSize * 2);
-    }
   }
   return { points, truncated: false, nextFromBlick: null };
 }
 
-async function verifyCurve(capture, automation, planned, observed, simplifyThreshold, observedTruncated) {
+function limitPoints(points, maxPoints) {
+  if (points.length <= maxPoints) {
+    return { points, truncated: false, nextFromBlick: null };
+  }
+  return {
+    points: points.slice(0, maxPoints),
+    truncated: true,
+    nextFromBlick: points[maxPoints].blick,
+  };
+}
+
+async function verifyCurve(
+  capture,
+  automation,
+  planned,
+  observed,
+  definition,
+  simplifyThreshold,
+  observedTruncated
+) {
+  const valueTolerance = curveValueTolerance(definition);
   // 读回被截断说明范围内点数远超计划，本身就是后置条件失败。
   if (observedTruncated) {
     return {
@@ -452,18 +491,18 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
     };
   }
   if (simplifyThreshold === undefined) {
-    const passed =
-      observed.length === planned.length &&
-      planned.every(
-        (point, index) =>
-          observed[index].blick === point.blick &&
-          Math.abs(observed[index].value - point.value) <= VALUE_EPSILON
-      );
+    const comparison = compareExactPoints(planned, observed, valueTolerance);
     return {
       attempted: true,
-      passed,
+      passed: comparison.firstMismatch === null,
       mode: "exact",
-      evidence: { observedPointCount: observed.length, plannedPointCount: planned.length },
+      evidence: {
+        observedPointCount: observed.length,
+        plannedPointCount: planned.length,
+        valueTolerance,
+        maxValueDelta: comparison.maxValueDelta,
+        ...(comparison.firstMismatch ? { firstMismatch: comparison.firstMismatch } : {}),
+      },
     };
   }
   // simplify 合法地移除控制点；验证退化为按计划点位置采样，偏差以 threshold 为界。
@@ -488,12 +527,12 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
       Math.abs(point.value - expected.value)
     );
   }
-  const tolerance = simplifyThreshold + VALUE_EPSILON;
+  const effectiveTolerance = simplifyThreshold + valueTolerance;
   return {
     attempted: true,
     passed:
-      maxDeviation <= tolerance &&
-      maxObservedPointDeviation <= VALUE_EPSILON &&
+      maxDeviation <= effectiveTolerance &&
+      maxObservedPointDeviation <= valueTolerance &&
       unexpectedObservedPointCount === 0,
     mode: "tolerance_sampled",
     evidence: {
@@ -503,11 +542,62 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
       maxObservedPointDeviation,
       unexpectedObservedPointCount,
       tolerance: simplifyThreshold,
+      valueTolerance,
+      effectiveTolerance,
     },
   };
 }
 
-async function rollbackCurve(capture, automation, range, journal) {
+function compareExactPoints(planned, observed, valueTolerance) {
+  let firstMismatch = null;
+  let maxValueDelta = 0;
+  const sharedLength = Math.min(planned.length, observed.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const requested = planned[index];
+    const actual = observed[index];
+    const signedValueDelta = actual.value - requested.value;
+    const absoluteValueDelta = Math.abs(signedValueDelta);
+    maxValueDelta = Math.max(maxValueDelta, absoluteValueDelta);
+    if (
+      firstMismatch === null &&
+      (actual.blick !== requested.blick || absoluteValueDelta > valueTolerance)
+    ) {
+      firstMismatch = {
+        index,
+        reason: actual.blick !== requested.blick ? "blick" : "value",
+        requested: { blick: requested.blick, value: requested.value },
+        observed: { blick: actual.blick, value: actual.value },
+        delta: { blick: actual.blick - requested.blick, value: signedValueDelta },
+        absoluteValueDelta,
+        valueTolerance,
+      };
+    }
+  }
+  if (firstMismatch === null && planned.length !== observed.length) {
+    const index = sharedLength;
+    const requested = planned[index] ?? null;
+    const actual = observed[index] ?? null;
+    firstMismatch = {
+      index,
+      reason: "point_count",
+      requested,
+      observed: actual,
+      delta: null,
+      valueTolerance,
+    };
+  }
+  return { firstMismatch, maxValueDelta };
+}
+
+function curveValueTolerance(definition) {
+  const [minimum, maximum] = definition.range;
+  return Math.max(
+    MIN_VALUE_TOLERANCE,
+    Math.abs(maximum - minimum) * RANGE_RELATIVE_TOLERANCE
+  );
+}
+
+async function rollbackCurve(capture, automation, range, journal, definition) {
   const errors = [];
   try {
     await capture.call(automation, "remove", [range.fromLocal, range.toLocal]);
@@ -529,10 +619,11 @@ async function rollbackCurve(capture, automation, range, journal) {
     }
   }
   try {
-    const observedRead = await readPointsChunked(capture, automation, range, {
+    const observedRead = await readPointsInRange(capture, automation, range, {
       maxPoints: MAX_JOURNAL_POINTS,
     });
     const observed = observedRead.points;
+    const valueTolerance = curveValueTolerance(definition);
     const verified =
       errors.length === 0 &&
       !observedRead.truncated &&
@@ -540,7 +631,7 @@ async function rollbackCurve(capture, automation, range, journal) {
       journal.every(
         (point, index) =>
           observed[index].blick === point.blick &&
-          Math.abs(observed[index].value - point.value) <= VALUE_EPSILON
+          Math.abs(observed[index].value - point.value) <= valueTolerance
       );
     return {
       verified,

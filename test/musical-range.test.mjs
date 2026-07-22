@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { RangeSnapshotService } from "../server/src/musical-range.js";
 
-const Q = 705600;
+const Q = 705600000;
 const BAR_4_4 = 4 * Q;
 
 // 两轨模型：track0 一个跨小节 vocal group + 一个范围外 group；track1 instrumental。
@@ -40,7 +40,10 @@ function createRangeModel() {
     epoch: () => 1,
     roots: async () => ({ project: h.project, sv: h.sv, mainEditor: h.mainEditor }),
     free: async () => {},
-    index: async () => null,
+    index: async ({ field }) => {
+      if (field === "QUARTER") return Q;
+      throw new Error(`unsupported range index ${field}`);
+    },
     call: async ({ handle: target, method, args = [] }) => {
       model.hostCalls.push(method);
       const id = target?.__handle__;
@@ -145,6 +148,7 @@ test("range snapshot converts 1-based bar/beat to blick and back across meter ch
   assert.equal(result.data.barBase, 1);
   assert.equal(result.data.beatBase, 1);
   assert.equal(result.data.range.from.blick, 0);
+  assert.equal(result.data.timebase.quarterBlick, Q);
   // bar 20 = 8 小节 4/4 + 11 小节 3/4。
   assert.equal(result.data.range.to.blick, 8 * BAR_4_4 + 11 * 3 * Q);
   assert.deepEqual(result.data.meterMap, [

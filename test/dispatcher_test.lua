@@ -55,7 +55,7 @@ local project = makeObj({
 })
 
 SV = {
-  QUARTER = 705600,
+  QUARTER = 705600000,
   setTimeout   = function(_, _ms, fn) scheduled = fn end,
   finish       = function() end,
   showMessageBox = function() end,
@@ -102,7 +102,7 @@ r = step('{"id":4,"op":"call","handle":' .. (projH or 0) .. ',"method":"getNumTr
 check("project:getNumTracks == 3", r:find('"result":3', 1, true) ~= nil, r)
 
 r = step('{"id":5,"op":"index","field":"QUARTER"}')
-check("SV.QUARTER == 705600", r:find('"result":705600', 1, true) ~= nil, r)
+check("SV.QUARTER == 705600000", r:find('"result":705600000', 1, true) ~= nil, r)
 
 -- handle round-trip: create -> pass handle as arg -> retrieve -> call method on it
 r = step('{"id":6,"op":"call","method":"create","args":["Note"]}')

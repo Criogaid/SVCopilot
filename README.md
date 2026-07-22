@@ -155,7 +155,7 @@ MCP 资源还提供：
 2. `sv_root`，保存返回的 project handle。
 3. `sv_call { "handle": <project>, "method": "getFileName" }`。
 4. `sv_call { "handle": <project>, "method": "getNumTracks" }`。
-5. `sv_index { "field": "QUARTER" }`，通常返回 `705600`。
+5. `sv_index { "field": "QUARTER" }`，Synthesizer V Studio 2 官方值为 `705600000`。
 
 对象 handle 也能作为参数传回：
 

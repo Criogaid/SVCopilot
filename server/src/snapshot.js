@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { collectHandleRefs } from "./wire-codec.js";
+import { normalizeVoiceParameters } from "./voice-parameters.js";
 
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 200;
@@ -482,9 +483,11 @@ async function readGroupSummary(capture, groupReference, index, include) {
   if (include.has("voiceParameters")) {
     summary.voice = {
       identityStatus: "unobservable",
-      parameters: await capture.call(groupReference, "getVoice", [], {
-        resultFormat: "typed-v2",
-      }),
+      parameters: normalizeVoiceParameters(
+        await capture.call(groupReference, "getVoice", [], {
+          resultFormat: "typed-v2",
+        })
+      ),
     };
   }
   return summary;
@@ -535,6 +538,11 @@ export function createHostScope(host) {
     },
     async call(handle, method, args = [], options = {}) {
       const value = await host.call({ handle, method, args, ...options });
+      remember(value);
+      return value;
+    },
+    async index(field, handle) {
+      const value = await host.index({ handle, field });
       remember(value);
       return value;
     },

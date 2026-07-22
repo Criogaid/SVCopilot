@@ -1,4 +1,5 @@
 local bridgePath = assert(arg[1], "pass StartSynthVCopilot.lua as arg 1")
+local QUARTER = 705600000
 
 local scheduled = nil
 local finished = false
@@ -71,13 +72,13 @@ makeNote = function(state)
 end
 
 for _, state in ipairs({
-  { onset = 0, duration = 705600, pitch = 60, lyrics = "a", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
-  { onset = 705600, duration = 705600, pitch = 62, lyrics = "i", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
+  { onset = 0, duration = QUARTER, pitch = 60, lyrics = "a", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
+  { onset = QUARTER, duration = QUARTER, pitch = 62, lyrics = "i", phonemes = "", language = "", detune = 0, attributes = { tF0Offset = 0 } },
 }) do
   notes[#notes + 1] = makeNote(state)
 end
 
-local automationPoints = { { 0, 0.0 }, { 705600, 0.5 } }
+local automationPoints = { { 0, 0.0 }, { QUARTER, 0.5 } }
 local automation = makeObject({
   getDefinition = function()
     return { displayName = "Loudness", typeName = "loudness", range = { -24, 24 }, defaultValue = 0 }
@@ -145,7 +146,7 @@ local groupReference = makeObject({
   isInstrumental = function() return false end,
   isMain = function() return true end,
   getOnset = function() return 0 end,
-  getEnd = function() return 4 * 4 * 705600 end,
+  getEnd = function() return 4 * 4 * QUARTER end,
   getTimeOffset = function() return 0 end,
   getPitchOffset = function() return 0 end,
   getVoice = function() return { paramTension = 0, paramBreathiness = 0 } end,
@@ -172,8 +173,8 @@ local playback = makeObject({
   stop = function() playbackState.status = "stopped" end,
 })
 local timeAxis = makeObject({
-  getSecondsFromBlick = function(_, b) return b / 705600 * 0.5 end,
-  getBlickFromSeconds = function(_, t) return math.floor(t * 2 * 705600 + 0.5) end,
+  getSecondsFromBlick = function(_, b) return b / QUARTER * 0.5 end,
+  getBlickFromSeconds = function(_, t) return math.floor(t * 2 * QUARTER + 0.5) end,
   getAllMeasureMarks = function()
     return { { position = 0, positionBlick = 0, numerator = 4, denominator = 4 } }
   end,
@@ -223,7 +224,7 @@ local project = makeObject({
 })
 
 SV = {
-  QUARTER = 705600,
+  QUARTER = QUARTER,
   setTimeout = function(_, _delay, callback) scheduled = callback end,
   finish = function() finished = true end,
   showMessageBox = function() end,
@@ -234,7 +235,7 @@ SV = {
   getPlayback = function() return playback end,
   create = function(_, objectType)
     if objectType == "Note" then
-      return makeNote({ onset = 0, duration = 705600, pitch = 60, lyrics = "la", phonemes = "", language = "", detune = 0, attributes = {} })
+      return makeNote({ onset = 0, duration = QUARTER, pitch = 60, lyrics = "la", phonemes = "", language = "", detune = 0, attributes = {} })
     end
     return makeObject({ getType = function() return objectType end })
   end,

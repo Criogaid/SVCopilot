@@ -435,7 +435,7 @@ const TOOLS = [
   {
     name: "sv_snapshot_range",
     description:
-      "Read a musical range (1-based bar/beat, converted via the project TimeAxis) across selected tracks as canonical 0-based data with both blick and bar/beat coordinates, per-note rests and neighbor lyrics, tempo and meter maps, and optional mixer state. Returns a content-hash snapshotToken (not a host revision): pass it back as sinceToken to get no_change when the observed content is identical. Read-only; use sv_snapshot (selection/group) to obtain an editable contextId.",
+      "Read a musical range (1-based bar/beat, converted with the host-reported SV.QUARTER timebase and project meter map) across selected tracks as canonical 0-based data with both blick and bar/beat coordinates, per-note rests and neighbor lyrics, tempo and meter maps, and optional mixer state. Returns timebase.quarterBlick as conversion evidence and a content-hash snapshotToken (not a host revision): pass it back as sinceToken to get no_change when the observed content is identical. Read-only; use sv_snapshot (selection/group) to obtain an editable contextId.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -504,7 +504,7 @@ const TOOLS = [
   {
     name: "sv_get_parameter_curve",
     description:
-      "Read one Automation parameter curve (pitchDelta, loudness, tension, breathiness, voicing, gender, vibratoEnv, toneShift, vocalMode_<Name>, ...) of a note group within a required blick range (reads are chunked to respect the 64 KiB pipe frame; data.nextFromBlick continues a truncated read). Automation lives in group-local blicks; every point is reported with both localBlick and absoluteBlick (absolute = local + group timeOffset), together with the official definition (range, default) and interpolation method (read-only; there is no interpolation setter in the official API).",
+      "Read one Automation parameter curve (pitchDelta, loudness, tension, breathiness, voicing, gender, vibratoEnv, toneShift, vocalMode_<Name>, ...) of a note group within a required blick range. The host curve is read once with getAllPoints and filtered locally, so empty/sparse curve cost does not grow with the numeric blick span; only an oversized 64 KiB result falls back to density-based range bisection. data.nextFromBlick continues a truncated read. Automation lives in group-local blicks; every point is reported with both localBlick and absoluteBlick (absolute = local + group timeOffset), together with the official definition (range, default) and interpolation method (read-only; there is no interpolation setter in the official API).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -539,7 +539,7 @@ const TOOLS = [
   {
     name: "sv_patch_parameter_curve",
     description:
-      "Edit one Automation parameter curve inside a blick range. replace removes the range and writes explicit points; add/scale shift or scale the existing CONTROL POINTS in the range (not a continuous resampled curve), clamped to the official definition range. Optional simplify after writing. Writes sit inside undo boundaries with journaled previous points; atomic:true restores them on failure (verified compensation, not ACID). Read-back verification is exact without simplify; with simplify it samples the host-interpolated values and requires every retained control point to belong to the requested point set, which works for Linear, Cosine, and Cubic interpolation.",
+      "Edit one Automation parameter curve inside a blick range. replace removes the range and writes explicit points; add/scale shift or scale the existing CONTROL POINTS in the range (not a continuous resampled curve), clamped to the official definition range. Optional simplify after writing. Writes sit inside undo boundaries with journaled previous points; atomic:true restores them on failure (verified compensation, not ACID). Without simplify, point positions and counts are exact while values allow the documented float32 read-back tolerance returned in verification.evidence.valueTolerance; failures include firstMismatch requested/observed/delta evidence. With simplify it samples the host-interpolated values and requires every retained control point to belong to the requested point set, which works for Linear, Cosine, and Cubic interpolation.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -657,7 +657,7 @@ const TOOLS = [
   {
     name: "sv_start_audition",
     description:
-      "Non-blocking audition: save playhead and target-track solo state, stop existing playback when necessary, solo the requested tracks, seek to the range start (absolute blicks converted via TimeAxis), and play or loop. Startup succeeds only after read-back confirms solo, playhead, and an active playback status; silently ignored host writes are compensated and reported as failure. A normal play request may report looping when the host UI loop region is active. Returns an auditionId plus a recovery payload the caller should keep — if this server crashes, sv_restore_audition can undo solo/playhead changes from the payload alone. MCP cannot hear audio; a human judges the sound.",
+      "Non-blocking audition: save playhead and target-track solo state, stop existing playback when necessary, solo the requested tracks, seek to the range start (absolute blicks converted via TimeAxis), and play or loop. Startup succeeds only after read-back confirms solo, playhead, and an active playback status; silently ignored host writes are compensated and reported as failure. For loop:false, toBlick describes the requested range but PlaybackControl has no bounded-play primitive: data.endPolicy is caller_stop and the caller must invoke sv_stop_audition. A normal play request may report looping when the host UI loop region is active. Returns an auditionId plus a recovery payload the caller should keep — if this server crashes, sv_restore_audition can undo solo/playhead changes from the payload alone. MCP cannot hear audio; a human judges the sound.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { ParameterCurveService } from "../server/src/parameter-curve.js";
 
-const Q = 705600;
+const Q = 705600000;
 
 // Automation 模型：有序控制点数组 + 线性插值 + 朴素 simplify（移除线性可省略点）。
 function createCurveModel() {
@@ -94,7 +94,18 @@ function createCurveModel() {
         if (method === "getDefinition") return { ...model.definition, range: [...model.definition.range] };
         if (method === "getType") return model.definition.typeName;
         if (method === "getInterpolationMethod") return model.interpolationMethod;
-        if (method === "getAllPoints") return sortPoints().map((point) => [...point]);
+        if (method === "getAllPoints") {
+          model.getAllPointsCalls = (model.getAllPointsCalls ?? 0) + 1;
+          if (
+            model.maxAllPointsPerCall !== undefined &&
+            model.points.length > model.maxAllPointsPerCall
+          ) {
+            const error = new Error("SynthV bridge result exceeds 65536 bytes");
+            error.code = "FRAME_TOO_LARGE";
+            throw error;
+          }
+          return sortPoints().map((point) => [...point]);
+        }
         if (method === "getPoints") {
           model.getPointsCalls = (model.getPointsCalls ?? 0) + 1;
           const slice = inRange(args[0], args[1]);
@@ -108,9 +119,11 @@ function createCurveModel() {
         }
         if (method === "get") return interpolate(args[0]);
         if (method === "add") {
+          const value = model.coerceValuesToFloat32 ? Math.fround(args[1]) : args[1];
+          const storedValue = value + (model.writeValueOffset ?? 0);
           const existing = model.points.find(([b]) => b === args[0]);
-          if (existing) existing[1] = args[1];
-          else model.points.push([args[0], args[1]]);
+          if (existing) existing[1] = storedValue;
+          else model.points.push([args[0], storedValue]);
           sortPoints();
           return true;
         }
@@ -224,6 +237,58 @@ test("sv_patch_parameter_curve replace: dryRun has no side effects, real write v
   assert.equal(model.undoCount, 2);
   assert.equal(result.data.after.pointCount, 2);
   assert.equal(result.data.after.stats.max, 2);
+});
+
+test("sv_patch_parameter_curve accepts host float32 value quantization", async () => {
+  const model = createCurveModel();
+  model.coerceValuesToFloat32 = true;
+  const result = await createService(model).patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+    points: [
+      { blick: 0, value: 0.2 },
+      { blick: Q, value: 0.8 },
+      { blick: 2 * Q, value: 0.3 },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.verification.passed, true);
+  assert.equal(result.verification.evidence.valueTolerance, 48e-6);
+  assert.ok(result.verification.evidence.maxValueDelta > 0);
+  assert.ok(
+    result.verification.evidence.maxValueDelta <= result.verification.evidence.valueTolerance
+  );
+  assert.equal(result.verification.evidence.firstMismatch, undefined);
+});
+
+test("sv_patch_parameter_curve reports the first value mismatch with delta evidence", async () => {
+  const model = createCurveModel();
+  model.writeValueOffset = 0.001;
+  const result = await createService(model).patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    atomic: false,
+    range: { fromBlick: 0, toBlick: Q },
+    points: [{ blick: 0, value: 0.2 }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "partial");
+  assert.equal(result.verification.passed, false);
+  assert.deepEqual(result.verification.evidence.firstMismatch.requested, {
+    blick: 0,
+    value: 0.2,
+  });
+  assert.equal(result.verification.evidence.firstMismatch.observed.blick, 0);
+  assert.ok(Math.abs(result.verification.evidence.firstMismatch.delta.value - 0.001) < 1e-12);
+  assert.ok(
+    result.verification.evidence.firstMismatch.absoluteValueDelta >
+      result.verification.evidence.valueTolerance
+  );
 });
 
 test("sv_patch_parameter_curve add mode shifts existing control points and clamps to range", async () => {
@@ -371,7 +436,7 @@ test("sv_patch_parameter_curve validates target and parameter", async () => {
 
 const WINDOW = 8 * Q;
 
-test("sv_get_parameter_curve reads dense curves in bounded windows with continuation", async () => {
+test("sv_get_parameter_curve filters a wide range from one getAllPoints call", async () => {
   const model = createCurveModel();
   // 300 个点分布在 3 个读取窗口内。
   model.points = Array.from({ length: 300 }, (_, index) => [index * (WINDOW * 3 / 300), index % 10]);
@@ -384,7 +449,8 @@ test("sv_get_parameter_curve reads dense curves in bounded windows with continua
   });
 
   assert.equal(result.ok, true);
-  assert.ok(model.getPointsCalls >= 1);
+  assert.equal(model.getAllPointsCalls, 1);
+  assert.equal(model.getPointsCalls ?? 0, 0);
   assert.equal(result.data.points.length, 100);
   assert.equal(result.data.complete, false);
   assert.ok(Number.isFinite(result.data.nextFromBlick));
@@ -417,11 +483,11 @@ test("sv_patch_parameter_curve refuses ranges denser than the journal cap", asyn
   assert.equal(model.undoCount, 0);
 });
 
-test("sv_patch_parameter_curve rolls back when the read-back getPoints throws", async () => {
+test("sv_patch_parameter_curve rolls back when the read-back getAllPoints throws", async () => {
   const model = createCurveModel();
   const service = createService(model);
-  // journal 读是第 1 次 getPoints；写后读回是第 2 次。
-  model.failures.push({ method: "getPoints", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
+  // journal 读是第 1 次 getAllPoints；写后读回是第 2 次。
+  model.failures.push({ method: "getAllPoints", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
   const result = await service.patchCurve({
     target: TARGET,
     parameter: "loudness",
@@ -509,6 +575,7 @@ test("sv_get_parameter_curve bisects windows on FRAME_TOO_LARGE and completes", 
     index % 5,
   ]);
   model.maxPointsPerCall = 300;
+  model.maxAllPointsPerCall = 300;
   const service = createService(model);
   const result = await service.getCurve({
     target: TARGET,
@@ -520,6 +587,7 @@ test("sv_get_parameter_curve bisects windows on FRAME_TOO_LARGE and completes", 
   assert.equal(result.ok, true);
   assert.equal(result.data.complete, true);
   assert.equal(result.data.points.length, 2000);
+  assert.equal(model.getAllPointsCalls, 1);
   assert.ok(model.getPointsCalls > 2);
 });
 
@@ -527,6 +595,7 @@ test("sv_get_parameter_curve reports CURVE_TOO_DENSE when even the minimum windo
   const model = createCurveModel();
   model.points = Array.from({ length: 50 }, (_, index) => [index, 0]);
   model.maxPointsPerCall = 0;
+  model.maxAllPointsPerCall = 0;
   const service = createService(model);
   await assert.rejects(
     service.getCurve({
