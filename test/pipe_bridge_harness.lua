@@ -137,7 +137,8 @@ local group = makeObject({
   removeNote = function(_, index) table.remove(notes, index) end,
   getParameter = function(_, parameterType)
     if string.lower(parameterType) == "loudness" then return automation end
-    return nil
+    -- 复现真实宿主的危险行为：未知名称可能静默回退到默认 Automation。
+    return automation
   end,
 })
 local groupReference = makeObject({

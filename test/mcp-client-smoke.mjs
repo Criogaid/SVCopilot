@@ -103,8 +103,14 @@ try {
   assert.ok(runTool.inputSchema.properties.steps.items.properties.verifiesStep);
   const waitTool = listed.tools.find((tool) => tool.name === "sv_wait_for_processing");
   const setLyricsTool = listed.tools.find((tool) => tool.name === "sv_set_lyrics");
+  const batchCurveTool = listed.tools.find(
+    (tool) => tool.name === "sv_patch_parameter_curves"
+  );
   assert.equal(waitTool.inputSchema.properties.requireNonEmpty.default, false);
   assert.equal(setLyricsTool.inputSchema.properties.requireNonEmptyPhonemes.default, false);
+  assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
+  assert.equal(batchCurveTool.inputSchema.properties.responseMode.default, "standard");
+  assert.ok(batchCurveTool.inputSchema.properties.target.properties.expectedGroupUuid);
 
   const resources = await client.listResources();
   assert.ok(resources.resources.some((resource) => resource.uri === "svapi://manifest"));
@@ -113,6 +119,19 @@ try {
   assert.ok(manifest.summary.methodOverloadCount >= 200);
   const capabilities = parseResource(
     await client.readResource({ uri: "svcopilot://capabilities" })
+  );
+  assert.deepEqual(capabilities.knownLimits.automationParameters.builtIn, [
+    "pitchDelta",
+    "vibratoEnv",
+    "loudness",
+    "tension",
+    "breathiness",
+    "voicing",
+    "gender",
+  ]);
+  assert.equal(
+    capabilities.knownLimits.automationParameters.vocalModes,
+    "dynamic_from_target_voice"
   );
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
@@ -431,6 +450,90 @@ try {
   assert.equal(curvePatch.verification.mode, "exact");
   assert.equal(curvePatch.data.after.pointCount, 2);
   assert.equal(curvePatch.data.after.stats.min, -3);
+
+  // 批量工具必须经过真实 MCP + IO PIPE 路径完成预检、写入和内建回读验证。
+  const batchCurvePatch = parseToolResult(
+    await client.callTool({
+      name: "sv_patch_parameter_curves",
+      arguments: {
+        target: {
+          trackIndex: 0,
+          groupIndex: 0,
+          expectedGroupUuid: "pipe-group-1",
+        },
+        curves: [
+          {
+            parameter: "loudness",
+            mode: "replace",
+            range: { fromBlick: 0, toBlick: 2 * Q },
+            points: [
+              { blick: 0, value: 1 },
+              { blick: Q, value: -2 },
+            ],
+          },
+        ],
+        responseMode: "compact",
+        undoLabel: "Smoke batch curve",
+      },
+    })
+  );
+  assert.equal(batchCurvePatch.ok, true);
+  assert.equal(batchCurvePatch.status, "succeeded");
+  assert.equal(batchCurvePatch.targetUuid, "pipe-group-1");
+  assert.equal(batchCurvePatch.curves[0].verified, true);
+  assert.equal(batchCurvePatch.undoRecords, 1);
+  assert.equal(batchCurvePatch.undoLabelApplied, false);
+  assert.equal(batchCurvePatch.timings.dispatcherQueueMs, null);
+  assert.ok(Number.isFinite(batchCurvePatch.timings.validationMs));
+  assert.ok(Number.isFinite(batchCurvePatch.timings.coordinatorQueueMs));
+  assert.ok(Number.isFinite(batchCurvePatch.timings.operationMs));
+  assert.ok(Number.isFinite(batchCurvePatch.timings.serviceTotalMs));
+
+  // Relay 宿主故意把未知名称回退到默认曲线；高层工具必须在调用宿主前拒绝 typo。
+  const typoCurvePatch = parseToolError(
+    await client.callTool({
+      name: "sv_patch_parameter_curves",
+      arguments: {
+        target: { trackIndex: 0, groupIndex: 0 },
+        curves: [
+          {
+            parameter: "pitchDelt",
+            mode: "replace",
+            range: { fromBlick: 0, toBlick: Q },
+            points: [{ blick: 0, value: 0 }],
+          },
+        ],
+        dryRun: true,
+      },
+    })
+  );
+  assert.equal(typoCurvePatch.ok, false);
+  assert.equal(typoCurvePatch.effects, "none");
+  assert.equal(typoCurvePatch.error.code, "UNKNOWN_PARAMETER");
+  assert.equal(typoCurvePatch.curves[0].requestedParameter, "pitchDelt");
+  assert.equal(typoCurvePatch.curves[0].resolvedParameter, null);
+
+  const duplicateCurvePatch = parseToolError(
+    await client.callTool({
+      name: "sv_patch_parameter_curves",
+      arguments: {
+        target: { trackIndex: 0, groupIndex: 0 },
+        curves: ["loudness", "LoUdNeSs"].map((parameter) => ({
+          parameter,
+          mode: "replace",
+          range: { fromBlick: 0, toBlick: Q },
+          points: [{ blick: 0, value: 0 }],
+        })),
+        dryRun: true,
+      },
+    })
+  );
+  assert.equal(duplicateCurvePatch.error.code, "DUPLICATE_PARAMETER");
+  assert.deepEqual(
+    duplicateCurvePatch.curves.map((curve) => curve.resolvedParameter),
+    ["loudness", "loudness"]
+  );
+  assert.equal(duplicateCurvePatch.undoRecords, 0);
 
   const curveOutOfRange = parseToolError(
     await client.callTool({

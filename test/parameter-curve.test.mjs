@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ExecutionCoordinator } from "../server/src/execution-coordinator.js";
 import { ParameterCurveService } from "../server/src/parameter-curve.js";
 
 const Q = 705600000;
@@ -80,6 +81,7 @@ function createCurveModel() {
       if (id === h.ref.__handle__) {
         if (method === "isInstrumental") return false;
         if (method === "getTarget") return h.group;
+        if (method === "getVoice") return model.voice ?? { vocalModeParams: {} };
         // 首音符组内 onset 为 0，因此 getOnset == getTimeOffset。
         if (method === "getOnset") return model.groupOnset;
         if (method === "getTimeOffset") return model.groupOnset;
@@ -163,6 +165,143 @@ function createService(model) {
     { withExclusive: (task) => task(model.host) },
     { now: () => 1000 }
   );
+}
+
+// 在单曲线宿主模型上追加独立 Automation，用于验证跨曲线事务边界。
+function addBatchCurves(model) {
+  const definitions = {
+    tension: { displayName: "Tension", typeName: "tension", range: [0, 1], defaultValue: 0 },
+    breathiness: {
+      displayName: "Breathiness",
+      typeName: "breathiness",
+      range: [-1, 1],
+      defaultValue: 0,
+    },
+    pitchDelta: {
+      displayName: "Pitch Deviation",
+      typeName: "pitchDelta",
+      range: [-100, 100],
+      defaultValue: 0,
+    },
+    vocalMode_Powerful: {
+      displayName: "Powerful",
+      typeName: "vocalMode_Powerful",
+      range: [0, 150],
+      defaultValue: 0,
+    },
+  };
+  const handles = Object.fromEntries(
+    Object.keys(definitions).map((parameter, index) => [
+      parameter,
+      { __handle__: 900 + index, __type__: "Automation", __epoch__: 1 },
+    ])
+  );
+  model.batchPoints = Object.fromEntries(
+    Object.keys(definitions).map((parameter) => [parameter, [[0, 0]]])
+  );
+  model.parameterLookupCount = 0;
+  model.voice = {
+    vocalModeParams: {
+      Powerful: { pitch: 100, timbre: 100, pronunciation: 100 },
+    },
+  };
+  const parameterByHandle = new Map(
+    Object.entries(handles).map(([parameter, handle]) => [handle.__handle__, parameter])
+  );
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    const id = request.handle?.__handle__;
+    if (id === model.handles.group.__handle__ && request.method === "getParameter") {
+      model.parameterLookupCount += 1;
+      const requested = String(request.args?.[0] ?? "");
+      if (requested.toLowerCase() === "loudness") return model.handles.automation;
+      if (model.forceParameterFallback === requested) return handles.pitchDelta;
+      return handles[requested] ?? (model.unknownParameterFallsBack ? handles.pitchDelta : null);
+    }
+    const parameter = parameterByHandle.get(id);
+    if (!parameter) return originalCall(request);
+
+    const points = model.batchPoints[parameter];
+    const definition = definitions[parameter];
+    if (request.method === "getDefinition") return { ...definition, range: [...definition.range] };
+    if (request.method === "getType") return parameter;
+    if (request.method === "getInterpolationMethod") return "Linear";
+    if (request.method === "getAllPoints") return points.map((point) => [...point]);
+    if (request.method === "remove") {
+      const [from, to] = request.args;
+      model.batchPoints[parameter] = points.filter(([blick]) => blick < from || blick > to);
+      return true;
+    }
+    if (request.method === "add") {
+      if (
+        model.failBatchParameter === parameter &&
+        model.failBatchMethod === "add" &&
+        !model.batchFailureUsed
+      ) {
+        model.batchFailureUsed = true;
+        const error = new Error(`injected failure for ${parameter}.add`);
+        error.code = "ARGUMENT_MISMATCH";
+        throw error;
+      }
+      if (
+        model.failBatchRollbackParameter === parameter &&
+        model.batchFailureUsed &&
+        !model.batchRollbackFailureUsed
+      ) {
+        model.batchRollbackFailureUsed = true;
+        const error = new Error(`injected rollback failure for ${parameter}.add`);
+        error.code = "ARGUMENT_MISMATCH";
+        throw error;
+      }
+      const [blick, value] = request.args;
+      const current = model.batchPoints[parameter];
+      const existing = current.find((point) => point[0] === blick);
+      if (existing) existing[1] = value;
+      else current.push([blick, value]);
+      current.sort((left, right) => left[0] - right[0]);
+      return true;
+    }
+    if (request.method === "simplify") return false;
+    if (request.method === "get") {
+      return model.batchPoints[parameter].find((point) => point[0] === request.args[0])?.[1] ?? 0;
+    }
+    throw new Error(`unsupported batch curve call ${parameter}.${request.method}`);
+  };
+  return model;
+}
+
+function fourCurveRequest(overrides = {}) {
+  return {
+    target: { ...TARGET, expectedGroupUuid: "curve-group" },
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: 2 * Q },
+        points: [{ blick: 0, value: 2 }],
+      },
+      {
+        parameter: "tension",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: 2 * Q },
+        points: [{ blick: 0, value: 0.2 }],
+      },
+      {
+        parameter: "breathiness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: 2 * Q },
+        points: [{ blick: 0, value: 0.3 }],
+      },
+      {
+        parameter: "pitchDelta",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: 2 * Q },
+        points: [{ blick: 0, value: -10 }],
+      },
+    ],
+    atomic: true,
+    ...overrides,
+  };
 }
 
 const TARGET = { trackIndex: 0, groupIndex: 0 };
@@ -434,6 +573,31 @@ test("sv_patch_parameter_curve validates target and parameter", async () => {
   );
 });
 
+test("single-curve read and patch reject typos before host parameter lookup", async () => {
+  const model = addBatchCurves(createCurveModel());
+  model.unknownParameterFallsBack = true;
+  const service = createService(model);
+  const patch = await service.patchCurve({
+    target: TARGET,
+    parameter: "loudnes",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: Q },
+    points: [{ blick: 0, value: 1 }],
+  });
+  assert.equal(patch.ok, false);
+  assert.equal(patch.error.code, "UNKNOWN_PARAMETER");
+  await assert.rejects(
+    service.getCurve({
+      target: TARGET,
+      parameter: "pitchDelt",
+      range: { fromBlick: 0, toBlick: Q },
+    }),
+    (error) => error.code === "UNKNOWN_PARAMETER"
+  );
+  assert.equal(model.parameterLookupCount, 0);
+  assert.equal(model.undoCount, 0);
+});
+
 const WINDOW = 8 * Q;
 
 test("sv_get_parameter_curve filters a wide range from one getAllPoints call", async () => {
@@ -632,4 +796,351 @@ test("sv_patch_parameter_curve fails an empty replace when the host silently ign
       (value) => typeof value !== "number" || Number.isFinite(value)
     )
   );
+});
+
+test("sv_patch_parameter_curves dry-run preflights four curves without writes or Undo", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const before = {
+    loudness: model.points.map((point) => [...point]),
+    tension: model.batchPoints.tension.map((point) => [...point]),
+  };
+  const result = await createService(model).patchCurves(
+    fourCurveRequest({ dryRun: true, responseMode: "compact", undoLabel: "Tune Lead 1" })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.effects, "none");
+  assert.equal(result.curves.length, 4);
+  assert.ok(result.curves.every((curve) => curve.status === "planned"));
+  assert.equal(result.undoRecords, 0);
+  assert.equal(result.undoLabel, "Tune Lead 1");
+  assert.equal(result.undoLabelApplied, false);
+  assert.equal(model.undoCount, 0);
+  assert.deepEqual(model.points, before.loudness);
+  assert.deepEqual(model.batchPoints.tension, before.tension);
+  assert.equal("before" in result.curves[0], false);
+  assert.equal("planned" in result.curves[0], false);
+});
+
+test("sv_patch_parameter_curves commits and verifies four curves in one Undo interval", async () => {
+  const model = addBatchCurves(createCurveModel());
+  let tick = 1000;
+  const service = new ParameterCurveService(
+    { withExclusive: (task) => task(model.host) },
+    { now: () => tick++ }
+  );
+  const result = await service.patchCurves(fourCurveRequest({ responseMode: "standard" }));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.targetUuid, "curve-group");
+  assert.equal(result.undoRecords, 1);
+  assert.equal(model.undoCount, 2);
+  assert.ok(result.curves.every((curve) => curve.verified === true));
+  assert.deepEqual(model.points, [[0, 2]]);
+  assert.deepEqual(model.batchPoints.tension, [[0, 0.2]]);
+  assert.deepEqual(model.batchPoints.breathiness, [[0, 0.3]]);
+  assert.deepEqual(model.batchPoints.pitchDelta, [[0, -10]]);
+  assert.ok(result.timings.serviceTotalMs >= result.timings.coordinatorQueueMs);
+  assert.equal(
+    result.timings.serviceTotalMs,
+    result.timings.validationMs +
+      result.timings.coordinatorQueueMs +
+      result.timings.operationMs
+  );
+  for (const field of [
+    "validationMs",
+    "coordinatorQueueMs",
+    "preflightReadMs",
+    "hostWriteMs",
+    "verificationMs",
+    "rollbackMs",
+    "operationMs",
+    "serviceTotalMs",
+  ]) {
+    assert.equal(Number.isFinite(result.timings[field]), true);
+    assert.ok(result.timings[field] >= 0);
+  }
+});
+
+test("sv_patch_parameter_curves rolls every touched curve back when a later write fails", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const beforeLoudness = model.points.map((point) => [...point]);
+  const beforeTension = model.batchPoints.tension.map((point) => [...point]);
+  model.failBatchParameter = "tension";
+  model.failBatchMethod = "add";
+  const result = await createService(model).patchCurves(fourCurveRequest());
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.effects, "reverted");
+  assert.equal(result.error.phase, "execute");
+  assert.equal(result.error.curveIndex, 1);
+  assert.equal(result.error.parameter, "tension");
+  assert.equal(result.rollback.verified, true);
+  assert.equal(result.rollback.curves.length, 2);
+  assert.deepEqual(model.points, beforeLoudness);
+  assert.deepEqual(model.batchPoints.tension, beforeTension);
+  assert.deepEqual(model.batchPoints.breathiness, [[0, 0]]);
+  assert.equal(model.undoCount, 2);
+});
+
+test("sv_patch_parameter_curves rejects a stale UUID before reading Automation", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const request = fourCurveRequest();
+  request.target.expectedGroupUuid = "stale-group";
+  const result = await createService(model).patchCurves(request);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "conflict");
+  assert.equal(result.effects, "none");
+  assert.equal(result.error.code, "TARGET_CONFLICT");
+  assert.equal(result.target.groupUuid, "curve-group");
+  assert.equal(model.parameterLookupCount, 0);
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_parameter_curves leaves prepared curves untouched when preflight later fails", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const request = fourCurveRequest();
+  request.curves[1].parameter = "notAParameter";
+  const result = await createService(model).patchCurves(request);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "failed");
+  assert.equal(result.effects, "none");
+  assert.equal(result.error.phase, "preflight");
+  assert.equal(result.error.curveIndex, 1);
+  assert.equal(result.curves[0].status, "not_attempted");
+  assert.equal(result.curves[1].status, "failed");
+  assert.equal(model.undoCount, 0);
+  assert.deepEqual(model.points, [
+    [0, 0],
+    [Q, 0.5],
+    [2 * Q, 1],
+  ]);
+});
+
+test("sv_patch_parameter_curves accepts float32 quantization through the shared verifier", async () => {
+  const model = addBatchCurves(createCurveModel());
+  model.coerceValuesToFloat32 = true;
+  const request = fourCurveRequest({ responseMode: "standard" });
+  request.curves = [
+    {
+      parameter: "loudness",
+      mode: "replace",
+      range: { fromBlick: 0, toBlick: 2 * Q },
+      points: [
+        { blick: 0, value: 0.2 },
+        { blick: Q, value: 0.8 },
+      ],
+    },
+  ];
+  const result = await createService(model).patchCurves(request);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.curves[0].verified, true);
+  assert.equal(result.curves[0].verification.evidence.valueTolerance, 48e-6);
+  assert.ok(result.curves[0].verification.evidence.maxValueDelta > 0);
+});
+
+test("sv_patch_parameter_curves reports rollback_failed with per-curve evidence", async () => {
+  const model = addBatchCurves(createCurveModel());
+  model.failBatchParameter = "tension";
+  model.failBatchMethod = "add";
+  model.failBatchRollbackParameter = "tension";
+  const result = await createService(model).patchCurves(fourCurveRequest());
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rollback_failed");
+  assert.equal(result.effects, "may_remain");
+  assert.equal(result.rollback.attempted, true);
+  assert.equal(result.rollback.verified, false);
+  assert.equal(result.undo.automaticRollback, true);
+  assert.ok(
+    result.rollback.curves.some(
+      (curve) => curve.parameter === "tension" && curve.verified === false && curve.error
+    )
+  );
+});
+
+test("sv_patch_parameter_curves rejects typos before the host can apply its default curve", async () => {
+  const model = addBatchCurves(createCurveModel());
+  model.unknownParameterFallsBack = true;
+  const service = createService(model);
+  for (const parameter of [
+    "pitchDelt",
+    "tensionn",
+    "loudnes",
+    "breathines",
+    "definitelyNotAParameter",
+    "toneShift",
+  ]) {
+    const request = fourCurveRequest({ dryRun: true });
+    request.curves = [
+      {
+        parameter,
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q },
+        points: [{ blick: 0, value: 0 }],
+      },
+    ];
+    const result = await service.patchCurves(request);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "failed");
+    assert.equal(result.effects, "none");
+    assert.equal(result.error.code, "UNKNOWN_PARAMETER");
+    assert.equal(result.error.requestedParameter, parameter);
+    assert.ok(result.error.availableParameters.includes("pitchDelta"));
+    assert.equal(result.curves[0].requestedParameter, parameter);
+    assert.equal(result.curves[0].resolvedParameter, null);
+  }
+  assert.equal(model.parameterLookupCount, 0);
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_parameter_curves validates dynamic vocal modes and reports aliases", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const service = createService(model);
+  const valid = fourCurveRequest({ dryRun: true, responseMode: "compact" });
+  valid.curves = [
+    {
+      parameter: "VOCALMODE_POWERFUL",
+      mode: "replace",
+      range: { fromBlick: 0, toBlick: Q },
+      points: [{ blick: 0, value: 75 }],
+    },
+  ];
+  const validResult = await service.patchCurves(valid);
+  assert.equal(validResult.ok, true);
+  assert.equal(validResult.curves[0].requestedParameter, "VOCALMODE_POWERFUL");
+  assert.equal(validResult.curves[0].resolvedParameter, "vocalMode_Powerful");
+
+  const invalid = fourCurveRequest({ dryRun: true });
+  invalid.curves = [
+    {
+      parameter: "vocalMode_NoSuchMode",
+      mode: "replace",
+      range: { fromBlick: 0, toBlick: Q },
+      points: [{ blick: 0, value: 75 }],
+    },
+  ];
+  const invalidResult = await service.patchCurves(invalid);
+  assert.equal(invalidResult.ok, false);
+  assert.equal(invalidResult.error.code, "UNKNOWN_PARAMETER");
+  assert.ok(invalidResult.error.availableParameters.includes("vocalMode_Powerful"));
+});
+
+test("sv_patch_parameter_curves rejects a host fallback that disagrees with the whitelist", async () => {
+  const model = addBatchCurves(createCurveModel());
+  model.forceParameterFallback = "tension";
+  const request = fourCurveRequest({ dryRun: true });
+  request.curves = [request.curves[1]];
+  const result = await createService(model).patchCurves(request);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.effects, "none");
+  assert.equal(result.error.code, "PARAMETER_RESOLUTION_MISMATCH");
+  assert.equal(result.error.requestedParameter, "tension");
+  assert.equal(result.error.observedTypeName, "pitchDelta");
+  assert.equal(result.error.observedDefinitionTypeName, "pitchDelta");
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_parameter_curves wraps input validation failures in the batch envelope", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const request = fourCurveRequest();
+  request.curves[0].points = [{ blick: 0, value: Number.NaN }];
+  const result = await createService(model).patchCurves(request);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "failed");
+  assert.equal(result.effects, "none");
+  assert.equal(result.error.code, "INVALID_ARGUMENTS");
+  assert.equal(result.error.phase, "validate");
+  assert.equal(result.undoRecords, 0);
+  assert.equal(result.target.expectedGroupUuid, "curve-group");
+  assert.equal(result.timings.dispatcherQueueMs, null);
+  assert.ok(Number.isFinite(result.timings.validationMs));
+  assert.equal(result.timings.coordinatorQueueMs, null);
+  assert.ok(Number.isFinite(result.timings.serviceTotalMs));
+});
+
+test("sv_patch_parameter_curves measures ExecutionCoordinator wait separately", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const coordinator = new ExecutionCoordinator();
+  let clock = 0;
+  let releaseFirst;
+  let reportFirstEntered;
+  const firstEntered = new Promise((resolve) => {
+    reportFirstEntered = resolve;
+  });
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const originalCall = model.host.call;
+  let shouldBlock = true;
+  model.host.call = async (request) => {
+    if (shouldBlock && request.method === "getNumTracks") {
+      shouldBlock = false;
+      reportFirstEntered();
+      await firstGate;
+    }
+    return originalCall(request);
+  };
+  const service = new ParameterCurveService(
+    {
+      withExclusive: (task) => coordinator.runExclusive(() => task(model.host)),
+    },
+    { now: () => clock }
+  );
+  const first = service.patchCurves(fourCurveRequest({ dryRun: true }));
+  await firstEntered;
+  clock = 100;
+  const second = service.patchCurves(fourCurveRequest({ dryRun: true }));
+  await Promise.resolve();
+  clock = 1000;
+  releaseFirst();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(firstResult.ok, true);
+  assert.equal(secondResult.ok, true);
+  assert.equal(secondResult.timings.dispatcherQueueMs, null);
+  assert.equal(secondResult.timings.validationMs, 0);
+  assert.equal(secondResult.timings.coordinatorQueueMs, 900);
+  assert.equal(secondResult.timings.operationMs, 0);
+  assert.equal(secondResult.timings.serviceTotalMs, 900);
+});
+
+test("sv_patch_parameter_curves verbose includes point evidence and rejects duplicates", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const verbose = await createService(model).patchCurves(
+    fourCurveRequest({ dryRun: true, responseMode: "verbose" })
+  );
+  assert.deepEqual(verbose.curves[0].before.points[0], {
+    localBlick: 0,
+    absoluteBlick: 4 * Q,
+    value: 0,
+  });
+  assert.deepEqual(verbose.curves[0].planned.points[0], {
+    localBlick: 0,
+    absoluteBlick: 4 * Q,
+    value: 2,
+  });
+
+  const duplicate = fourCurveRequest();
+  duplicate.curves[1].parameter = "LOUDNESS";
+  const duplicateResult = await createService(model).patchCurves(duplicate);
+  assert.equal(duplicateResult.ok, false);
+  assert.equal(duplicateResult.error.code, "DUPLICATE_PARAMETER");
+  assert.equal(duplicateResult.effects, "none");
+  assert.equal(duplicateResult.undoRecords, 0);
+  assert.equal(duplicateResult.target.groupUuid, "curve-group");
+  assert.equal(duplicateResult.curves[0].status, "not_attempted");
+  assert.equal(duplicateResult.curves[0].resolvedParameter, "loudness");
+  assert.equal(duplicateResult.curves[1].status, "failed");
+  assert.equal(duplicateResult.curves[1].resolvedParameter, "loudness");
+  assert.equal(duplicateResult.error.resolvedParameter, "loudness");
+  assert.ok(Number.isFinite(duplicateResult.timings.serviceTotalMs));
 });

@@ -24,7 +24,10 @@ import { LyricsService } from "./lyrics.js";
 import { RangeSnapshotService } from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
 import { NoteStructureService } from "./note-structure.js";
-import { ParameterCurveService } from "./parameter-curve.js";
+import {
+  BUILTIN_AUTOMATION_PARAMETERS,
+  ParameterCurveService,
+} from "./parameter-curve.js";
 import { ProcessingService } from "./processing.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
@@ -504,7 +507,7 @@ const TOOLS = [
   {
     name: "sv_get_parameter_curve",
     description:
-      "Read one Automation parameter curve (pitchDelta, loudness, tension, breathiness, voicing, gender, vibratoEnv, toneShift, vocalMode_<Name>, ...) of a note group within a required blick range. The host curve is read once with getAllPoints and filtered locally, so empty/sparse curve cost does not grow with the numeric blick span; only an oversized 64 KiB result falls back to density-based range bisection. data.nextFromBlick continues a truncated read. Automation lives in group-local blicks; every point is reported with both localBlick and absoluteBlick (absolute = local + group timeOffset), together with the official definition (range, default) and interpolation method (read-only; there is no interpolation setter in the official API).",
+      "Read one Automation parameter curve of a note group within a required blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> is accepted only when <Name> exists in the target group's observable vocalModeParams. Names are case-insensitive and the response reports requestedParameter and resolvedParameter. Unknown names are rejected before NoteGroup.getParameter because SynthV may silently return a default curve. The host curve is read once with getAllPoints and filtered locally; only an oversized 64 KiB result falls back to density-based range bisection. Automation lives in group-local blicks; every point reports localBlick and absoluteBlick together with the official definition and interpolation method.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -518,7 +521,13 @@ const TOOLS = [
           },
           required: ["trackIndex", "groupIndex"],
         },
-        parameter: { type: "string", minLength: 1 },
+        parameter: {
+          type: "string",
+          minLength: 1,
+          maxLength: 200,
+          description:
+            "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
+        },
         range: {
           type: "object",
           additionalProperties: false,
@@ -539,7 +548,7 @@ const TOOLS = [
   {
     name: "sv_patch_parameter_curve",
     description:
-      "Edit one Automation parameter curve inside a blick range. replace removes the range and writes explicit points; add/scale shift or scale the existing CONTROL POINTS in the range (not a continuous resampled curve), clamped to the official definition range. Optional simplify after writing. Writes sit inside undo boundaries with journaled previous points; atomic:true restores them on failure (verified compensation, not ACID). Without simplify, point positions and counts are exact while values allow the documented float32 read-back tolerance returned in verification.evidence.valueTolerance; failures include firstMismatch requested/observed/delta evidence. With simplify it samples the host-interpolated values and requires every retained control point to belong to the requested point set, which works for Linear, Cosine, and Cubic interpolation.",
+      "Edit one validated Automation parameter curve inside a blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> must exist in the target group's observable vocalModeParams. Unknown names are rejected before NoteGroup.getParameter, and the returned Automation typeName is checked again to prevent host fallback. replace removes the range and writes explicit points; add/scale transform existing CONTROL POINTS. Writes use Undo boundaries, read-back verification, and optional verified compensation (not ACID).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -550,10 +559,17 @@ const TOOLS = [
           properties: {
             trackIndex: { type: "integer", minimum: 0 },
             groupIndex: { type: "integer", minimum: 0 },
+            expectedGroupUuid: { type: "string", minLength: 1 },
           },
           required: ["trackIndex", "groupIndex"],
         },
-        parameter: { type: "string", minLength: 1 },
+        parameter: {
+          type: "string",
+          minLength: 1,
+          maxLength: 200,
+          description:
+            "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
+        },
         mode: { enum: ["replace", "add", "scale"] },
         range: {
           type: "object",
@@ -585,6 +601,84 @@ const TOOLS = [
         atomic: { type: "boolean", default: true },
       },
       required: ["target", "parameter", "mode", "range"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_patch_parameter_curves",
+    description:
+      "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            trackIndex: { type: "integer", minimum: 0 },
+            groupIndex: { type: "integer", minimum: 0 },
+            expectedGroupUuid: { type: "string", minLength: 1 },
+          },
+          required: ["trackIndex", "groupIndex"],
+        },
+        curves: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              parameter: {
+                type: "string",
+                minLength: 1,
+                maxLength: 200,
+                description:
+                  "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
+              },
+              mode: { enum: ["replace", "add", "scale"] },
+              range: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  fromBlick: { type: "integer" },
+                  toBlick: { type: "integer" },
+                  coordinate: { enum: ["local", "absolute"], default: "local" },
+                },
+                required: ["fromBlick", "toBlick"],
+              },
+              points: {
+                type: "array",
+                maxItems: 2000,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    blick: { type: "integer" },
+                    value: { type: "number" },
+                  },
+                  required: ["blick", "value"],
+                },
+                description: "replace mode only; blick uses range.coordinate.",
+              },
+              amount: { type: "number", description: "add/scale mode only." },
+              simplifyThreshold: { type: "number", minimum: 0 },
+            },
+            required: ["parameter", "mode", "range"],
+          },
+        },
+        dryRun: { type: "boolean", default: false },
+        atomic: { type: "boolean", default: true },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        undoLabel: {
+          type: "string",
+          maxLength: 200,
+          description: "Audit metadata only; the SynthV Undo API cannot display custom labels.",
+        },
+      },
+      required: ["target", "curves"],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -758,7 +852,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.2.5" },
+  { name: "sv-copilot", version: "0.3.0" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -864,6 +958,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_patch_parameter_curve":
         result = await parameterCurveService.patchCurve(args);
         break;
+      case "sv_patch_parameter_curves":
+        result = await parameterCurveService.patchCurves(args);
+        break;
       case "sv_restructure_notes":
         result = await noteStructureService.restructureNotes(args);
         break;
@@ -962,7 +1059,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.2.5",
+    interfaceVersion: "0.3.0",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -986,6 +1083,7 @@ function capabilities() {
         "sv_restructure_notes",
         "sv_get_parameter_curve",
         "sv_patch_parameter_curve",
+        "sv_patch_parameter_curves",
       ],
       audition: [
         "sv_start_audition",
@@ -1005,6 +1103,11 @@ function capabilities() {
         installedCatalogObservable: false,
         activeIdentityObservable: false,
         assignmentObservable: false,
+      },
+      automationParameters: {
+        builtIn: BUILTIN_AUTOMATION_PARAMETERS,
+        caseSensitive: false,
+        vocalModes: "dynamic_from_target_voice",
       },
     },
   };
