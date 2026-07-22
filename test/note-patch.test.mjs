@@ -104,7 +104,8 @@ function callNote(model, note, method, args) {
     getDetune: note.detune,
   };
   if (Object.hasOwn(getters, method)) return getters[method];
-  if (method === "getAttributes") return { ...note.attributes };
+  // 模拟真实 PIPE 解码：返回 null-prototype 的深层对象。
+  if (method === "getAttributes") return toNullProto(note.attributes);
   if (model.ignoreSetters.has(method)) return null;
   if (method === "setLyrics") note.lyrics = args[0];
   else if (method === "setPhonemes") note.phonemes = args[0];
@@ -113,9 +114,21 @@ function callNote(model, note, method, args) {
   else if (method === "setOnset") note.onset = args[0];
   else if (method === "setDuration") note.duration = args[0];
   else if (method === "setDetune") note.detune = args[0];
-  else if (method === "setAttributes") Object.assign(note.attributes, args[0]);
+  else if (method === "setAttributes") {
+    for (const [key, item] of Object.entries(args[0])) note.attributes[key] = item;
+  }
   else throw new Error(`unsupported note method ${method}`);
   return null;
+}
+
+function toNullProto(value) {
+  if (Array.isArray(value)) return value.map(toNullProto);
+  if (value !== null && typeof value === "object") {
+    const out = Object.create(null);
+    for (const [key, item] of Object.entries(value)) out[key] = toNullProto(item);
+    return out;
+  }
+  return value;
 }
 
 function noteState(index, onset, duration, pitch, lyrics) {
@@ -435,4 +448,53 @@ test("sv_patch_notes invalidates the context after a successful write", async ()
   });
   assert.equal(result.ok, true);
   assert.equal(snapshots.store.get(snapshot.contextId), null);
+});
+
+test("sv_patch_notes verifies null-prototype nested attributes from the pipe decoder", async () => {
+  const { model, service, snapshot } = await createFixture();
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [
+      {
+        noteId: nid(snapshot, 0),
+        set: { attributes: { tF0Offset: 0.25, expr: { depth: 1, kind: "soft" } } },
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.verification.passed, true);
+  assert.deepEqual(model.notes[0].attributes.expr, { depth: 1, kind: "soft" });
+});
+
+test("sv_patch_notes atomic mode rolls back when the read-back getter throws", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 注入发生在快照之后：resolve 指纹 3 次 + 写前 current 读 1 次，第 5 次才是读回验证。
+  injectFailure(model, "getLyrics", { skip: 4, code: "UNKNOWN_HANDLE", message: "getter exploded" });
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.error.code, "UNKNOWN_HANDLE");
+  assert.equal(result.rollback.attempted, true);
+  assert.equal(result.rollback.verified, true);
+  assert.equal(model.notes[0].lyrics, "a");
+  // Undo 边界已开必须已关。
+  assert.equal(model.undoCount, 2);
+});
+
+test("sv_patch_notes accepts fractional detuneCents", async () => {
+  const { model, service, snapshot } = await createFixture();
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [{ noteId: nid(snapshot, 0), set: { detuneCents: -7.5 } }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(model.notes[0].detune, -7.5);
 });

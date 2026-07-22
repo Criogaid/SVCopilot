@@ -4,6 +4,8 @@ import { createHostScope } from "./snapshot.js";
 
 // MCP 无法听到声音：audition 只驱动宿主播放，感知判断永远属于人。
 // Node 崩溃可能遗留 solo/mute，因此 start 返回可跨重启使用的 recovery payload。
+const PLAYHEAD_EPSILON_SECONDS = 1e-6;
+
 export class AuditionService {
   constructor(session, { now = () => Date.now() } = {}) {
     this.session = session;
@@ -14,6 +16,17 @@ export class AuditionService {
   async start(request) {
     const input = normalizeStartRequest(request);
     return this.session.withExclusive(async (host) => {
+      // 同一时间只允许一个 audition：停止其中一个会覆盖另一个的播放/mixer 状态。
+      for (const [existingId, existing] of this.auditions) {
+        if (existing.epoch !== host.epoch()) {
+          this.auditions.delete(existingId);
+          continue;
+        }
+        throw codedError(
+          "AUDITION_ACTIVE",
+          `audition ${existingId} is still active; stop it before starting another`
+        );
+      }
       const capture = createHostScope(host);
       try {
         const roots = await capture.roots();
@@ -30,28 +43,54 @@ export class AuditionService {
           }
         }
 
+        // 先完成全部读取和换算，再触碰任何宿主状态；mutation 阶段失败时做补偿。
         const savedPlayheadSeconds = await capture.call(roots.playback, "getPlayhead");
         const savedStatus = await capture.call(roots.playback, "getStatus");
-        const mixerChanges = [];
+        const fromSeconds = await capture.call(timeAxis, "getSecondsFromBlick", [input.fromBlick]);
+        const toSeconds = await capture.call(timeAxis, "getSecondsFromBlick", [input.toBlick]);
+        const mixerTargets = [];
         for (const trackIndex of input.soloTrackIndices) {
           const track = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
             inferredType: "Track",
           });
           const mixer = await capture.call(track, "getMixer", [], { inferredType: "TrackMixer" });
-          const previousSolo = await capture.call(mixer, "isSolo");
-          if (previousSolo !== true) {
-            await capture.call(mixer, "setSolo", [true]);
-          }
-          mixerChanges.push({ trackIndex, field: "solo", previousValue: previousSolo, setValue: true });
+          mixerTargets.push({
+            trackIndex,
+            mixer,
+            previousSolo: await capture.call(mixer, "isSolo"),
+          });
         }
 
-        const fromSeconds = await capture.call(timeAxis, "getSecondsFromBlick", [input.fromBlick]);
-        const toSeconds = await capture.call(timeAxis, "getSecondsFromBlick", [input.toBlick]);
-        await capture.call(roots.playback, "seek", [fromSeconds]);
-        if (input.loop) {
-          await capture.call(roots.playback, "loop", [fromSeconds, toSeconds]);
-        } else {
-          await capture.call(roots.playback, "play", []);
+        const mixerChanges = [];
+        try {
+          for (const target of mixerTargets) {
+            if (target.previousSolo !== true) {
+              await capture.call(target.mixer, "setSolo", [true]);
+            }
+            mixerChanges.push({
+              trackIndex: target.trackIndex,
+              field: "solo",
+              previousValue: target.previousSolo,
+              setValue: true,
+            });
+          }
+          await capture.call(roots.playback, "seek", [fromSeconds]);
+          if (input.loop) {
+            await capture.call(roots.playback, "loop", [fromSeconds, toSeconds]);
+          } else {
+            await capture.call(roots.playback, "play", []);
+          }
+        } catch (error) {
+          // 启动中途失败：尽力恢复已改的 solo 和 playhead，不留下部分 audition 状态。
+          const compensation = await this._compensateStartFailure(
+            capture,
+            roots,
+            mixerTargets,
+            mixerChanges,
+            savedPlayheadSeconds,
+            error
+          );
+          return compensation;
         }
         const status = await capture.call(roots.playback, "getStatus");
 
@@ -91,6 +130,70 @@ export class AuditionService {
     });
   }
 
+  async _compensateStartFailure(
+    capture,
+    roots,
+    mixerTargets,
+    mixerChanges,
+    savedPlayheadSeconds,
+    cause
+  ) {
+    const unknown = isUnknownOutcomeError(cause);
+    const restoration = [];
+    let compensationVerified = !unknown;
+    if (!unknown) {
+      for (const change of mixerChanges) {
+        const target = mixerTargets.find((item) => item.trackIndex === change.trackIndex);
+        try {
+          if (change.previousValue !== change.setValue) {
+            await capture.call(target.mixer, "setSolo", [change.previousValue]);
+          }
+          const observed = await capture.call(target.mixer, "isSolo");
+          const restored = observed === change.previousValue;
+          if (!restored) compensationVerified = false;
+          restoration.push({ trackIndex: change.trackIndex, field: "solo", restored, observed });
+        } catch (error) {
+          compensationVerified = false;
+          restoration.push({
+            trackIndex: change.trackIndex,
+            field: "solo",
+            restored: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      try {
+        await capture.call(roots.playback, "stop", []);
+        await capture.call(roots.playback, "seek", [savedPlayheadSeconds]);
+      } catch (error) {
+        compensationVerified = false;
+        restoration.push({
+          field: "playhead",
+          restored: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return {
+      ok: false,
+      status: unknown ? "outcome_unknown" : compensationVerified ? "rolled_back" : "rollback_failed",
+      effects: unknown ? "unknown" : compensationVerified ? "reverted" : "may_remain",
+      error: {
+        code: typeof cause?.code === "string" ? cause.code : "HOST_CALL_FAILED",
+        message: cause instanceof Error ? cause.message : String(cause),
+        outcome: unknown ? "unknown" : compensationVerified ? "unchanged" : "partial",
+        retryable: false,
+      },
+      data: {
+        rollback: { attempted: !unknown, verified: unknown ? null : compensationVerified },
+        restoration,
+        // 即使补偿失败也提供 payload，调用方可用 sv_restore_audition 重试。
+        recovery: { version: 1, savedPlayheadSeconds, savedStatus: null, mixerChanges },
+      },
+      warnings: [],
+    };
+  }
+
   async get(request) {
     const auditionId = requireAuditionId(request);
     const audition = this.auditions.get(auditionId);
@@ -126,7 +229,8 @@ export class AuditionService {
     const audition = this.auditions.get(auditionId);
     if (!audition) throw codedError("UNKNOWN_AUDITION", `audition not found: ${auditionId}`);
     const result = await this._restore(audition.recovery);
-    if (result.ok) this.auditions.delete(auditionId);
+    // 恢复未完全成功时保留 audition 记录，调用方可凭 recovery 重试。
+    if (result.status !== "restore_failed") this.auditions.delete(auditionId);
     return { ...result, data: { ...result.data, auditionId } };
   }
 
@@ -160,24 +264,25 @@ export class AuditionService {
           const mixer = await capture.call(track, "getMixer", [], { inferredType: "TrackMixer" });
           const observedBeforeRestore = await capture.call(mixer, "isSolo");
           // 只恢复仍等于 audition 设置值的字段，避免覆盖用户同时做出的修改。
-          let restored = false;
+          let attempted = false;
           let reason = null;
           if (observedBeforeRestore === change.setValue) {
             if (change.previousValue !== change.setValue) {
               await capture.call(mixer, "setSolo", [change.previousValue]);
             }
-            restored = true;
+            attempted = true;
           } else {
             reason = "user_modified";
           }
           const observedAfterRestore = await capture.call(mixer, "isSolo");
+          // restored 由读回结果决定，而不是"写过就算成功"。
           restoration.push({
             trackIndex: change.trackIndex,
             field: change.field,
             auditionValue: change.setValue,
             previousValue: change.previousValue,
             observedBeforeRestore,
-            restored,
+            restored: attempted && observedAfterRestore === change.previousValue,
             observedAfterRestore,
             ...(reason ? { reason } : {}),
           });
@@ -185,27 +290,44 @@ export class AuditionService {
         await capture.call(roots.playback, "seek", [recovery.savedPlayheadSeconds]);
         const playbackStatus = await capture.call(roots.playback, "getStatus");
         const playheadSeconds = await capture.call(roots.playback, "getPlayhead");
-        const allRestored = restoration.every(
-          (entry) => entry.restored || entry.observedAfterRestore === entry.previousValue
+        const playheadRestored =
+          Math.abs(playheadSeconds - recovery.savedPlayheadSeconds) <= PLAYHEAD_EPSILON_SECONDS;
+        const skippedUserChanges = restoration.filter((entry) => entry.reason === "user_modified");
+        const failedRestores = restoration.filter(
+          (entry) => !entry.restored && entry.reason !== "user_modified"
         );
+        const allRestored = failedRestores.length === 0 && playheadRestored;
+        const warnings = [];
+        if (skippedUserChanges.length > 0) {
+          warnings.push({
+            code: "RESTORE_SKIPPED_USER_CHANGES",
+            message:
+              "Some mixer fields were changed after the audition started and were left untouched.",
+          });
+        }
+        if (!allRestored) {
+          warnings.push({
+            code: "RESTORE_INCOMPLETE",
+            message: playheadRestored
+              ? "One or more mixer fields did not read back as their pre-audition values."
+              : "The playhead did not read back at the saved position.",
+          });
+        }
         return {
           ok: true,
-          status: allRestored ? "succeeded" : "partially_restored",
-          effects: "verified",
+          status: allRestored
+            ? skippedUserChanges.length > 0
+              ? "partially_restored"
+              : "succeeded"
+            : "restore_failed",
+          effects: allRestored ? "verified" : "may_remain",
           data: {
             playbackStatus,
             playheadSeconds,
+            playheadRestored,
             restoration,
           },
-          warnings: allRestored
-            ? []
-            : [
-                {
-                  code: "RESTORE_SKIPPED_USER_CHANGES",
-                  message:
-                    "Some mixer fields were changed after the audition started and were left untouched.",
-                },
-              ],
+          warnings,
         };
       } finally {
         await capture.releaseAll();
@@ -256,6 +378,13 @@ function requireAuditionId(request) {
     throw codedError("INVALID_ARGUMENTS", "auditionId is required");
   }
   return request.auditionId;
+}
+
+function isUnknownOutcomeError(error) {
+  if (error?.code === "HOST_TIMEOUT" || error?.code === "HOST_DETACHED") return true;
+  return /Timeout waiting|detached|disconnected|EOF/i.test(
+    error instanceof Error ? error.message : String(error)
+  );
 }
 
 function codedError(code, message) {

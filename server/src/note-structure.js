@@ -67,33 +67,42 @@ export class NoteStructureService {
         boundaryCalls += 1;
 
         let applyError = null;
+        const checks = [];
         try {
           for (const operation of plan.operations) {
             writeAttempted = true;
             // inverse 条目在每个宿主 mutation 生效后立即入账，op 中途失败也有完整补偿。
-            const summary = await applyOperation(scope, resolved, operation, inverses);
+            // checks 收集每个 op 的字段级后置条件，统一在写后读回验证。
+            const summary = await applyOperation(scope, resolved, operation, inverses, checks);
             appliedOperations.push(summary);
           }
         } catch (error) {
           applyError = error;
         }
 
+        // 读回 getter 抛错也必须走补偿路径，而不是漏到外层 catch。
+        let verifyError = null;
         let verification = null;
         if (!applyError) {
-          verification = await verifyStructure(scope, resolved, plan, initialNoteCount);
+          try {
+            verification = await verifyStructure(scope, resolved, plan, initialNoteCount, checks);
+          } catch (error) {
+            verifyError = error;
+          }
         }
 
-        if (applyError || verification?.passed === false) {
-          const failure = applyError
+        if (applyError || verifyError || verification?.passed === false) {
+          const causeError = applyError ?? verifyError;
+          const failure = causeError
             ? {
-                code: typeof applyError?.code === "string" ? applyError.code : "HOST_CALL_FAILED",
-                message: applyError instanceof Error ? applyError.message : String(applyError),
+                code: typeof causeError?.code === "string" ? causeError.code : "HOST_CALL_FAILED",
+                message: causeError instanceof Error ? causeError.message : String(causeError),
               }
             : {
                 code: "POSTCONDITION_FAILED",
                 message: "The group did not match the planned structure after write-back verification.",
               };
-          if (applyError && isUnknownOutcomeError(applyError)) {
+          if (causeError && isUnknownOutcomeError(causeError)) {
             await this._closeBoundary(scope, resolved, warnings, () => (boundaryCalls += 1));
             return {
               ...failedResult(failure.code, failure.message, "unknown"),
@@ -191,6 +200,10 @@ export class NoteStructureService {
       } catch (error) {
         const unknown = isUnknownOutcomeError(error);
         const effects = writeAttempted ? (unknown ? "unknown" : "may_remain") : "none";
+        // 已开启但未关闭的 Undo 边界尽力关闭，失败只记警告。
+        if (boundaryCalls === 1 && !unknown && resolved) {
+          await this._closeBoundary(resolved.scope, resolved, warnings, () => (boundaryCalls += 1));
+        }
         return {
           ...failedResult(
             typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
@@ -314,7 +327,7 @@ function buildPlan(input, resolved, initialNoteCount) {
   return { operations, summaries, mismatches, noteCountDelta };
 }
 
-async function applyOperation(scope, resolved, operation, inverses) {
+async function applyOperation(scope, resolved, operation, inverses, checks) {
   if (operation.op === "insert") {
     // 未入组的 Note 是 detached 对象；配置阶段失败不需要补偿。
     const note = await scope.call(undefined, "create", ["Note"], { inferredType: "Note" });
@@ -334,6 +347,14 @@ async function applyOperation(scope, resolved, operation, inverses) {
     }
     const hostIndex = await scope.call(resolved.target, "addNote", [note]);
     inverses.push({ op: "removeByHandle", note });
+    checks.push(
+      { op: "insert", note, getter: "getOnset", expected: operation.note.onsetBlick },
+      { op: "insert", note, getter: "getDuration", expected: operation.note.durationBlick },
+      { op: "insert", note, getter: "getPitch", expected: operation.note.pitch }
+    );
+    if (operation.note.lyrics !== undefined) {
+      checks.push({ op: "insert", note, getter: "getLyrics", expected: operation.note.lyrics });
+    }
     return { op: "insert", hostIndex, indexInGroup: hostIndex - 1 };
   }
   if (operation.op === "delete") {
@@ -355,6 +376,13 @@ async function applyOperation(scope, resolved, operation, inverses) {
     inverses.push({ op: "removeByHandle", note: second });
     await scope.call(original, "setDuration", [operation.atBlick - onset]);
     inverses.push({ op: "setDuration", note: original, value: operation.fingerprint.durationBlick });
+    checks.push(
+      { op: "split", note: original, getter: "getDuration", expected: operation.atBlick - onset },
+      { op: "split", note: second, getter: "getOnset", expected: operation.atBlick },
+      { op: "split", note: second, getter: "getDuration", expected: end - operation.atBlick },
+      { op: "split", note: second, getter: "getLyrics", expected: operation.secondLyrics },
+      { op: "split", note: second, getter: "getPitch", expected: operation.fingerprint.pitch }
+    );
     return { op: "split", noteId: operation.noteId, secondHostIndex: hostIndex };
   }
   // merge
@@ -378,23 +406,46 @@ async function applyOperation(scope, resolved, operation, inverses) {
     await scope.call(first.note, "setLyrics", [mergedLyrics]);
     inverses.push({ op: "setLyrics", note: first.note, value: first.fingerprint.lyrics });
   }
+  checks.push(
+    { op: "merge", note: first.note, getter: "getDuration", expected: span },
+    { op: "merge", note: first.note, getter: "getLyrics", expected: mergedLyrics }
+  );
   return { op: "merge", noteIds: operation.noteIds, mergedDurationBlick: span };
 }
 
-async function verifyStructure(scope, resolved, plan, initialNoteCount) {
+async function verifyStructure(scope, resolved, plan, initialNoteCount, checks) {
   const observedNoteCount = await scope.call(resolved.target, "getNumNotes");
   const expectedNoteCount = initialNoteCount + plan.noteCountDelta;
-  const passed = observedNoteCount === expectedNoteCount;
+  const fieldMismatches = [];
+  for (const check of checks) {
+    const observed = await scope.call(check.note, check.getter, []);
+    if (observed !== check.expected) {
+      fieldMismatches.push({
+        op: check.op,
+        getter: check.getter,
+        expected: check.expected,
+        observed,
+      });
+    }
+  }
+  const passed = observedNoteCount === expectedNoteCount && fieldMismatches.length === 0;
   return {
     attempted: true,
     passed,
-    evidence: { observedNoteCount, expectedNoteCount },
+    evidence: {
+      observedNoteCount,
+      expectedNoteCount,
+      fieldChecks: checks.length,
+      ...(fieldMismatches.length > 0 ? { fieldMismatches } : {}),
+    },
   };
 }
 
 async function rollbackStructure(scope, resolved, inverses, initialNoteCount) {
-  try {
-    for (const inverse of [...inverses].reverse()) {
+  const errors = [];
+  // 单个补偿写失败不终止其余补偿；宿主超时/断开才放弃。
+  for (const inverse of [...inverses].reverse()) {
+    try {
       if (inverse.op === "removeByHandle") {
         const liveIndex = await scope.call(inverse.note, "getIndexInParent");
         await scope.call(resolved.target, "removeNote", [liveIndex]);
@@ -405,19 +456,49 @@ async function rollbackStructure(scope, resolved, inverses, initialNoteCount) {
       } else if (inverse.op === "setLyrics") {
         await scope.call(inverse.note, "setLyrics", [inverse.value]);
       }
+    } catch (error) {
+      if (isUnknownOutcomeError(error)) {
+        return { verified: false, outcomeUnknown: true, error: rollbackError(error) };
+      }
+      errors.push({ op: inverse.op, ...rollbackError(error) });
     }
+  }
+  try {
     const observedNoteCount = await scope.call(resolved.target, "getNumNotes");
-    return { verified: observedNoteCount === initialNoteCount, outcomeUnknown: false };
+    // 逐项确认恢复效果：setDuration/setLyrics 读回旧值，addBackup 确认已回到组内。
+    let fieldsVerified = true;
+    for (const inverse of inverses) {
+      if (inverse.op === "setDuration") {
+        if ((await scope.call(inverse.note, "getDuration", [])) !== inverse.value) fieldsVerified = false;
+      } else if (inverse.op === "setLyrics") {
+        if ((await scope.call(inverse.note, "getLyrics", [])) !== inverse.value) fieldsVerified = false;
+      } else if (inverse.op === "addBackup") {
+        const index = await scope.call(inverse.backup, "getIndexInParent", []);
+        if (!Number.isSafeInteger(index) || index < 1) fieldsVerified = false;
+      }
+    }
+    const verified =
+      errors.length === 0 && observedNoteCount === initialNoteCount && fieldsVerified;
+    return {
+      verified,
+      outcomeUnknown: false,
+      ...(errors.length > 0 ? { error: errors[0], errors } : {}),
+    };
   } catch (error) {
     return {
       verified: false,
       outcomeUnknown: isUnknownOutcomeError(error),
-      error: {
-        code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
-        message: error instanceof Error ? error.message : String(error),
-      },
+      error: rollbackError(error),
+      ...(errors.length > 0 ? { errors } : {}),
     };
   }
+}
+
+function rollbackError(error) {
+  return {
+    code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function parseNoteId(noteId, contextId, noteCount) {

@@ -26,6 +26,7 @@ function createStructureModel() {
     groupNotes: [], // handleId[]，按 onset 排序
     undoCount: 0,
     failures: [],
+    ignoreSetters: new Set(),
   };
   const makeNote = (state) => {
     const noteHandle = handle("Note");
@@ -132,6 +133,7 @@ function createStructureModel() {
         };
         if (Object.hasOwn(getters, method)) return getters[method];
         if (method === "clone") return makeNote(state);
+        if (model.ignoreSetters.has(method)) return null;
         if (method === "setLyrics") state.lyrics = args[0];
         else if (method === "setPhonemes") state.phonemes = args[0];
         else if (method === "setLanguageOverride") state.language = args[0];
@@ -300,4 +302,40 @@ test("sv_restructure_notes invalidates the context after a successful write", as
   });
   assert.equal(result.ok, true);
   assert.equal(snapshots.store.get(snapshot.contextId), null);
+});
+
+test("sv_restructure_notes detects silently ignored setters via field read-back", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 宿主静默忽略 setDuration：merge 后 first 时长不变，仅数量验证会漏掉。
+  model.ignoreSetters.add("setDuration");
+  const result = await service.restructureNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    operations: [{ op: "merge", noteIds: [nid(snapshot, 0), nid(snapshot, 1)] }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "POSTCONDITION_FAILED");
+  assert.ok(result.verification.evidence.fieldMismatches.some((entry) => entry.getter === "getDuration"));
+  // setter 从未生效，补偿读回等于旧值 → rolled_back。
+  assert.equal(result.status, "rolled_back");
+  assert.equal(model.groupNotes.length, 3);
+  assert.deepEqual(model.groupLyrics(), ["a", "i", "u"]);
+});
+
+test("sv_restructure_notes rolls back when the verification getter throws", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 注入点：快照后 getNumNotes 依次是 initialNoteCount(1) → verify(2)。
+  model.failures.push({ method: "getNumNotes", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
+  const result = await service.restructureNotes({
+    contextId: snapshot.contextId,
+    operations: [{ op: "delete", noteId: nid(snapshot, 0) }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.error.code, "UNKNOWN_HANDLE");
+  assert.equal(result.rollback.verified, true);
+  assert.equal(model.groupNotes.length, 3);
+  assert.equal(model.undoCount, 2);
 });

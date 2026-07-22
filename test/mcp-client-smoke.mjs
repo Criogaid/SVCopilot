@@ -395,7 +395,11 @@ try {
   const curve = parseToolResult(
     await client.callTool({
       name: "sv_get_parameter_curve",
-      arguments: { target: { trackIndex: 0, groupIndex: 0 }, parameter: "loudness" },
+      arguments: {
+        target: { trackIndex: 0, groupIndex: 0 },
+        parameter: "loudness",
+        range: { fromBlick: 0, toBlick: 2 * 705600 },
+      },
     })
   );
   assert.equal(curve.ok, true);

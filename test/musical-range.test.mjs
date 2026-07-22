@@ -70,11 +70,13 @@ function createRangeModel() {
         if (method === "isSolo") return mixerIndex === 0;
       }
       if (id === h.refs[0].__handle__) {
+        // 官方语义：getOnset = timeOffset + 首音符组内 onset（此处首音符 onset 为 0）。
         if (method === "getOnset") return group0Onset;
         if (method === "getEnd") return group0Onset + 9 * BAR_4_4;
         if (method === "isInstrumental") return false;
         if (method === "isMain") return true;
-        if (method === "getTimeOffset" || method === "getPitchOffset") return 0;
+        if (method === "getTimeOffset") return group0Onset;
+        if (method === "getPitchOffset") return 0;
         if (method === "getTarget") return h.groups[0];
         if (method === "getVoice") return { paramTension: 0.2 };
       }
@@ -88,7 +90,8 @@ function createRangeModel() {
         }
         if (method === "isInstrumental") return false;
         if (method === "isMain") return false;
-        if (method === "getTimeOffset" || method === "getPitchOffset") return 0;
+        if (method === "getTimeOffset") return 40 * BAR_4_4;
+        if (method === "getPitchOffset") return 0;
       }
       if (id === h.refs[2].__handle__) {
         if (method === "getOnset") return 0;

@@ -1,5 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
-
 import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
 
@@ -16,7 +14,7 @@ const FIELD_SPECS = [
     setter: "setLanguageOverride",
     kind: "string",
   },
-  { field: "detuneCents", getter: "getDetune", setter: "setDetune", kind: "integer" },
+  { field: "detuneCents", getter: "getDetune", setter: "setDetune", kind: "finiteNumber" },
   { field: "attributes", getter: "getAttributes", setter: "setAttributes", kind: "attributes" },
 ];
 const FIELD_BY_NAME = new Map(FIELD_SPECS.map((spec) => [spec.field, spec]));
@@ -147,25 +145,33 @@ export class NotePatchService {
           applyError = error;
         }
 
+        // 读回 getter 本身也可能抛错；该错误必须走与 apply 失败相同的补偿路径，
+        // 而不是漏到外层 catch 后既不回滚也不关闭 Undo 边界。
+        let verifyError = null;
         let verificationEvidence = null;
         let verificationPassed = null;
         if (!applyError) {
-          const verified = await this._verifyReadBack(host, targetByPosition, plannedDiff);
-          verificationEvidence = verified.evidence;
-          verificationPassed = verified.passed;
+          try {
+            const verified = await this._verifyReadBack(host, targetByPosition, plannedDiff);
+            verificationEvidence = verified.evidence;
+            verificationPassed = verified.passed;
+          } catch (error) {
+            verifyError = error;
+          }
         }
 
-        if (applyError || verificationPassed === false) {
-          const failure = applyError
+        if (applyError || verifyError || verificationPassed === false) {
+          const causeError = applyError ?? verifyError;
+          const failure = causeError
             ? {
-                code: applyError?.code ?? "HOST_CALL_FAILED",
-                message: applyError instanceof Error ? applyError.message : String(applyError),
+                code: causeError?.code ?? "HOST_CALL_FAILED",
+                message: causeError instanceof Error ? causeError.message : String(causeError),
               }
             : {
                 code: "POSTCONDITION_FAILED",
                 message: "One or more values did not match after write-back verification.",
               };
-          if (applyError && isUnknownOutcomeError(applyError)) {
+          if (causeError && isUnknownOutcomeError(causeError)) {
             // 宿主超时/断开后连已写入多少都不可知；此时补偿写入只会更不可信。
             await this._closeUndoBoundary(host, resolved, warnings, () => (boundaryCalls += 1));
             return {
@@ -232,7 +238,12 @@ export class NotePatchService {
         await this._closeUndoBoundary(host, resolved, warnings, () => (boundaryCalls += 1));
 
         let processing = null;
-        const touchesProcessing = plannedDiff.some((entry) => PROCESSING_FIELDS.has(entry.field));
+        // phonemes 关注文本字段；computedAttributes 还会因 attributes/pitch/detune 变化而重算。
+        const processingFields =
+          input.waitFor === "computedAttributes"
+            ? new Set([...PROCESSING_FIELDS, "attributes", "pitch", "detuneCents"])
+            : PROCESSING_FIELDS;
+        const touchesProcessing = plannedDiff.some((entry) => processingFields.has(entry.field));
         if (input.waitFor !== "none" && touchesProcessing) {
           processing = await waitForProcessing(host, {
             roots: resolved.roots,
@@ -275,6 +286,10 @@ export class NotePatchService {
       } catch (error) {
         const unknown = isUnknownOutcomeError(error);
         const effects = writeAttempted ? (unknown ? "unknown" : "may_remain") : "none";
+        // 已开启但未关闭的 Undo 边界尽力关闭，失败只记警告。
+        if (boundaryCalls === 1 && !unknown && resolved) {
+          await this._closeUndoBoundary(host, resolved, warnings, () => (boundaryCalls += 1));
+        }
         return {
           ...failed(
             typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
@@ -314,37 +329,60 @@ export class NotePatchService {
   }
 
   // 补偿回滚只恢复已确认写出的字段，逆序执行并逐项读回确认。
+  // 单个补偿写失败不终止其余补偿；宿主超时/断开才放弃（继续写只会更不可信）。
   async _rollback(host, targetByPosition, appliedDiff) {
     const evidence = { restored: {} };
-    try {
-      for (const entry of [...appliedDiff].reverse()) {
-        const spec = FIELD_BY_NAME.get(entry.field);
+    const errors = [];
+    for (const entry of [...appliedDiff].reverse()) {
+      const spec = FIELD_BY_NAME.get(entry.field);
+      try {
         await host.call({
           handle: targetByPosition.get(entry.position).note,
           method: spec.setter,
           args: [entry.from],
         });
+      } catch (error) {
+        if (isUnknownOutcomeError(error)) {
+          return {
+            verified: false,
+            evidence,
+            outcomeUnknown: true,
+            error: {
+              code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+        errors.push({
+          noteId: entry.noteId,
+          field: entry.field,
+          code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
-      let verified = true;
+    }
+    let verified = errors.length === 0;
+    try {
       for (const entry of appliedDiff) {
         const spec = FIELD_BY_NAME.get(entry.field);
         const value = await readField(host, targetByPosition.get(entry.position).note, spec);
         evidence.restored[entry.noteId] = evidence.restored[entry.noteId] ?? {};
         evidence.restored[entry.noteId][entry.field] = value;
-        if (!isDeepStrictEqual(value, entry.from)) verified = false;
+        if (!fieldMatches(spec, entry.from, value)) verified = false;
       }
-      return { verified, evidence, outcomeUnknown: false };
     } catch (error) {
-      return {
-        verified: false,
-        evidence,
-        outcomeUnknown: isUnknownOutcomeError(error),
-        error: {
-          code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
-          message: error instanceof Error ? error.message : String(error),
-        },
-      };
+      verified = false;
+      errors.push({
+        code: typeof error?.code === "string" ? error.code : "ROLLBACK_VERIFY_FAILED",
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
+    return {
+      verified,
+      evidence,
+      outcomeUnknown: false,
+      ...(errors.length > 0 ? { error: errors[0], errors } : {}),
+    };
   }
 
   async _closeUndoBoundary(host, resolved, warnings, onSuccess) {
@@ -429,7 +467,7 @@ function collectExpectedMismatches(targets) {
       const matches =
         spec.kind === "attributes"
           ? attributeKeysMatch(expectedValue, current)
-          : isDeepStrictEqual(current, expectedValue);
+          : jsonValueEquals(current, expectedValue);
       if (!matches) {
         mismatches.push({ noteId: target.noteId, field, expected: expectedValue, observed: current });
       }
@@ -465,7 +503,7 @@ function buildPlannedDiff(targets) {
 }
 
 function fieldMatches(spec, requested, observed) {
-  if (spec.kind !== "attributes") return isDeepStrictEqual(observed, requested);
+  if (spec.kind !== "attributes") return jsonValueEquals(observed, requested);
   return attributeKeysMatch(requested, observed);
 }
 
@@ -473,9 +511,26 @@ function fieldMatches(spec, requested, observed) {
 function attributeKeysMatch(requested, observed) {
   if (!isRecord(requested)) return false;
   if (!isRecord(observed)) return false;
-  return Object.entries(requested).every(([key, value]) =>
-    isDeepStrictEqual(observed[key], value)
-  );
+  return Object.entries(requested).every(([key, value]) => jsonValueEquals(observed[key], value));
+}
+
+// 管道解码出的嵌套对象是 null-prototype；比较必须按 JSON 值结构进行，
+// 不能用 isDeepStrictEqual（它区分 prototype，会把合法读回判为不等）。
+function jsonValueEquals(a, b) {
+  if (a === b) return true;
+  if (typeof a === "number" && typeof b === "number") {
+    return Number.isNaN(a) && Number.isNaN(b);
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => jsonValueEquals(item, b[index]));
+  }
+  if (isRecord(a) && isRecord(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key) => Object.hasOwn(b, key) && jsonValueEquals(a[key], b[key]));
+  }
+  return false;
 }
 
 function patchResultData(targets, plannedDiff, appliedDiff) {
@@ -570,9 +625,9 @@ function validateFieldValue(spec, value, label) {
         throw codedError("INVALID_ARGUMENTS", `${label} must be an integer MIDI pitch 0-127`);
       }
       return;
-    case "integer":
-      if (!Number.isSafeInteger(value)) {
-        throw codedError("INVALID_ARGUMENTS", `${label} must be an integer (cents)`);
+    case "finiteNumber":
+      if (!Number.isFinite(value)) {
+        throw codedError("INVALID_ARGUMENTS", `${label} must be a finite number (cents)`);
       }
       return;
     case "attributes":

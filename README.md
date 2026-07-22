@@ -94,7 +94,7 @@ MCP 客户端配置示例：
 | `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚 |
 | `sv_snapshot_range` | 按 1-based bar/beat 范围跨轨读取：blick/音乐坐标双份、逐音符休止与相邻歌词、tempo/meter map、mixer，以及内容 hash `snapshotToken`（`sinceToken` 相同时返回 `no_change`） |
 | `sv_restructure_notes` | 结构操作：insert / delete（clone 备份）/ split（延音第二半）/ merge（连续音符），按调用顺序执行、活动 index 解析、Undo 边界与已验证补偿回滚 |
-| `sv_get_parameter_curve` | 读取 group 参数曲线：官方 definition、插值方式、local/absolute 双坐标控制点与统计 |
+| `sv_get_parameter_curve` | 在必填 blick 范围内读取 group 参数曲线：官方 definition、插值方式、local/absolute 双坐标控制点与统计；分段读取以尊重 64 KiB 帧上限，截断时返回 `nextFromBlick` 续读游标 |
 | `sv_get_voice_profile` | 读取轨道各 group 的可观测 voice 参数与 vocalMode 名称；singer 身份/声库目录/分配关系明确报告 unobservable |
 | `sv_clone_track_from_template` | Track.clone + addTrack 克隆轨道（如和声轨），Undo 边界 + 读回验证；隐藏 singer 状态是否保留报告 `host_opaque` |
 | `sv_start_audition` / `sv_get_audition` / `sv_stop_audition` / `sv_restore_audition` | 非阻塞试听：保存 playhead/solo、solo 目标轨、seek + play/loop；stop 只恢复未被用户改动的字段并返回逐项证据；recovery payload 可在 server 崩溃后独立恢复。MCP 听不到声音，感知判断属于人 |

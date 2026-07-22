@@ -1,8 +1,12 @@
 import { createHostScope } from "./snapshot.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
+// local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
 const MAX_INLINE_POINTS = 200;
 const VALUE_EPSILON = 1e-9;
+// PIPE 单帧上限 64 KiB；一次 getPoints 的窗口必须保证结果帧远小于该上限。
+const READ_WINDOW_BLICK = 8 * 705600;
+const MAX_JOURNAL_POINTS = 4000;
 
 export class ParameterCurveService {
   constructor(session, { now = () => Date.now() } = {}) {
@@ -16,30 +20,20 @@ export class ParameterCurveService {
       const capture = createHostScope(host);
       try {
         const resolved = await resolveAutomation(capture, input.target, input.parameter);
-        const range = input.range
-          ? toLocalRange(input.range, resolved.groupOnsetBlick)
-          : null;
-        const rawPoints = range
-          ? await capture.call(resolved.automation, "getPoints", [range.fromLocal, range.toLocal], {
-              resultFormat: "typed-v2",
-              resultShape: "array",
-            })
-          : await capture.call(resolved.automation, "getAllPoints", [], {
-              resultFormat: "typed-v2",
-              resultShape: "array",
-            });
-        const points = normalizePoints(rawPoints).map((point) => ({
+        const range = toLocalRange(input.range, resolved.groupTimeOffsetBlick);
+        const read = await readPointsChunked(capture, resolved.automation, range, {
+          maxPoints: input.maxPoints,
+        });
+        const points = read.points.map((point) => ({
           localBlick: point.blick,
-          absoluteBlick: point.blick + resolved.groupOnsetBlick,
+          absoluteBlick: point.blick + resolved.groupTimeOffsetBlick,
           value: point.value,
         }));
         const warnings = [];
-        let inline = points;
-        if (points.length > input.maxPoints) {
-          inline = points.slice(0, input.maxPoints);
+        if (read.truncated) {
           warnings.push({
             code: "POINTS_TRUNCATED",
-            message: `curve has ${points.length} control points; returning the first ${input.maxPoints}. Statistics cover all points.`,
+            message: `stopped after ${input.maxPoints} control points; continue from data.nextFromBlick (local) to read the rest.`,
           });
         }
         return {
@@ -55,20 +49,19 @@ export class ParameterCurveService {
               groupIndex: input.target.groupIndex,
               uuid: resolved.groupUuid,
               onsetBlick: resolved.groupOnsetBlick,
+              timeOffsetBlick: resolved.groupTimeOffsetBlick,
             },
-            ...(range
-              ? {
-                  range: {
-                    coordinate: input.range.coordinate,
-                    fromBlick: input.range.fromBlick,
-                    toBlick: input.range.toBlick,
-                    localFromBlick: range.fromLocal,
-                    localToBlick: range.toLocal,
-                  },
-                }
-              : {}),
-            points: inline,
-            stats: pointStats(points),
+            range: {
+              coordinate: input.range.coordinate,
+              fromBlick: input.range.fromBlick,
+              toBlick: input.range.toBlick,
+              localFromBlick: range.fromLocal,
+              localToBlick: range.toLocal,
+            },
+            points,
+            stats: pointStats(read.points),
+            complete: !read.truncated,
+            ...(read.truncated ? { nextFromBlick: read.nextFromBlick } : {}),
           },
           warnings,
         };
@@ -89,26 +82,29 @@ export class ParameterCurveService {
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
         const resolved = await resolveAutomation(capture, input.target, input.parameter);
-        const range = toLocalRange(input.range, resolved.groupOnsetBlick);
+        const range = toLocalRange(input.range, resolved.groupTimeOffsetBlick);
         const [minValue, maxValue] = resolved.definition.range;
 
-        // 补偿日志：范围内的全部现有控制点。
-        const journal = normalizePoints(
-          await capture.call(resolved.automation, "getPoints", [range.fromLocal, range.toLocal], {
-            resultFormat: "typed-v2",
-            resultShape: "array",
-          })
-        );
-        const before = pointStats(
-          journal.map((point) => ({ value: point.value }))
-        );
+        // 补偿日志：范围内的全部现有控制点。分段读取以避免超过 PIPE 单帧上限；
+        // 超过硬上限的密集范围直接拒绝，而不是带着不完整日志去写。
+        const journalRead = await readPointsChunked(capture, resolved.automation, range, {
+          maxPoints: MAX_JOURNAL_POINTS,
+        });
+        if (journalRead.truncated) {
+          throw codedError(
+            "CURVE_TOO_DENSE",
+            `the range holds more than ${MAX_JOURNAL_POINTS} control points; narrow the range before patching`
+          );
+        }
+        const journal = journalRead.points;
+        const before = pointStats(journal);
 
         let planned;
         let clampedCount = 0;
         if (input.mode === "replace") {
           planned = input.points.map((point) => {
             const local = input.range.coordinate === "absolute"
-              ? point.blick - resolved.groupOnsetBlick
+              ? point.blick - resolved.groupTimeOffsetBlick
               : point.blick;
             if (local < range.fromLocal || local > range.toLocal) {
               throw codedError(
@@ -160,7 +156,7 @@ export class ParameterCurveService {
               planned: {
                 pointCount: planned.length,
                 stats: pointStats(planned),
-                points: inlinePoints(planned, resolved.groupOnsetBlick),
+                points: inlinePoints(planned, resolved.groupTimeOffsetBlick),
               },
               clampedCount,
             },
@@ -193,35 +189,40 @@ export class ParameterCurveService {
           applyError = error;
         }
 
+        // 读回本身抛错也必须走补偿路径，而不是漏到外层 catch。
+        let verifyError = null;
         let observed = null;
         let verification = null;
         if (!applyError) {
-          observed = normalizePoints(
-            await capture.call(resolved.automation, "getPoints", [range.fromLocal, range.toLocal], {
-              resultFormat: "typed-v2",
-              resultShape: "array",
-            })
-          );
-          verification = await verifyCurve(
-            capture,
-            resolved.automation,
-            planned,
-            observed,
-            input.simplifyThreshold
-          );
+          try {
+            const observedRead = await readPointsChunked(capture, resolved.automation, range, {
+              maxPoints: MAX_JOURNAL_POINTS,
+            });
+            observed = observedRead.points;
+            verification = await verifyCurve(
+              capture,
+              resolved.automation,
+              planned,
+              observed,
+              input.simplifyThreshold
+            );
+          } catch (error) {
+            verifyError = error;
+          }
         }
 
-        if (applyError || verification?.passed === false) {
-          const failure = applyError
+        if (applyError || verifyError || verification?.passed === false) {
+          const causeError = applyError ?? verifyError;
+          const failure = causeError
             ? {
-                code: typeof applyError?.code === "string" ? applyError.code : "HOST_CALL_FAILED",
-                message: applyError instanceof Error ? applyError.message : String(applyError),
+                code: typeof causeError?.code === "string" ? causeError.code : "HOST_CALL_FAILED",
+                message: causeError instanceof Error ? causeError.message : String(causeError),
               }
             : {
                 code: "POSTCONDITION_FAILED",
                 message: "The curve did not match the requested points after write-back verification.",
               };
-          if (applyError && isUnknownOutcomeError(applyError)) {
+          if (causeError && isUnknownOutcomeError(causeError)) {
             await closeBoundary(capture, resolved, warnings, () => (boundaryCalls += 1));
             return {
               ...failedResult(failure.code, failure.message, "unknown"),
@@ -288,7 +289,7 @@ export class ParameterCurveService {
             after: {
               pointCount: observed.length,
               stats: pointStats(observed),
-              points: inlinePoints(observed, resolved.groupOnsetBlick),
+              points: inlinePoints(observed, resolved.groupTimeOffsetBlick),
             },
             clampedCount,
             simplified: input.simplifyThreshold !== undefined,
@@ -302,6 +303,21 @@ export class ParameterCurveService {
       } catch (error) {
         const unknown = isUnknownOutcomeError(error);
         const effects = writeAttempted ? (unknown ? "unknown" : "may_remain") : "none";
+        if (boundaryCalls === 1 && !unknown) {
+          try {
+            await capture.call(
+              (await capture.roots()).project,
+              "newUndoRecord",
+              []
+            );
+            boundaryCalls += 1;
+          } catch (closeError) {
+            warnings.push({
+              code: "UNDO_BOUNDARY_CLOSE_FAILED",
+              message: closeError instanceof Error ? closeError.message : String(closeError),
+            });
+          }
+        }
         return {
           ...failedResult(
             typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
@@ -371,8 +387,31 @@ async function resolveAutomation(capture, target, parameter) {
     typeName: await capture.call(automation, "getType"),
     interpolationMethod: await capture.call(automation, "getInterpolationMethod"),
     groupOnsetBlick: await capture.call(reference, "getOnset"),
+    // local → absolute 的真正偏移；getOnset 含首音符 onset，不能用。
+    groupTimeOffsetBlick: await capture.call(reference, "getTimeOffset"),
     groupUuid: await capture.call(group, "getUUID"),
   };
+}
+
+// 按固定窗口分段调用 getPoints，保证任何一次宿主返回都远小于 64 KiB 帧上限。
+async function readPointsChunked(capture, automation, range, { maxPoints }) {
+  const points = [];
+  let windowStart = range.fromLocal;
+  while (windowStart <= range.toLocal) {
+    const windowEnd = Math.min(windowStart + READ_WINDOW_BLICK - 1, range.toLocal);
+    const raw = await capture.call(automation, "getPoints", [windowStart, windowEnd], {
+      resultFormat: "typed-v2",
+      resultShape: "array",
+    });
+    for (const point of normalizePoints(raw)) {
+      if (points.length >= maxPoints) {
+        return { points, truncated: true, nextFromBlick: point.blick };
+      }
+      points.push(point);
+    }
+    windowStart = windowEnd + 1;
+  }
+  return { points, truncated: false, nextFromBlick: null };
 }
 
 async function verifyCurve(capture, automation, planned, observed, simplifyThreshold) {
@@ -392,54 +431,103 @@ async function verifyCurve(capture, automation, planned, observed, simplifyThres
     };
   }
   // simplify 合法地移除控制点；验证退化为按计划点位置采样，偏差以 threshold 为界。
+  // 同时检查残留控制点都落在计划曲线的容差内，防止范围内出现计划外的值。
   let maxDeviation = 0;
   for (const point of planned) {
     const value = await capture.call(automation, "get", [point.blick]);
     maxDeviation = Math.max(maxDeviation, Math.abs(value - point.value));
   }
+  let maxResidualDeviation = 0;
+  for (const point of observed) {
+    const expected = interpolateLinear(planned, point.blick);
+    if (expected === null) continue;
+    maxResidualDeviation = Math.max(maxResidualDeviation, Math.abs(point.value - expected));
+  }
+  const tolerance = simplifyThreshold + VALUE_EPSILON;
   return {
     attempted: true,
-    passed: maxDeviation <= simplifyThreshold + VALUE_EPSILON,
+    passed: maxDeviation <= tolerance && maxResidualDeviation <= tolerance,
     mode: "tolerance_sampled",
     evidence: {
       observedPointCount: observed.length,
       plannedPointCount: planned.length,
       maxDeviation,
+      maxResidualDeviation,
       tolerance: simplifyThreshold,
     },
   };
 }
 
+function interpolateLinear(points, blick) {
+  if (points.length === 0) return null;
+  if (blick <= points[0].blick) return points[0].value;
+  const last = points[points.length - 1];
+  if (blick >= last.blick) return last.value;
+  for (let index = 1; index < points.length; index += 1) {
+    const a = points[index - 1];
+    const b = points[index];
+    if (blick >= a.blick && blick <= b.blick) {
+      return a.value + ((b.value - a.value) * (blick - a.blick)) / (b.blick - a.blick);
+    }
+  }
+  return null;
+}
+
 async function rollbackCurve(capture, automation, range, journal) {
+  const errors = [];
   try {
     await capture.call(automation, "remove", [range.fromLocal, range.toLocal]);
-    for (const point of journal) {
-      await capture.call(automation, "add", [point.blick, point.value]);
+  } catch (error) {
+    if (isUnknownOutcomeError(error)) {
+      return { verified: false, outcomeUnknown: true, error: rollbackError(error) };
     }
-    const observed = normalizePoints(
-      await capture.call(automation, "getPoints", [range.fromLocal, range.toLocal], {
-        resultFormat: "typed-v2",
-        resultShape: "array",
-      })
-    );
+    errors.push(rollbackError(error));
+  }
+  // 单点补偿写失败不终止其余补偿；宿主超时/断开才放弃。
+  for (const point of journal) {
+    try {
+      await capture.call(automation, "add", [point.blick, point.value]);
+    } catch (error) {
+      if (isUnknownOutcomeError(error)) {
+        return { verified: false, outcomeUnknown: true, error: rollbackError(error) };
+      }
+      errors.push(rollbackError(error));
+    }
+  }
+  try {
+    const observedRead = await readPointsChunked(capture, automation, range, {
+      maxPoints: MAX_JOURNAL_POINTS,
+    });
+    const observed = observedRead.points;
     const verified =
+      errors.length === 0 &&
+      !observedRead.truncated &&
       observed.length === journal.length &&
       journal.every(
         (point, index) =>
           observed[index].blick === point.blick &&
           Math.abs(observed[index].value - point.value) <= VALUE_EPSILON
       );
-    return { verified, outcomeUnknown: false };
+    return {
+      verified,
+      outcomeUnknown: false,
+      ...(errors.length > 0 ? { error: errors[0], errors } : {}),
+    };
   } catch (error) {
     return {
       verified: false,
       outcomeUnknown: isUnknownOutcomeError(error),
-      error: {
-        code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
-        message: error instanceof Error ? error.message : String(error),
-      },
+      error: rollbackError(error),
+      ...(errors.length > 0 ? { errors } : {}),
     };
   }
+}
+
+function rollbackError(error) {
+  return {
+    code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 async function closeBoundary(capture, resolved, warnings, onSuccess) {
@@ -490,7 +578,13 @@ function normalizeGetRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   const target = normalizeTarget(request.target);
   const parameter = normalizeParameter(request.parameter);
-  const range = request.range === undefined ? null : normalizeRange(request.range);
+  if (request.range === undefined) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "range is required; unbounded reads can exceed the 64 KiB pipe frame. Take group bounds from sv_snapshot_range."
+    );
+  }
+  const range = normalizeRange(request.range);
   const maxPoints = clampInteger(request.maxPoints, 1, 2000, MAX_INLINE_POINTS);
   return { target, parameter, range, maxPoints };
 }

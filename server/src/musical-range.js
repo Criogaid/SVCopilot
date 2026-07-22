@@ -67,6 +67,7 @@ export class RangeSnapshotService {
         const notes = [];
         let truncated = false;
         for (const trackIndex of trackIndices) {
+          if (truncated) break;
           const trackHandle = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
             inferredType: "Track",
           });
@@ -102,6 +103,7 @@ export class RangeSnapshotService {
           groupEntries.sort((a, b) => a.onsetBlick - b.onsetBlick);
 
           for (const entry of groupEntries) {
+            if (truncated) break;
             const group = {
               index: entry.groupIndex,
               onsetBlick: entry.onsetBlick,
@@ -149,7 +151,7 @@ export class RangeSnapshotService {
         if (truncated) {
           warnings.push({
             code: "RANGE_NOTE_LIMIT_REACHED",
-            message: `range snapshot returns at most ${MAX_RANGE_NOTES} notes; narrow the range or track list to read the rest.`,
+            message: `range snapshot returns at most ${MAX_RANGE_NOTES} notes; traversal stopped early — narrow the range or track list to read the rest.`,
           });
         }
 
@@ -232,7 +234,8 @@ async function readGroupNotes(capture, options) {
   let truncated = false;
   for (let position = 0; position < all.length; position += 1) {
     const item = all[position];
-    const absoluteOnset = group.onsetBlick + item.onsetBlick;
+    // 官方语义：绝对位置 = 组内位置 + getTimeOffset()；getOnset() 已含首音符 onset。
+    const absoluteOnset = group.timeOffsetBlick + item.onsetBlick;
     if (absoluteOnset < fromBlick || absoluteOnset >= toBlick) continue;
     if (emitted.length >= remaining) {
       truncated = true;
@@ -249,7 +252,7 @@ async function readGroupNotes(capture, options) {
       durationBlick: item.durationBlick,
       endBlick: item.endBlick,
       absoluteOnsetBlick: absoluteOnset,
-      absoluteEndBlick: group.onsetBlick + item.endBlick,
+      absoluteEndBlick: group.timeOffsetBlick + item.endBlick,
       pitch: await capture.call(item.handle, "getPitch"),
       lyrics: await capture.call(item.handle, "getLyrics"),
       phonemesOverride: await capture.call(item.handle, "getPhonemes"),

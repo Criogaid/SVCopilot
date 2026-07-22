@@ -79,7 +79,9 @@ function createCurveModel() {
       if (id === h.ref.__handle__) {
         if (method === "isInstrumental") return false;
         if (method === "getTarget") return h.group;
+        // 首音符组内 onset 为 0，因此 getOnset == getTimeOffset。
         if (method === "getOnset") return model.groupOnset;
+        if (method === "getTimeOffset") return model.groupOnset;
       }
       if (id === h.group.__handle__) {
         if (method === "getParameter") {
@@ -92,7 +94,10 @@ function createCurveModel() {
         if (method === "getType") return model.definition.typeName;
         if (method === "getInterpolationMethod") return "Linear";
         if (method === "getAllPoints") return sortPoints().map((point) => [...point]);
-        if (method === "getPoints") return inRange(args[0], args[1]).map((point) => [...point]);
+        if (method === "getPoints") {
+          model.getPointsCalls = (model.getPointsCalls ?? 0) + 1;
+          return inRange(args[0], args[1]).map((point) => [...point]);
+        }
         if (method === "get") return interpolate(args[0]);
         if (method === "add") {
           const existing = model.points.find(([b]) => b === args[0]);
@@ -142,7 +147,11 @@ const TARGET = { trackIndex: 0, groupIndex: 0 };
 test("sv_get_parameter_curve reports definition, dual coordinates, and stats", async () => {
   const model = createCurveModel();
   const service = createService(model);
-  const result = await service.getCurve({ target: TARGET, parameter: "loudness" });
+  const result = await service.getCurve({
+    target: TARGET,
+    parameter: "loudness",
+    range: { fromBlick: 0, toBlick: 3 * Q },
+  });
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.data.definition.range, [-24, 24]);
@@ -348,4 +357,108 @@ test("sv_patch_parameter_curve validates target and parameter", async () => {
     }),
     (error) => error.code === "INVALID_ARGUMENTS"
   );
+});
+
+const WINDOW = 8 * Q;
+
+test("sv_get_parameter_curve reads dense curves in bounded windows with continuation", async () => {
+  const model = createCurveModel();
+  // 300 个点分布在 3 个读取窗口内。
+  model.points = Array.from({ length: 300 }, (_, index) => [index * (WINDOW * 3 / 300), index % 10]);
+  const service = createService(model);
+  const result = await service.getCurve({
+    target: TARGET,
+    parameter: "loudness",
+    range: { fromBlick: 0, toBlick: 3 * WINDOW },
+    maxPoints: 100,
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(model.getPointsCalls >= 1);
+  assert.equal(result.data.points.length, 100);
+  assert.equal(result.data.complete, false);
+  assert.ok(Number.isFinite(result.data.nextFromBlick));
+  assert.ok(result.warnings.some((warning) => warning.code === "POINTS_TRUNCATED"));
+
+  // 从 nextFromBlick 续读能覆盖剩余点。
+  const rest = await service.getCurve({
+    target: TARGET,
+    parameter: "loudness",
+    range: { fromBlick: result.data.nextFromBlick, toBlick: 3 * WINDOW },
+    maxPoints: 2000,
+  });
+  assert.equal(result.data.points.length + rest.data.points.length, 300);
+});
+
+test("sv_patch_parameter_curve refuses ranges denser than the journal cap", async () => {
+  const model = createCurveModel();
+  model.points = Array.from({ length: 4001 }, (_, index) => [index, 0]);
+  const service = createService(model);
+  const result = await service.patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "add",
+    amount: 1,
+    range: { fromBlick: 0, toBlick: 8 * Q },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "CURVE_TOO_DENSE");
+  assert.equal(result.effects, "none");
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_parameter_curve rolls back when the read-back getPoints throws", async () => {
+  const model = createCurveModel();
+  const service = createService(model);
+  // journal 读是第 1 次 getPoints；写后读回是第 2 次。
+  model.failures.push({ method: "getPoints", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
+  const result = await service.patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+    points: [{ blick: 0, value: 1 }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.error.code, "UNKNOWN_HANDLE");
+  assert.equal(result.rollback.verified, true);
+  assert.deepEqual(model.points, [
+    [0, 0],
+    [Q, 0.5],
+    [2 * Q, 1],
+  ]);
+  assert.equal(model.undoCount, 2);
+});
+
+test("sv_patch_parameter_curve simplify verification flags residual out-of-tolerance points", async () => {
+  const model = createCurveModel();
+  // simplify 一个点都不移除，并偷偷加一个偏离计划曲线的点。
+  const realSimplify = null;
+  const service = createService(model);
+  const original = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "simplify") {
+      model.points.push([Q / 2, 20]);
+      model.points.sort((a, b) => a[0] - b[0]);
+      return true;
+    }
+    return original(request);
+  };
+  const result = await service.patchCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+    points: [
+      { blick: 0, value: 0 },
+      { blick: Q, value: 1 },
+    ],
+    simplifyThreshold: 0.01,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "POSTCONDITION_FAILED");
+  assert.ok(result.verification.evidence.maxResidualDeviation > 0.01);
+  assert.equal(result.status, "rolled_back");
 });

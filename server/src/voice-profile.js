@@ -80,10 +80,13 @@ export class VoiceProfileService {
       const capture = createHostScope(host);
       let boundaryCalls = 0;
       let writeAttempted = false;
+      let addedHostIndex = null;
       const warnings = [];
       const startedAt = this.now();
+      let rootsRef = null;
       try {
         const roots = await capture.roots();
+        rootsRef = roots;
         const template = await resolveTrack(capture, roots, input.templateTrackIndex);
         const trackCountBefore = await capture.call(roots.project, "getNumTracks");
 
@@ -92,6 +95,7 @@ export class VoiceProfileService {
         writeAttempted = true;
         const clone = await capture.call(template.handle, "clone", [], { inferredType: "Track" });
         const hostIndex = await capture.call(roots.project, "addTrack", [clone]);
+        addedHostIndex = hostIndex;
         if (input.name !== undefined) {
           await capture.call(clone, "setName", [input.name]);
         }
@@ -152,6 +156,18 @@ export class VoiceProfileService {
         };
       } catch (error) {
         const unknown = isUnknownOutcomeError(error);
+        // 已开启但未关闭的 Undo 边界尽力关闭；addTrack 已生效时返回新轨索引供恢复。
+        if (boundaryCalls === 1 && !unknown && rootsRef) {
+          try {
+            await capture.call(rootsRef.project, "newUndoRecord", []);
+            boundaryCalls += 1;
+          } catch (closeError) {
+            warnings.push({
+              code: "UNDO_BOUNDARY_CLOSE_FAILED",
+              message: closeError instanceof Error ? closeError.message : String(closeError),
+            });
+          }
+        }
         return {
           ok: false,
           status: writeAttempted ? (unknown ? "outcome_unknown" : "partial") : "failed",
@@ -161,6 +177,11 @@ export class VoiceProfileService {
             message: error instanceof Error ? error.message : String(error),
             outcome: writeAttempted ? (unknown ? "unknown" : "partial") : "unchanged",
             retryable: false,
+          },
+          data: {
+            templateTrackIndex: input.templateTrackIndex,
+            // addTrack 已执行时提供索引，调用方可手动移除或继续配置该轨。
+            newTrackIndex: addedHostIndex === null ? null : addedHostIndex - 1,
           },
           undo: {
             boundaryCallsCompleted: boundaryCalls,

@@ -383,7 +383,7 @@ const TOOLS = [
                   pitch: { type: "integer" },
                   onsetBlick: { type: "integer" },
                   durationBlick: { type: "integer" },
-                  detuneCents: { type: "integer" },
+                  detuneCents: { type: "number" },
                   attributes: { type: "object" },
                 },
                 description:
@@ -400,7 +400,7 @@ const TOOLS = [
                   pitch: { type: "integer", minimum: 0, maximum: 127 },
                   onsetBlick: { type: "integer", minimum: 0 },
                   durationBlick: { type: "integer", minimum: 1 },
-                  detuneCents: { type: "integer" },
+                  detuneCents: { type: "number" },
                   attributes: {
                     type: "object",
                     description:
@@ -504,7 +504,7 @@ const TOOLS = [
   {
     name: "sv_get_parameter_curve",
     description:
-      "Read one Automation parameter curve (pitchDelta, loudness, tension, breathiness, voicing, gender, vibratoEnv, toneShift, vocalMode_<Name>, ...) of a note group. Automation lives in group-local blicks; every point is reported with both localBlick and absoluteBlick, together with the official definition (range, default) and interpolation method (read-only; there is no interpolation setter in the official API).",
+      "Read one Automation parameter curve (pitchDelta, loudness, tension, breathiness, voicing, gender, vibratoEnv, toneShift, vocalMode_<Name>, ...) of a note group within a required blick range (reads are chunked to respect the 64 KiB pipe frame; data.nextFromBlick continues a truncated read). Automation lives in group-local blicks; every point is reported with both localBlick and absoluteBlick (absolute = local + group timeOffset), together with the official definition (range, default) and interpolation method (read-only; there is no interpolation setter in the official API).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -531,7 +531,7 @@ const TOOLS = [
         },
         maxPoints: { type: "integer", minimum: 1, maximum: 2000 },
       },
-      required: ["target", "parameter"],
+      required: ["target", "parameter", "range"],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
