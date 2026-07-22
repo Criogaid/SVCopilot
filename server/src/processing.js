@@ -1,4 +1,3 @@
-import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
@@ -28,9 +27,14 @@ export class ProcessingService {
         await timer.measure("preflightReadMs", async () => {
           if (typeof options.contextId === "string") {
             const stored = this.snapshotService.getContext(options.contextId, host.epoch());
-            resolved = await resolveContextTarget(host, stored, { verify: false });
+            resolved = await resolveProcessingContext(
+              host,
+              stored,
+              options.contextId,
+              options.occurrenceId
+            );
             scope = resolved.scope;
-            options.expectedNotes ??= contextGroupNoteCount(stored, resolved.notes.length);
+            options.expectedNotes ??= resolved.expectedNotes;
           } else {
             scope = createHostScope(host);
             const roots = await scope.roots();
@@ -46,7 +50,11 @@ export class ProcessingService {
             now: this.now,
           })
         );
-        return { ...result, timings: timer.finish() };
+        return {
+          ...result,
+          ...(resolved.target ? { target: resolved.target } : {}),
+          timings: timer.finish(),
+        };
       } finally {
         await scope?.releaseAll();
       }
@@ -219,6 +227,15 @@ function normalizeRequest(request) {
   if (typeof request.contextId !== "string" && !isHandle(request.group)) {
     throw codedError("INVALID_TARGET", "contextId or group handle is required");
   }
+  if (
+    request.occurrenceId !== undefined &&
+    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string");
+  }
+  if (request.occurrenceId !== undefined && typeof request.contextId !== "string") {
+    throw codedError("INVALID_ARGUMENTS", "occurrenceId requires contextId");
+  }
   if (kind === "computedPitch") {
     for (const [name, value] of [
       ["startBlick", request.startBlick],
@@ -236,6 +253,7 @@ function normalizeRequest(request) {
   }
   return {
     contextId: request.contextId,
+    occurrenceId: request.occurrenceId,
     group: request.group,
     kind,
     expectedNotes: request.expectedNotes,
@@ -252,6 +270,124 @@ function normalizeRequest(request) {
   };
 }
 
+async function resolveProcessingContext(host, stored, contextId, requestedOccurrenceId) {
+  const selected = selectContextOccurrence(stored, contextId, requestedOccurrenceId);
+  const scope = createHostScope(host);
+  try {
+    const roots = await scope.roots();
+    const track = await scope.call(roots.project, "getTrack", [selected.trackIndex + 1], {
+      inferredType: "Track",
+    });
+    const group = await scope.call(track, "getGroupReference", [selected.groupIndex + 1], {
+      inferredType: "NoteGroupReference",
+    });
+    if (await scope.call(group, "isInstrumental")) {
+      throw codedError("INVALID_TARGET", "instrumental groups have no computed vocal processing");
+    }
+    const target = await scope.call(group, "getTarget", [], { inferredType: "NoteGroup" });
+    const observedGroupUuid = await scope.call(target, "getUUID");
+    if (selected.expectedGroupUuid && observedGroupUuid !== selected.expectedGroupUuid) {
+      throw codedError("STALE_CONTEXT", "the target note group changed after snapshot capture");
+    }
+    const expectedNotes = await scope.call(target, "getNumNotes");
+    return {
+      scope,
+      roots,
+      group,
+      expectedNotes,
+      target: {
+        contextId,
+        ...(selected.occurrenceId ? { occurrenceId: selected.occurrenceId } : {}),
+        trackIndex: selected.trackIndex,
+        groupIndex: selected.groupIndex,
+        groupUuid: observedGroupUuid,
+      },
+    };
+  } catch (error) {
+    await scope.releaseAll();
+    if (["INVALID_CONTEXT", "INVALID_TARGET", "STALE_CONTEXT"].includes(error?.code)) {
+      throw error;
+    }
+    throw codedError(
+      "STALE_CONTEXT",
+      `could not resolve processing target: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function selectContextOccurrence(stored, contextId, requestedOccurrenceId) {
+  if (stored?.context?.kind === "range") {
+    const occurrences = Array.isArray(stored.context.occurrences)
+      ? stored.context.occurrences
+      : [];
+    if (requestedOccurrenceId) {
+      const selected = occurrences.find(
+        (occurrence) => occurrence.occurrenceId === requestedOccurrenceId
+      );
+      if (!selected) {
+        throw codedError(
+          "UNKNOWN_OCCURRENCE",
+          `occurrenceId is not part of context ${contextId}`
+        );
+      }
+      return rangeOccurrenceTarget(selected);
+    }
+    const candidates = occurrences.filter(
+      (occurrence) => typeof occurrence.targetGroupUuid === "string"
+    );
+    if (candidates.length === 0) {
+      throw codedError("INVALID_CONTEXT", "range context has no editable vocal occurrence");
+    }
+    if (candidates.length > 1) {
+      throw codedError(
+        "AMBIGUOUS_CONTEXT",
+        "range context identifies multiple vocal occurrences; provide occurrenceId",
+        {
+          contextId,
+          candidateOccurrences: candidates.map(occurrenceSummary),
+        }
+      );
+    }
+    return rangeOccurrenceTarget(candidates[0]);
+  }
+  if (requestedOccurrenceId !== undefined) {
+    throw codedError(
+      "INVALID_CONTEXT",
+      "occurrenceId is only valid with a range snapshot context"
+    );
+  }
+  if (!stored?.context || !["selection", "group"].includes(stored.context.kind)) {
+    throw codedError("INVALID_CONTEXT", "context does not identify an editable note group");
+  }
+  return {
+    trackIndex: stored.context.trackIndex,
+    groupIndex: stored.context.groupIndex,
+    expectedGroupUuid:
+      stored.baseData?.group?.uuid ?? stored.baseData?.tracks?.[0]?.groups?.[0]?.uuid ?? null,
+  };
+}
+
+function rangeOccurrenceTarget(occurrence) {
+  if (typeof occurrence.targetGroupUuid !== "string") {
+    throw codedError("INVALID_TARGET", "selected occurrence is not an editable vocal group");
+  }
+  return {
+    occurrenceId: occurrence.occurrenceId,
+    trackIndex: occurrence.trackIndex,
+    groupIndex: occurrence.groupIndex,
+    expectedGroupUuid: occurrence.targetGroupUuid,
+  };
+}
+
+function occurrenceSummary(occurrence) {
+  return {
+    occurrenceId: occurrence.occurrenceId,
+    trackIndex: occurrence.trackIndex,
+    groupIndex: occurrence.groupIndex,
+    targetGroupUuid: occurrence.targetGroupUuid,
+  };
+}
+
 function clampInteger(value, minimum, maximum, fallback) {
   if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
@@ -264,8 +400,9 @@ function isHandle(value) {
   return value !== null && typeof value === "object" && Number.isSafeInteger(value.__handle__);
 }
 
-function codedError(code, message) {
+function codedError(code, message, details) {
   const error = new Error(message);
   error.code = code;
+  if (details) error.details = details;
   return error;
 }

@@ -89,10 +89,10 @@ MCP 客户端配置示例：
 | `sv_describe` | 获取一个类或指定方法的完整官方 API 元数据 |
 | `sv_snapshot` | 将选择区、工程或指定组读取为统一的 0-based 数据，并签发短期 `contextId` |
 | `sv_run` | 在一个不可插队的执行单元中运行有序 call/index 步骤、局部引用、断言与句柄清理 |
-| `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高，超时返回最后一次观测而非伪造成功 |
+| `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高；直接接受 group/selection context 或 range context + occurrenceId，单 occurrence 可自动选择，超时返回最后一次观测而非伪造成功 |
 | `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
 | `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚 |
-| `sv_snapshot_range` | 一次读取可编辑范围上下文：相交音符/occurrence 身份、voice、Automation、computed pitch、attributes、processing、tempo/meter、mixer；按数据类型预算分页，cursor 续读不重访宿主；`sinceToken` 仅抑制相同输出 |
+| `sv_snapshot_range` | 一次读取可编辑范围上下文：相交音符/occurrence 身份、voice、Automation、computed pitch、attributes、processing、tempo/meter、mixer；严格拒绝未知字段；按数据类型预算分页，cursor 续读不重访宿主；`sinceToken` 命中时用 `detailCursor` 取得新 context 身份 |
 | `sv_restructure_notes` | 结构操作：insert / delete（clone 备份）/ split（延音第二半）/ merge（连续音符），按调用顺序执行、活动 index 解析、Undo 边界与已验证补偿回滚 |
 | `sv_get_parameter_curve` | 在必填 blick 范围内读取经官方/动态 vocal mode 白名单验证的 group 参数曲线：requested/resolved 名称、definition、插值方式、local/absolute 双坐标、统计和续读游标 |
 | `sv_get_voice_profile` | 读取轨道各 group 的可观测 voice 参数与 vocalMode 名称；singer 身份/声库目录/分配关系明确报告 unobservable |
@@ -100,13 +100,15 @@ MCP 客户端配置示例：
 | `sv_start_audition` / `sv_get_audition` / `sv_stop_audition` / `sv_restore_audition` | 非阻塞试听状态机：可选 `autoStop`，区分 timer/queue/overrun，恢复原 playback status、playhead 和未被用户改动的 solo；recovery payload 可跨 server 崩溃使用。MCP 听不到声音，感知判断属于人 |
 | `sv_patch_parameter_curve` | 用 BLICK、音乐位置、范围边界、note 或相邻音符 gap 锚点 replace/add/scale 参数控制点；参数白名单、宿主 typeName 复核、Undo、读回验证和已验证补偿 |
 | `sv_patch_parameter_curves` | 在同一 group 上预检并批量写入 1--16 条曲线：范围上下文/共享 target 前置条件、一次 Undo、逐曲线读回、跨曲线补偿、三档响应和统一 timings |
-| `sv_edit_phrase` | 在一个 Undo 中组合 note patch、歌词/语言、结构操作、多曲线和可观测 voice patch；detached clone 完整预检后回放到原 target，失败时按 journal 恢复并读回验证 |
+| `sv_edit_phrase` | 在一个 Undo 中组合 note patch、歌词/语言、结构操作、多曲线和可观测 voice patch；音符/结构使用 detached clone，curve/voice-only 使用轻量 live preflight，失败时按 journal 恢复并读回验证 |
 
 MCP 资源还提供：
 
 - `svapi://manifest`：完整官方 API 清单。
 - `svapi://class/{class}`：按精确类名读取，例如 `svapi://class/Note`。
 - `svcopilot://capabilities`：当前连接 epoch、接口版本、限制和已知能力缺口。
+- `svcopilot://schemas/music-workflow`：组合音乐工具的轻量 schema 索引。
+- `svcopilot://schemas/{tool}`：单个组合工具实际使用的紧凑输入 schema，例如 `svcopilot://schemas/sv_edit_phrase`；按工具拆分以避开客户端的大 resource 截断。
 
 完整性来自通用 dispatcher：SynthV 对象会被登记为整数 handle，普通 JSON 数据直接内联。调用方可以沿对象 handle 遍历官方 API，而无需为每个方法新增 MCP 工具。`sv_root` 返回的根 handle 和已推断返回类型会被记录；对这些已知类型，`sv_call` 会在发往 SynthV 前校验方法、重载参数、handle 类型和官方文档中的最低版本要求。类型尚未知的 handle 仍交由宿主 dispatcher 执行，以保留通用遍历能力。
 
@@ -117,9 +119,10 @@ MCP 资源还提供：
 - `sv_snapshot` 返回稳定字段、0-based 索引、显式单位和分页信息；`contextId` 只保存定位信息与指纹，不持久保存 Lua handle。project 快照每页最多消耗 16 个 `traversalItems`：有音符的 vocal group 按音符消耗，空组、乐器组和空轨也各消耗一项。`page.count` 是遍历预算消耗，`page.returned` 分别给出本页实际返回的 tracks/groups/notes 数量。调用方必须沿 `page.nextCursor` 读取到 `data.snapshotComplete: true`。selection 的 processing 只统计选中音符；空选区返回 `expectedNotes: 0` 和 `state: "not_applicable"`。
 - `sv_set_lyrics` 在写入前重新定位目标并比较指纹，只写真正变化的字段；返回 `processedNotes`、`actuallyChangedNotes`，并在 verification evidence 中逐项给出请求过的歌词、音素和语言读回值。
 - `sv_patch_notes` 以 `sv_snapshot` 返回的 `data.notes[].id` 定位音符，支持 `expected` 逐字段前置条件与 `dryRun` 预演。`atomic:true`（默认）表示已验证补偿而非 ACID：失败时逆序恢复日志旧值并读回确认，status 区分 `rolled_back`、`rollback_failed`、`partial` 和 `outcome_unknown`。attributes 是部分写，只设置并验证请求过的 key。
-- `sv_snapshot_range` 在一个独占读取窗口内签发 occurrenceId、noteId、fingerprint 和可编辑 `contextId`。与范围半开区间相交的长音都会返回，即使 onset 位于范围起点之前。Automation 点也返回音乐坐标；独立数据预算溢出时返回 cursor，cursor 只分页已捕获的纯 JSON。全局最多采集 2,000 个音符、20,000 个 Automation 点和 20,000 个 computed-pitch 帧，限制可从 capability 资源读取。`sinceToken` 仍需完整宿主读取与 hash，只减少响应体。
+- `sv_snapshot_range` 在一个独占读取窗口内签发 occurrenceId、noteId、fingerprint 和可编辑 `contextId`。与范围半开区间相交的长音都会返回，即使 onset 位于范围起点之前。Automation 点也返回音乐坐标；独立数据预算溢出时返回 cursor，cursor 只分页已捕获的纯 JSON。全局最多采集 2,000 个音符、20,000 个 Automation 点和 20,000 个 computed-pitch 帧；单 group 每次 computed-pitch 请求最多 2,000 帧。`sinceToken` 仍需完整宿主读取与 hash；命中时返回新 `contextId`、`contextExpiresAt` 和 `page.detailCursor`，调用 cursor 可从内存取得匹配的新 occurrenceId/noteId，不再次读取宿主。
+- `sv_wait_for_processing` 可直接复用 range context：显式 `occurrenceId` 优先；仅有一个 vocal occurrence 时可省略；多个候选返回带 `candidateOccurrences` 的 `AMBIGUOUS_CONTEXT`。只读预检校验 target UUID 并读取 live note count，不再逐 note 读取指纹。
 - 参数曲线工具兼容原有 local/absolute BLICK，并支持精确小数/有理数拍点、范围边界、note 相对位置和相邻 note gap。语义输入会复核 meter map、目标 UUID、note fingerprint；同一 target 被多个 reference 复用时，mutation 必须显式确认。
-- `sv_edit_phrase` 不调用 `NoteGroupReference.setTarget`：官方 API 规定已设置的 target 不可更改。它在 detached clone 上完成预检，再把同一计划写到原 target；共享 target 的确认意味着所有 occurrence 都会一起变化。noteId 在任何 mutation 前一次性绑定到 handle，避免 onset 重排后命中错误音符；无实际 diff 返回 `no_change` 且不创建 Undo。
+- `sv_edit_phrase` 不调用 `NoteGroupReference.setTarget`：官方 API 规定已设置的 target 不可更改。音符或结构编辑在 detached clone 上完成预检；curve/voice-only 不 clone 整组，使用各自的 live journal preflight。共享 NoteGroup mutation 在 commit 时扫描整个工程并要求确认；voice 是 occurrence reference 状态，不受共享 target 确认约束。noteId 在任何 mutation 前一次性绑定到 handle；无实际 diff 返回 `no_change` 且不创建 Undo。`initialNoteCount`/`finalNoteCount` 始终表示完整 target group，`countScope` 为 `target_group`；verification phase 区分 `live_preflight`、`detached_preflight` 与 `commit_readback`。
 - `sv_run` 支持 `#/roots/...`、`#/inputs/...`、`#/steps/<id>/result` 局部引用，最多 128 步，失败即停。只读断言步骤可用 `verifiesStep` 关联前面的 mutation，关联成功后不会产生 `UNVERIFIED_WRITE`。
 - 每次 bridge 重连都会增加 epoch。带旧 `__epoch__` 的 handle 会在 Node 侧被拒绝，不能跨重连复用。
 

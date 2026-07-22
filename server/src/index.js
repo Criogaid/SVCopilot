@@ -3,6 +3,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import Ajv from "ajv";
 import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
@@ -21,7 +22,12 @@ import {
 import { HostSession } from "./host-session.js";
 import { AuditionService } from "./audition.js";
 import { LyricsService } from "./lyrics.js";
-import { RANGE_CAPTURE_LIMITS, RangeSnapshotService } from "./musical-range.js";
+import {
+  RANGE_CAPTURE_LIMITS,
+  RANGE_PAGE_LIMITS,
+  RANGE_REQUEST_LIMITS,
+  RangeSnapshotService,
+} from "./musical-range.js";
 import { NotePatchService } from "./note-patch.js";
 import { NoteStructureService } from "./note-structure.js";
 import {
@@ -102,30 +108,18 @@ const MUSICAL_BEAT_SCHEMA = {
   ],
 };
 const CURVE_TARGET_SCHEMA = {
-  anyOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        trackIndex: { type: "integer", minimum: 0 },
-        groupIndex: { type: "integer", minimum: 0 },
-        expectedGroupUuid: { type: "string", minLength: 1 },
-        allowSharedTargetMutation: { type: "boolean", default: false },
-      },
-      required: ["trackIndex", "groupIndex"],
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        contextId: { type: "string", minLength: 1 },
-        occurrenceId: { type: "string", minLength: 1 },
-        expectedGroupUuid: { type: "string", minLength: 1 },
-        allowSharedTargetMutation: { type: "boolean", default: false },
-      },
-      required: ["contextId", "occurrenceId"],
-    },
-  ],
+  type: "object",
+  additionalProperties: false,
+  description:
+    "Use either trackIndex+groupIndex, or contextId+occurrenceId from sv_snapshot_range.",
+  properties: {
+    trackIndex: { type: "integer", minimum: 0 },
+    groupIndex: { type: "integer", minimum: 0 },
+    contextId: { type: "string", minLength: 1 },
+    occurrenceId: { type: "string", minLength: 1 },
+    expectedGroupUuid: { type: "string", minLength: 1 },
+    allowSharedTargetMutation: { type: "boolean", default: false },
+  },
 };
 const NOTE_ANCHOR_SCHEMA = {
   type: "object",
@@ -133,16 +127,10 @@ const NOTE_ANCHOR_SCHEMA = {
   properties: {
     noteId: { type: "string", minLength: 1 },
     position: {
-      anyOf: [
-        { enum: ["onset", "center", "end"] },
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: { ratio: { type: "number", minimum: 0, maximum: 1 } },
-          required: ["ratio"],
-        },
-      ],
+      enum: ["onset", "center", "end", "ratio"],
+      description: 'Use "ratio" together with the sibling ratio field.',
     },
+    ratio: { type: "number", minimum: 0, maximum: 1 },
     offset: {
       type: "object",
       additionalProperties: false,
@@ -162,16 +150,10 @@ const NOTE_GAP_SCHEMA = {
     afterNoteId: { type: "string", minLength: 1 },
     beforeNoteId: { type: "string", minLength: 1 },
     position: {
-      anyOf: [
-        { enum: ["start", "center", "end"] },
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: { ratio: { type: "number", minimum: 0, maximum: 1 } },
-          required: ["ratio"],
-        },
-      ],
+      enum: ["start", "center", "end", "ratio"],
+      description: 'Use "ratio" together with the sibling ratio field.',
     },
+    ratio: { type: "number", minimum: 0, maximum: 1 },
     offset: {
       type: "object",
       additionalProperties: false,
@@ -197,18 +179,12 @@ const CURVE_POSITION_PROPERTIES = {
   rangeBoundary: { enum: ["start", "end"] },
   gap: NOTE_GAP_SCHEMA,
 };
-const CURVE_POSITION_ALTERNATIVES = [
-  { required: ["blick"] },
-  { required: ["anchor"] },
-  { required: ["musicalPosition"] },
-  { required: ["rangeBoundary"] },
-  { required: ["gap"] },
-];
 const CURVE_POSITION_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: CURVE_POSITION_PROPERTIES,
-  oneOf: CURVE_POSITION_ALTERNATIVES,
+  description:
+    "Exactly one position field is required: blick, anchor, musicalPosition, rangeBoundary, or gap.",
 };
 const CURVE_POINT_SCHEMA = {
   type: "object",
@@ -218,30 +194,21 @@ const CURVE_POINT_SCHEMA = {
     value: { type: "number" },
   },
   required: ["value"],
-  oneOf: CURVE_POSITION_ALTERNATIVES,
+  description:
+    "A value plus exactly one position field: blick, anchor, musicalPosition, rangeBoundary, or gap.",
 };
 const CURVE_RANGE_SCHEMA = {
-  anyOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        fromBlick: { type: "integer" },
-        toBlick: { type: "integer" },
-        coordinate: { enum: ["local", "absolute"], default: "local" },
-      },
-      required: ["fromBlick", "toBlick"],
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        from: CURVE_POSITION_SCHEMA,
-        to: CURVE_POSITION_SCHEMA,
-      },
-      required: ["from", "to"],
-    },
-  ],
+  type: "object",
+  additionalProperties: false,
+  description:
+    "Use either fromBlick+toBlick, or semantic from+to positions. coordinate applies only to BLICK ranges.",
+  properties: {
+    fromBlick: { type: "integer" },
+    toBlick: { type: "integer" },
+    coordinate: { enum: ["local", "absolute"], default: "local" },
+    from: CURVE_POSITION_SCHEMA,
+    to: CURVE_POSITION_SCHEMA,
+  },
 };
 
 const TOOLS = [
@@ -452,11 +419,18 @@ const TOOLS = [
   {
     name: "sv_wait_for_processing",
     description:
-      "Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.",
+      "Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide occurrenceId; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         contextId: { type: "string" },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Occurrence from sv_snapshot_range; optional only when the range contains exactly one vocal occurrence.",
+        },
         group: {
           type: "object",
           properties: {
@@ -600,6 +574,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       additionalProperties: false,
+      description: "Provide scope for a new host read, or cursor alone for a cached page.",
       properties: {
         scope: {
           type: "object",
@@ -667,7 +642,12 @@ const TOOLS = [
           type: "object",
           additionalProperties: false,
           properties: {
-            frames: { type: "integer", minimum: 1, maximum: 2000, default: 160 },
+            frames: {
+              type: "integer",
+              minimum: 1,
+              maximum: RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
+              default: 160,
+            },
             startBlick: { type: "integer", minimum: 0 },
             intervalBlick: { type: "integer", minimum: 1 },
           },
@@ -676,11 +656,23 @@ const TOOLS = [
           type: "object",
           additionalProperties: false,
           properties: {
-            notes: { type: "integer", minimum: 1, maximum: 2000 },
-            attributes: { type: "integer", minimum: 1, maximum: 2000 },
-            automationPoints: { type: "integer", minimum: 1, maximum: 20000 },
-            computedPitchFrames: { type: "integer", minimum: 1, maximum: 20000 },
-            bytes: { type: "integer", minimum: 8192, maximum: 61440 },
+            notes: { type: "integer", minimum: 1, maximum: RANGE_PAGE_LIMITS.maximums.notes },
+            attributes: {
+              type: "integer",
+              minimum: 1,
+              maximum: RANGE_PAGE_LIMITS.maximums.attributes,
+            },
+            automationPoints: {
+              type: "integer",
+              minimum: 1,
+              maximum: RANGE_PAGE_LIMITS.maximums.automationPoints,
+            },
+            computedPitchFrames: {
+              type: "integer",
+              minimum: 1,
+              maximum: RANGE_PAGE_LIMITS.maximums.computedPitchFrames,
+            },
+            bytes: { type: "integer", minimum: 8192, maximum: RANGE_PAGE_LIMITS.maximums.bytes },
           },
           description: "Independent per-page data budgets; overflow returns page.nextCursor.",
         },
@@ -695,7 +687,6 @@ const TOOLS = [
           description: "Opaque range page or compact detail cursor; cursor reads do not revisit SynthV.",
         },
       },
-      anyOf: [{ required: ["scope"] }, { required: ["cursor"] }],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
@@ -762,7 +753,7 @@ const TOOLS = [
   {
     name: "sv_patch_parameter_curves",
     description:
-      "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable.",
+      "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable. If a client collapses nested range/point types to unknown, read svcopilot://schemas/sv_patch_parameter_curves for the exact validated input schema.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -815,7 +806,7 @@ const TOOLS = [
   {
     name: "sv_edit_phrase",
     description:
-      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. A detached NoteGroup clone validates the complete note/structure/curve plan before any project write. Commit then journals and replays the verified plan onto the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared targets therefore require allowSharedTargetMutation:true and intentionally affect every occurrence. Any commit failure restores notes, curves, voice, and target identity with read-back verification. noteId/occurrenceId must come from the same sv_snapshot_range context.",
+      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. Note/structure edits use a detached NoteGroup plan; curve/voice-only edits use operation-specific live preflight without cloning the full group. Commit journals and applies the verified plan to the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared target mutations require allowSharedTargetMutation:true and are scanned at commit; dry-run defers the project-wide scan. Any commit failure restores notes, curves, voice, and target identity with read-back verification. noteId/occurrenceId must come from the same sv_snapshot_range context. If a client collapses nested note, structure, range, or point types to unknown, read svcopilot://schemas/sv_edit_phrase for the exact validated input schema.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -863,6 +854,7 @@ const TOOLS = [
           type: "array",
           maxItems: 100,
           items: {
+            discriminator: { propertyName: "op" },
             oneOf: [
               {
                 type: "object",
@@ -1137,8 +1129,13 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.4.0" },
+  { name: "sv-copilot", version: "0.4.1" },
   { capabilities: { tools: {}, resources: {} } }
+);
+
+const schemaValidator = new Ajv({ allErrors: true, strict: false, discriminator: true });
+const toolArgumentValidators = new Map(
+  TOOLS.map((tool) => [tool.name, schemaValidator.compile(tool.inputSchema)])
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -1157,6 +1154,25 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       description: "Connection state, limits, workflow features, and explicit host capability gaps.",
       mimeType: "application/json",
     },
+    {
+      uri: "svcopilot://schemas/music-workflow",
+      name: "SV Copilot music workflow schema index",
+      description:
+        "Small index of per-tool schemas for composite music tools whose nested fields may be collapsed by MCP clients.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_patch_parameter_curves",
+      name: "sv_patch_parameter_curves input schema",
+      description: "Exact JSON input schema used to validate sv_patch_parameter_curves.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_edit_phrase",
+      name: "sv_edit_phrase input schema",
+      description: "Exact JSON input schema used to validate sv_edit_phrase.",
+      mimeType: "application/json",
+    },
   ],
 }));
 
@@ -1166,6 +1182,12 @@ server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
       uriTemplate: "svapi://class/{class}",
       name: "Synthesizer V API class",
       description: "One API class and all documented methods, indexed by exact official class name.",
+      mimeType: "application/json",
+    },
+    {
+      uriTemplate: "svcopilot://schemas/{tool}",
+      name: "SV Copilot tool input schema",
+      description: "Exact runtime input schema for a supported composite music tool.",
       mimeType: "application/json",
     },
   ],
@@ -1178,7 +1200,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       {
         uri: request.params.uri,
         mimeType: "application/json",
-        text: JSON.stringify(payload, null, 2),
+        text: serializeResource(request.params.uri, payload),
       },
     ],
   };
@@ -1186,7 +1208,12 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name } = request.params;
-  const args = request.params.arguments ?? {};
+  const args = normalizeToolArguments(name, request.params.arguments ?? {});
+  const argumentValidator = toolArgumentValidators.get(name);
+  if (!argumentValidator) return toolError("UNKNOWN_TOOL", name);
+  if (!argumentValidator(args)) {
+    return toolError("INVALID_ARGUMENTS", formatSchemaErrors(argumentValidator.errors));
+  }
   try {
     let result;
     switch (name) {
@@ -1270,17 +1297,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_clone_track_from_template":
         result = await voiceProfileService.cloneTrackFromTemplate(args);
         break;
-      default:
-        return toolError("UNKNOWN_TOOL", name);
     }
     return toolResult(result);
   } catch (error) {
     return toolError(
       typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
-      error instanceof Error ? error.message : String(error)
+      error instanceof Error ? error.message : String(error),
+      error?.details
     );
   }
 });
+
+function normalizeToolArguments(name, args) {
+  if (
+    ![
+      "sv_get_parameter_curve",
+      "sv_patch_parameter_curve",
+      "sv_patch_parameter_curves",
+      "sv_edit_phrase",
+    ].includes(name)
+  ) {
+    return args;
+  }
+  return normalizeLegacyRatioPositions(args);
+}
+
+// v0.3 曾公开 position:{ratio};严格 schema 改用具名字段后继续接受旧请求。
+function normalizeLegacyRatioPositions(value) {
+  if (Array.isArray(value)) return value.map(normalizeLegacyRatioPositions);
+  if (value === null || typeof value !== "object") return value;
+  const normalized = Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, normalizeLegacyRatioPositions(item)])
+  );
+  const legacyPosition = value.position;
+  if (
+    legacyPosition !== null &&
+    typeof legacyPosition === "object" &&
+    !Array.isArray(legacyPosition) &&
+    Object.keys(legacyPosition).length === 1 &&
+    Number.isFinite(legacyPosition.ratio) &&
+    normalized.ratio === undefined
+  ) {
+    normalized.position = "ratio";
+    normalized.ratio = legacyPosition.ratio;
+  }
+  return normalized;
+}
+
+function formatSchemaErrors(errors = []) {
+  return errors
+    .map((error) => {
+      const path = error.instancePath || "$";
+      if (error.keyword === "additionalProperties") {
+        return `${path}: unknown field ${error.params.additionalProperty}`;
+      }
+      if (error.keyword === "required") {
+        return `${path}: missing required field ${error.params.missingProperty}`;
+      }
+      return `${path}: ${error.message}`;
+    })
+    .join("; ");
+}
 
 function toolResult(result) {
   const value = result ?? null;
@@ -1295,11 +1372,15 @@ function toolResult(result) {
   };
 }
 
-function toolError(code, message) {
+function toolError(code, message, details) {
   const result = {
     ok: false,
     status: "failed",
-    error: { code, message },
+    error: {
+      code,
+      message,
+      ...(details && typeof details === "object" && !Array.isArray(details) ? details : {}),
+    },
   };
   return {
     content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -1325,6 +1406,17 @@ function readResource(uri) {
   if (parsed.protocol === "svcopilot:" && parsed.hostname === "capabilities") {
     return capabilities();
   }
+  if (
+    parsed.protocol === "svcopilot:" &&
+    parsed.hostname === "schemas" &&
+    parsed.pathname === "/music-workflow"
+  ) {
+    return musicWorkflowSchemaIndex();
+  }
+  if (parsed.protocol === "svcopilot:" && parsed.hostname === "schemas") {
+    const toolName = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+    return toolInputSchema(toolName);
+  }
   if (parsed.protocol !== "svapi:") throw new Error(`Unsupported resource URI: ${uri}`);
   if (parsed.hostname === "manifest" && (parsed.pathname === "" || parsed.pathname === "/")) {
     return apiManifest;
@@ -1347,7 +1439,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.4.0",
+    interfaceVersion: "0.4.1",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1361,6 +1453,9 @@ function capabilities() {
       maxProjectPageItems: MAX_PROJECT_PAGE_ITEMS,
       projectPageUnit: "traversalItems",
       rangeCapture: RANGE_CAPTURE_LIMITS,
+      rangeRequest: RANGE_REQUEST_LIMITS,
+      rangePage: RANGE_PAGE_LIMITS,
+      snapshotContextTtlMs: snapshotService.store.ttlMs,
       singleInFlight: true,
     },
     interfaces: {
@@ -1383,6 +1478,10 @@ function capabilities() {
       ],
       voice: ["sv_get_voice_profile", "sv_clone_track_from_template"],
       typedResultFormat: "typed-v2",
+      schemas: {
+        musicWorkflowIndex: "svcopilot://schemas/music-workflow",
+        toolTemplate: "svcopilot://schemas/{tool}",
+      },
     },
     knownLimits: {
       snapshotConsistency: "best-effort",
@@ -1406,6 +1505,40 @@ function capabilities() {
       },
     },
   };
+}
+
+function musicWorkflowSchemaIndex() {
+  const names = ["sv_patch_parameter_curves", "sv_edit_phrase"];
+  return {
+    schemaVersion: "0.4.1",
+    description:
+      "Read one per-tool resource to avoid client truncation of a combined schema payload.",
+    tools: names.map((name) => ({
+      name,
+      uri: `svcopilot://schemas/${name}`,
+    })),
+  };
+}
+
+function toolInputSchema(name) {
+  const tool = TOOLS.find(
+    (candidate) =>
+      candidate.name === name &&
+      ["sv_patch_parameter_curves", "sv_edit_phrase"].includes(candidate.name)
+  );
+  if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
+  return {
+    schemaVersion: "0.4.1",
+    tool: tool.name,
+    inputSchema: tool.inputSchema,
+  };
+}
+
+function serializeResource(uri, payload) {
+  // 部分 MCP 客户端会截断较大的 resource 文本；schema 使用紧凑 JSON 降低上下文成本。
+  return uri.startsWith("svcopilot://schemas/")
+    ? JSON.stringify(payload)
+    : JSON.stringify(payload, null, 2);
 }
 
 async function main() {

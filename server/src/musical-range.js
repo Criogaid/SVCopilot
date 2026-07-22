@@ -18,17 +18,31 @@ export const RANGE_CAPTURE_LIMITS = Object.freeze({
   automationPoints: 20_000,
   computedPitchFrames: 20_000,
 });
+export const RANGE_REQUEST_LIMITS = Object.freeze({
+  automationParameters: 16,
+  computedPitchFramesPerGroup: 2_000,
+});
+export const RANGE_PAGE_LIMITS = Object.freeze({
+  defaults: Object.freeze({
+    notes: 200,
+    attributes: 200,
+    automationPoints: 2_000,
+    computedPitchFrames: 2_000,
+    bytes: 48 * 1024,
+  }),
+  maximums: Object.freeze({
+    notes: 2_000,
+    attributes: 2_000,
+    automationPoints: 20_000,
+    computedPitchFrames: 20_000,
+    bytes: 60 * 1024,
+  }),
+});
 const MAX_CAPTURED_NOTES = RANGE_CAPTURE_LIMITS.notes;
 const MAX_CAPTURED_AUTOMATION_POINTS = RANGE_CAPTURE_LIMITS.automationPoints;
 const MAX_CAPTURED_COMPUTED_PITCH_FRAMES = RANGE_CAPTURE_LIMITS.computedPitchFrames;
 const DEFAULT_AUTOMATION_PARAMETERS = ["pitchDelta", "tension", "loudness", "breathiness"];
-const DEFAULT_BUDGETS = Object.freeze({
-  notes: 200,
-  attributes: 200,
-  automationPoints: 2_000,
-  computedPitchFrames: 2_000,
-  bytes: 48 * 1024,
-});
+const DEFAULT_BUDGETS = RANGE_PAGE_LIMITS.defaults;
 const RESPONSE_ENVELOPE_RESERVE_BYTES = 4 * 1024;
 const SUPPORTED_INCLUDES = new Set([
   "notes",
@@ -66,6 +80,7 @@ export class RangeSnapshotService {
   }
 
   async snapshot(request = {}) {
+    validateRangeRequestShape(request);
     if (request?.cursor !== undefined) return this._readCursor(request);
     const timer = new ServiceTiming({
       now: this.now,
@@ -105,9 +120,20 @@ export class RangeSnapshotService {
             contextId: stored.contextId,
             snapshotToken,
             observedAt: stored.observedAt,
+            contextExpiresAt: new Date(stored.expiresAt).toISOString(),
             consistency: "best-effort",
             data: null,
-            page: { complete: true, nextCursor: null },
+            page: {
+              complete: true,
+              nextCursor: null,
+              detailCursor: stored.storeCursor,
+              returned: {
+                notes: 0,
+                attributes: 0,
+                automationPoints: 0,
+                computedPitchFrames: 0,
+              },
+            },
             warnings,
             timings: timer.finish(),
           };
@@ -329,7 +355,6 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
           const sampling = computedPitchSampling(input.computedPitchSampling, {
             fromBlick,
             toBlick,
-            timeOffsetBlick: group.timeOffsetBlick,
           });
           if (
             capturedComputedPitchFrames + sampling.frames >
@@ -480,6 +505,7 @@ function formatStoredRangePage(stored, page, { changedSinceToken = false, timing
     snapshotToken: stored.snapshotToken,
     ...(changedSinceToken ? { changedSinceToken: true } : {}),
     observedAt: stored.observedAt,
+    contextExpiresAt: new Date(stored.expiresAt).toISOString(),
     consistency: "best-effort",
     data: page.data,
     page: page.page,
@@ -672,10 +698,11 @@ function storedCursor(stored, offset, kind) {
 
 function computedPitchSampling(request, range) {
   const frames = request.frames;
-  const startBlick = request.startBlick ?? Math.max(0, range.fromBlick - range.timeOffsetBlick);
-  const localEnd = Math.max(startBlick + 1, range.toBlick - range.timeOffsetBlick);
+  // 官方 API 要求 blickStart 使用 occurrence 的绝对 BLICK，不能减去 reference time offset。
+  const startBlick = request.startBlick ?? range.fromBlick;
+  const absoluteEnd = Math.max(startBlick + 1, range.toBlick);
   const intervalBlick =
-    request.intervalBlick ?? Math.max(1, Math.ceil((localEnd - startBlick) / frames));
+    request.intervalBlick ?? Math.max(1, Math.ceil((absoluteEnd - startBlick) / frames));
   return { startBlick, intervalBlick, frames };
 }
 
@@ -887,13 +914,83 @@ function normalizeRequest(request) {
   };
 }
 
+function validateRangeRequestShape(request) {
+  if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
+  assertKnownKeys(
+    request,
+    [
+      "scope",
+      "include",
+      "automationParameters",
+      "computedPitchSampling",
+      "budgets",
+      "responseMode",
+      "sinceToken",
+      "cursor",
+    ],
+    "request"
+  );
+  const hasScope = request.scope !== undefined;
+  const hasCursor = request.cursor !== undefined;
+  if (hasScope === hasCursor) {
+    throw codedError("INVALID_ARGUMENTS", "provide exactly one of scope or cursor");
+  }
+  if (hasCursor) {
+    if (Object.keys(request).some((key) => key !== "cursor")) {
+      throw codedError("INVALID_ARGUMENTS", "cursor reads accept only the cursor field");
+    }
+    return;
+  }
+  if (isRecord(request.scope)) {
+    assertKnownKeys(request.scope, ["kind", "trackIndices", "from", "to"], "scope");
+    validateMusicalPointKeys(request.scope.from, "scope.from");
+    validateMusicalPointKeys(request.scope.to, "scope.to");
+  }
+  if (isRecord(request.computedPitchSampling)) {
+    assertKnownKeys(
+      request.computedPitchSampling,
+      ["frames", "startBlick", "intervalBlick"],
+      "computedPitchSampling"
+    );
+  }
+  if (isRecord(request.budgets)) {
+    assertKnownKeys(
+      request.budgets,
+      ["notes", "attributes", "automationPoints", "computedPitchFrames", "bytes"],
+      "budgets"
+    );
+  }
+}
+
+function validateMusicalPointKeys(value, label) {
+  if (!isRecord(value)) return;
+  assertKnownKeys(value, ["bar", "beat"], label);
+  if (isRecord(value.beat)) {
+    assertKnownKeys(value.beat, ["numerator", "denominator"], `${label}.beat`);
+  }
+}
+
+function assertKnownKeys(value, allowed, label) {
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(value).filter((key) => !allowedSet.has(key));
+  if (unknown.length > 0) {
+    throw codedError("INVALID_ARGUMENTS", `${label} contains unknown field: ${unknown.join(", ")}`);
+  }
+}
+
 function normalizeComputedPitchSampling(value) {
   if (value === undefined) return { frames: 160 };
   if (!isRecord(value)) {
     throw codedError("INVALID_ARGUMENTS", "computedPitchSampling must be an object");
   }
   return {
-    frames: clampInteger(value.frames, 1, 2_000, 160, "computedPitchSampling.frames"),
+    frames: clampInteger(
+      value.frames,
+      1,
+      RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
+      160,
+      "computedPitchSampling.frames"
+    ),
     ...(value.startBlick === undefined
       ? {}
       : {
@@ -925,29 +1022,41 @@ function normalizeBudgets(value) {
   }
   const source = value ?? {};
   return {
-    notes: clampInteger(source.notes, 1, 2_000, DEFAULT_BUDGETS.notes, "budgets.notes"),
+    notes: clampInteger(
+      source.notes,
+      1,
+      RANGE_PAGE_LIMITS.maximums.notes,
+      DEFAULT_BUDGETS.notes,
+      "budgets.notes"
+    ),
     attributes: clampInteger(
       source.attributes,
       1,
-      2_000,
+      RANGE_PAGE_LIMITS.maximums.attributes,
       DEFAULT_BUDGETS.attributes,
       "budgets.attributes"
     ),
     automationPoints: clampInteger(
       source.automationPoints,
       1,
-      20_000,
+      RANGE_PAGE_LIMITS.maximums.automationPoints,
       DEFAULT_BUDGETS.automationPoints,
       "budgets.automationPoints"
     ),
     computedPitchFrames: clampInteger(
       source.computedPitchFrames,
       1,
-      20_000,
+      RANGE_PAGE_LIMITS.maximums.computedPitchFrames,
       DEFAULT_BUDGETS.computedPitchFrames,
       "budgets.computedPitchFrames"
     ),
-    bytes: clampInteger(source.bytes, 8_192, 60 * 1024, DEFAULT_BUDGETS.bytes, "budgets.bytes"),
+    bytes: clampInteger(
+      source.bytes,
+      8_192,
+      RANGE_PAGE_LIMITS.maximums.bytes,
+      DEFAULT_BUDGETS.bytes,
+      "budgets.bytes"
+    ),
   };
 }
 

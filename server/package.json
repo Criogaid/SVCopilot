@@ -1,6 +1,6 @@
 {
   "name": "sv-copilot-server",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "description": "Minimal MCP server for real-time control of Synthesizer V Studio 2 via a generic SV-API dispatcher.",
@@ -15,7 +15,8 @@
     "parse:sv-api": "node ../tools/parse-sv-api-docs.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ajv": "^8.17.1"
   },
   "engines": {
     "node": ">=18"

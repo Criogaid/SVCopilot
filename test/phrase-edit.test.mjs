@@ -5,7 +5,12 @@ import { PhraseEditService } from "../server/src/phrase-edit.js";
 
 const Q = 705600000;
 
-function createPhraseModel({ shared = false, quantizeVoice = false, failProcessing = false } = {}) {
+function createPhraseModel({
+  shared = false,
+  quantizeVoice = false,
+  failProcessing = false,
+  capturedNoteCount = null,
+} = {}) {
   let nextHandle = 1_000;
   let cloneCount = 0;
   const states = new Map();
@@ -90,6 +95,9 @@ function createPhraseModel({ shared = false, quantizeVoice = false, failProcessi
     },
     get voice() {
       return voice;
+    },
+    get cloneCount() {
+      return cloneCount;
     },
   };
 
@@ -252,6 +260,9 @@ function createPhraseModel({ shared = false, quantizeVoice = false, failProcessi
           }
           return state.points.map((point) => [...point]);
         }
+        if (method === "get") {
+          return state.points.find(([blick]) => blick === args[0])?.[1] ?? definition.defaultValue;
+        }
         if (method === "remove") {
           state.points = state.points.filter(([blick]) => blick < args[0] || blick > args[1]);
           return true;
@@ -263,6 +274,7 @@ function createPhraseModel({ shared = false, quantizeVoice = false, failProcessi
           state.points.sort((left, right) => left[0] - right[0]);
           return true;
         }
+        if (method === "simplify") return true;
       }
       throw new Error(`unsupported phrase call ${state.type}.${method}`);
     },
@@ -281,6 +293,8 @@ function createPhraseModel({ shared = false, quantizeVoice = false, failProcessi
     };
   });
   for (const fingerprint of fingerprints) delete fingerprint.attributes;
+  const capturedFingerprints =
+    capturedNoteCount === null ? fingerprints : fingerprints.slice(0, capturedNoteCount);
   const stored = {
     epoch: 1,
     contextId,
@@ -296,7 +310,7 @@ function createPhraseModel({ shared = false, quantizeVoice = false, failProcessi
           targetGroupUuid: "phrase-original",
           timeOffsetBlick: 4 * Q,
           sharedTargetOccurrences: shared ? [occurrenceId, `${contextId}:t:0:r:1`] : [occurrenceId],
-          noteFingerprints: fingerprints,
+          noteFingerprints: capturedFingerprints,
         },
       ],
     },
@@ -366,7 +380,7 @@ test("sv_edit_phrase dry-run verifies a detached clone without project mutations
 });
 
 test("sv_edit_phrase returns no_change without creating an empty Undo", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId, occurrenceId } = createPhraseModel({ capturedNoteCount: 1 });
   const result = await service.edit({
     target: { contextId, occurrenceId },
     curves: [
@@ -383,6 +397,35 @@ test("sv_edit_phrase returns no_change without creating an empty Undo", async ()
   assert.equal(result.status, "no_change");
   assert.equal(result.effects, "none");
   assert.equal(result.undo.expectedUserUndoSteps, 0);
+  assert.equal(model.undoCount, 0);
+  assert.equal(result.preflightMode, "live_non_structural");
+  assert.equal(result.verification.phase, "live_preflight");
+  assert.equal(result.changes.structure.countScope, "target_group");
+  assert.equal(result.changes.structure.initialNoteCount, 2);
+  assert.equal(result.changes.structure.finalNoteCount, 2);
+  assert.equal(result.changes.finalNoteCount, 2);
+  assert.equal(model.cloneCount, 0);
+});
+
+test("sv_edit_phrase keeps simplify on detached preflight because its effect is host-defined", async () => {
+  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const result = await service.edit({
+    target: { contextId, occurrenceId },
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q },
+        points: [{ blick: 0, value: 0 }],
+        simplifyThreshold: 0.1,
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.status, "no_change");
+  assert.equal(result.preflightMode, "detached_note_group");
+  assert.equal(model.cloneCount, 2);
   assert.equal(model.undoCount, 0);
 });
 
@@ -408,6 +451,8 @@ test("sv_edit_phrase commits note, structure, curve, and voice changes in one Un
   assert.equal(model.voice.paramTension, 0.4);
   assert.equal(model.voice.vocalModeParams.Clear, 0.5);
   assert.equal(result.target.targetSemantics, "shared_target_mutated_with_confirmation");
+  assert.equal(result.preflightMode, "detached_note_group");
+  assert.equal(model.cloneCount, 2);
   assert.deepEqual(snapshotService.deleted, [contextId]);
 });
 
@@ -464,6 +509,12 @@ test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mis
   });
   assert.equal(succeeded.ok, true, JSON.stringify(succeeded));
   assert.equal(succeeded.verification.evidence.voicePassed, true);
+  assert.equal(succeeded.verification.phase, "commit_readback");
+  assert.equal(succeeded.verification.evidence.expectedNoteCount, 2);
+  assert.equal(succeeded.verification.evidence.observedNoteCount, 2);
+  assert.equal(succeeded.preflightMode, "live_non_structural");
+  assert.equal(succeeded.target.targetSemantics, "occurrence_voice_mutated");
+  assert.equal(quantized.model.cloneCount, 0);
 
   const invalid = createPhraseModel();
   const rejected = await invalid.service.edit({
@@ -473,6 +524,46 @@ test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mis
   assert.equal(rejected.ok, false);
   assert.equal(rejected.error.code, "INVALID_ARGUMENTS");
   assert.equal(invalid.model.undoCount, 0);
+});
+
+test("sv_edit_phrase voice-only commit skips shared-target scanning and detached clones", async () => {
+  const shared = createPhraseModel({ shared: true });
+  const result = await shared.service.edit({
+    target: { contextId: shared.contextId, occurrenceId: shared.occurrenceId },
+    voicePatch: { paramTension: 0.4 },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.target.targetSemantics, "occurrence_voice_mutated");
+  assert.equal(result.target.knownTargetOccurrenceCount, 2);
+  assert.deepEqual(result.target.projectTargetOccurrences, []);
+  assert.equal(shared.model.cloneCount, 0);
+  assert.equal(shared.model.undoCount, 2);
+});
+
+test("sv_edit_phrase fast curve and voice path rolls journals back without a clone", async () => {
+  const fixture = createPhraseModel();
+  fixture.model.failSetVoiceOnce = true;
+  const result = await fixture.service.edit({
+    target: { contextId: fixture.contextId, occurrenceId: fixture.occurrenceId },
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q },
+        points: [{ blick: 0, value: 2 }],
+      },
+    ],
+    voicePatch: { paramTension: 0.4 },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.rollback.verified, true);
+  assert.equal(fixture.model.cloneCount, 0);
+  assert.equal(fixture.model.voice.paramTension, 0.2);
+  const group = fixture.model.states.get(fixture.model.originalGroup.__handle__);
+  assert.deepEqual(fixture.model.states.get(group.automations.loudness.__handle__).points, [[0, 0]]);
 });
 
 test("sv_edit_phrase does not roll back a verified commit when processing observation fails", async () => {

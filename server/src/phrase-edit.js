@@ -70,6 +70,13 @@ export class PhraseEditService {
         const resolved = await timer.measure("preflightReadMs", () =>
           resolveTarget(capture, host, this.snapshotService, input.target, {
             readOnly: input.dryRun,
+            scanSharedTargets:
+              !input.dryRun &&
+              (input.notePatches.length > 0 ||
+                input.structureOperations.length > 0 ||
+                input.curves.length > 0),
+            readVoice: input.voicePatch !== undefined,
+            readGeometry: input.curves.length > 0,
           })
         );
         prepared = await timer.measure("detachedPrepareMs", () =>
@@ -77,7 +84,18 @@ export class PhraseEditService {
         );
         if (input.dryRun) {
           if (
-            resolved.projectTargetOccurrences.length > 1 &&
+            input.notePatches.length > 0 ||
+            input.structureOperations.length > 0 ||
+            input.curves.length > 0
+          ) {
+            warnings.push({
+              code: "SHARED_TARGET_CHECK_DEFERRED",
+              message:
+                "Project-wide shared-target scanning is deferred to commit; dry-run remains side-effect free.",
+            });
+          }
+          if (
+            resolved.knownTargetOccurrenceCount > 1 &&
             input.target.allowSharedTargetMutation !== true
           ) {
             warnings.push({
@@ -107,7 +125,11 @@ export class PhraseEditService {
             effects: "none",
             boundaryCalls,
             processing: null,
-            verification: { attempted: true, passed: true, phase: "detached_preflight" },
+            verification: {
+              attempted: true,
+              passed: true,
+              phase: preflightVerificationPhase(prepared),
+            },
             warnings,
             timings: timer.finish(),
           });
@@ -216,9 +238,7 @@ export class PhraseEditService {
           mutationState.voiceWritten;
         if (!mutationAttempted) {
           return phraseFailure({
-            atomicity: input.atomic
-              ? "detached_preflight_live_journal_with_verified_compensation"
-              : "none",
+            atomicity: phraseAtomicity(input),
             error,
             status: "failed",
             effects: "none",
@@ -235,9 +255,7 @@ export class PhraseEditService {
             boundaryCalls += 1;
           });
           return phraseFailure({
-            atomicity: input.atomic
-              ? "detached_preflight_live_journal_with_verified_compensation"
-              : "none",
+            atomicity: phraseAtomicity(input),
             error,
             status: unknown ? "outcome_unknown" : "partial",
             effects: unknown ? "unknown" : "may_remain",
@@ -256,7 +274,7 @@ export class PhraseEditService {
           boundaryCalls += 1;
         });
         return phraseFailure({
-          atomicity: "detached_preflight_live_journal_with_verified_compensation",
+          atomicity: phraseAtomicity(input),
           error,
           status: rollback.verified ? "rolled_back" : "rollback_failed",
           effects: rollback.verified ? "reverted" : rollback.outcomeUnknown ? "unknown" : "may_remain",
@@ -278,7 +296,12 @@ async function resolveTarget(
   host,
   snapshotService,
   targetInput,
-  { readOnly = false } = {}
+  {
+    readOnly = false,
+    scanSharedTargets = true,
+    readVoice = true,
+    readGeometry = true,
+  } = {}
 ) {
   const stored = snapshotService.getContext(targetInput.contextId, host.epoch());
   if (stored.context?.kind !== "range") {
@@ -311,20 +334,21 @@ async function resolveTarget(
       `expected group UUID ${expectedUuid}, observed ${originalTargetUuid}`
     );
   }
-  const originalVoice = normalizeVoiceParameters(
-    await capture.call(reference, "getVoice", [], { resultFormat: "typed-v2" })
-  );
-  const projectTargetOccurrences = await scanTargetOccurrences(
-    capture,
-    roots.project,
-    originalTargetUuid
-  );
+  const originalVoice = readVoice
+    ? normalizeVoiceParameters(
+        await capture.call(reference, "getVoice", [], { resultFormat: "typed-v2" })
+      )
+    : null;
+  const projectTargetOccurrences = scanSharedTargets
+    ? await scanTargetOccurrences(capture, roots.project, originalTargetUuid)
+    : [];
   const knownSharedCount = Math.max(
     projectTargetOccurrences.length,
     occurrence.sharedTargetOccurrences?.length ?? 0
   );
   if (
     knownSharedCount > 1 &&
+    scanSharedTargets &&
     !readOnly &&
     targetInput.allowSharedTargetMutation !== true
   ) {
@@ -343,14 +367,25 @@ async function resolveTarget(
     originalTargetUuid,
     originalVoice,
     projectTargetOccurrences,
+    knownTargetOccurrenceCount: knownSharedCount,
+    mutatesSharedTarget: scanSharedTargets,
     occurrence,
     storedContext: stored,
-    groupTimeOffsetBlick: await capture.call(reference, "getTimeOffset"),
-    groupOnsetBlick: await capture.call(reference, "getOnset"),
+    groupTimeOffsetBlick: readGeometry
+      ? await capture.call(reference, "getTimeOffset")
+      : occurrence.timeOffsetBlick,
+    groupOnsetBlick: readGeometry ? await capture.call(reference, "getOnset") : null,
   };
 }
 
 async function prepareDetachedPhrase(capture, resolved, input) {
+  if (
+    input.notePatches.length === 0 &&
+    input.structureOperations.length === 0 &&
+    input.curves.every((curve) => curve.simplifyThreshold === undefined)
+  ) {
+    return prepareNonStructuralPhrase(capture, resolved, input);
+  }
   await verifyContextFingerprints(capture, resolved);
   const backup = await capture.call(resolved.originalTarget, "clone", [], {
     inferredType: "NoteGroup",
@@ -433,6 +468,49 @@ async function prepareDetachedPhrase(capture, resolved, input) {
       !jsonEqual(backupNotes, finalNotes) ||
       curvesChanged ||
       voice.changed,
+    preflightMode: "detached_note_group",
+  };
+}
+
+async function prepareNonStructuralPhrase(capture, resolved, input) {
+  const liveTarget = {
+    roots: resolved.roots,
+    reference: resolved.reference,
+    group: resolved.originalTarget,
+    groupUuid: resolved.originalTargetUuid,
+    groupTimeOffsetBlick: resolved.groupTimeOffsetBlick,
+    groupOnsetBlick: resolved.groupOnsetBlick,
+    contextOccurrence: resolved.occurrence,
+    storedContext: resolved.storedContext,
+  };
+  const liveCurvePlans = await prepareCurves(capture, liveTarget, input.curves);
+  for (const plan of liveCurvePlans) {
+    plan.verification = { attempted: false, passed: null, phase: "live_preflight" };
+  }
+  const voice = planVoicePatch(resolved.originalVoice, input.voicePatch);
+  const noteCount = await capture.call(resolved.originalTarget, "getNumNotes");
+  return {
+    resolved,
+    clone: null,
+    cloneUuid: null,
+    backup: null,
+    backupNotes: null,
+    finalNotes: null,
+    detachedTarget: null,
+    curvePlans: liveCurvePlans,
+    liveCurvePlans,
+    notePlan: { requested: 0, changedNotes: 0, diff: [] },
+    structurePlan: {
+      operations: [],
+      initialNoteCount: noteCount,
+      finalNoteCount: noteCount,
+      countScope: "target_group",
+    },
+    voice,
+    finalNoteCount: noteCount,
+    hasChanges:
+      liveCurvePlans.some((plan) => !jsonEqual(plan.journal, plan.planned)) || voice.changed,
+    preflightMode: "live_non_structural",
   };
 }
 
@@ -626,7 +704,12 @@ async function applyStructureOperations(
       `expected ${expectedNoteCount} notes after structure edits, observed ${observedNoteCount}`
     );
   }
-  return { operations: results, initialNoteCount, finalNoteCount: observedNoteCount };
+  return {
+    operations: results,
+    initialNoteCount,
+    finalNoteCount: observedNoteCount,
+    countScope: "target_group",
+  };
 }
 
 function planVoicePatch(original, patch) {
@@ -665,11 +748,18 @@ async function verifyCommittedPhrase(capture, resolved, prepared) {
     inferredType: "NoteGroup",
   });
   const observedUuid = await capture.call(observedTarget, "getUUID");
-  const observedNotes = await readGroupNoteStates(capture, observedTarget);
-  const observedVoice = normalizeVoiceParameters(
-    await capture.call(resolved.reference, "getVoice", [], { resultFormat: "typed-v2" })
-  );
-  const voicePassed = !prepared.voice.changed || patchMatches(prepared.voice.planned, observedVoice, prepared.voice.diff);
+  const observedNotes =
+    prepared.finalNotes === null ? null : await readGroupNoteStates(capture, observedTarget);
+  const observedNoteCount =
+    observedNotes?.length ?? await capture.call(observedTarget, "getNumNotes");
+  const observedVoice = prepared.voice.changed
+    ? normalizeVoiceParameters(
+        await capture.call(resolved.reference, "getVoice", [], { resultFormat: "typed-v2" })
+      )
+    : null;
+  const voicePassed =
+    !prepared.voice.changed ||
+    patchMatches(prepared.voice.planned, observedVoice, prepared.voice.diff);
   const curveChecks = [];
   for (const plan of prepared.liveCurvePlans) {
     const automation = await capture.call(observedTarget, "getParameter", [plan.typeName], {
@@ -687,12 +777,16 @@ async function verifyCommittedPhrase(capture, resolved, prepared) {
       plan.simplifyThreshold,
       observed.truncated
     );
+    plan.verification = verification;
     curveChecks.push({ parameter: plan.typeName, passed: verification.passed, evidence: verification.evidence });
   }
-  const notesPassed = jsonEqual(observedNotes, prepared.finalNotes);
+  const notesPassed =
+    observedNoteCount === prepared.finalNoteCount &&
+    (prepared.finalNotes === null || jsonEqual(observedNotes, prepared.finalNotes));
   const curvesPassed = curveChecks.every((check) => check.passed);
   return {
     attempted: true,
+    phase: "commit_readback",
     passed:
       observedUuid === resolved.originalTargetUuid &&
       voicePassed &&
@@ -702,7 +796,7 @@ async function verifyCommittedPhrase(capture, resolved, prepared) {
       expectedTargetUuid: resolved.originalTargetUuid,
       observedTargetUuid: observedUuid,
       expectedNoteCount: prepared.finalNoteCount,
-      observedNoteCount: observedNotes.length,
+      observedNoteCount,
       voicePassed,
       notesPassed,
       curvesPassed,
@@ -885,23 +979,27 @@ function phraseSuccess(options) {
     ok: true,
     status,
     effects,
-    atomicity: input.atomic
-      ? "detached_preflight_live_journal_with_verified_compensation"
-      : "none",
+    atomicity: phraseAtomicity(input),
+    preflightMode: prepared.preflightMode,
     target: {
       contextId: input.target.contextId,
       occurrenceId: input.target.occurrenceId,
       trackIndex: resolved.occurrence.trackIndex,
       groupIndex: resolved.occurrence.groupIndex,
       groupUuid: resolved.originalTargetUuid,
-      detachedPlanUuid: prepared.cloneUuid,
+      ...(prepared.cloneUuid ? { detachedPlanUuid: prepared.cloneUuid } : {}),
       projectTargetOccurrences: resolved.projectTargetOccurrences,
+      knownTargetOccurrenceCount: resolved.knownTargetOccurrenceCount,
       targetSemantics:
-        effects === "verified"
-          ? resolved.projectTargetOccurrences.length > 1
+        !resolved.mutatesSharedTarget && prepared.voice.changed && prepared.curvePlans.length === 0
+          ? effects === "verified"
+            ? "occurrence_voice_mutated"
+            : "occurrence_voice_observed"
+          : effects === "verified"
+          ? resolved.knownTargetOccurrenceCount > 1
             ? "shared_target_mutated_with_confirmation"
             : "single_target_mutated"
-          : resolved.projectTargetOccurrences.length > 1
+          : resolved.knownTargetOccurrenceCount > 1
             ? "shared_target_observed"
             : "single_target_observed",
     },
@@ -910,7 +1008,11 @@ function phraseSuccess(options) {
       boundaryCallsCompleted: boundaryCalls,
       expectedUserUndoSteps: boundaryCalls === 2 ? 1 : boundaryCalls === 0 ? 0 : null,
     },
-    verification: verification ?? { attempted: true, passed: true, phase: "detached_preflight" },
+    verification: verification ?? {
+      attempted: true,
+      passed: true,
+      phase: preflightVerificationPhase(prepared),
+    },
     ...(processing
       ? {
           processing: {
@@ -924,6 +1026,12 @@ function phraseSuccess(options) {
     warnings,
     timings,
   };
+}
+
+function preflightVerificationPhase(prepared) {
+  return prepared.preflightMode === "detached_note_group"
+    ? "detached_preflight"
+    : "live_preflight";
 }
 
 function phraseFailure(options) {
@@ -959,7 +1067,7 @@ function phraseChanges(prepared, responseMode) {
   const curves = prepared.curvePlans.map((plan) => ({
     parameter: plan.typeName,
     points: plan.planned.length,
-    verified: plan.verification.passed,
+    verified: plan.verification?.passed ?? null,
     ...(responseMode === "verbose"
       ? {
           resolvedPositions: plan.resolvedInputPoints,
@@ -981,6 +1089,12 @@ function phraseChanges(prepared, responseMode) {
     },
     finalNoteCount: prepared.finalNoteCount,
   };
+}
+
+function phraseAtomicity(input) {
+  return input.atomic
+    ? "operation_specific_preflight_live_journal_with_verified_compensation"
+    : "none";
 }
 
 function validationFailure(error, timings) {

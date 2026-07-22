@@ -7,6 +7,7 @@ import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/es
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 
 const Q = 705600000;
+const MAX_SCHEMA_RESOURCE_CHARS = 16_000;
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const productDir = path.resolve(testDir, "..", "..");
 const serverScript = path.join(productDir, "SVCopilot", "server", "src", "index.js");
@@ -83,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.4.0");
+  assert.equal(client.getServerVersion()?.version, "0.4.1");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -112,18 +113,17 @@ try {
   const rangeTool = listed.tools.find((tool) => tool.name === "sv_snapshot_range");
   const auditionTool = listed.tools.find((tool) => tool.name === "sv_start_audition");
   assert.equal(waitTool.inputSchema.properties.requireNonEmpty.default, false);
+  assert.equal(waitTool.inputSchema.properties.occurrenceId.type, "string");
+  assert.equal(waitTool.inputSchema.additionalProperties, false);
   assert.equal(setLyricsTool.inputSchema.properties.requireNonEmptyPhonemes.default, false);
   assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
   assert.equal(batchCurveTool.inputSchema.properties.responseMode.default, "standard");
-  const directCurveTarget = batchCurveTool.inputSchema.properties.target.anyOf.find(
-    (schema) => schema.properties?.trackIndex
-  );
-  const contextCurveTarget = batchCurveTool.inputSchema.properties.target.anyOf.find(
-    (schema) => schema.properties?.contextId
-  );
-  assert.ok(directCurveTarget.properties.expectedGroupUuid);
-  assert.ok(contextCurveTarget.properties.occurrenceId);
-  assert.ok(contextCurveTarget.properties.allowSharedTargetMutation);
+  const curveTarget = batchCurveTool.inputSchema.properties.target;
+  assert.ok(curveTarget.properties.trackIndex);
+  assert.ok(curveTarget.properties.expectedGroupUuid);
+  assert.ok(curveTarget.properties.contextId);
+  assert.ok(curveTarget.properties.occurrenceId);
+  assert.ok(curveTarget.properties.allowSharedTargetMutation);
   assert.ok(phraseTool);
   assert.ok(phraseTool.inputSchema.properties.notePatches);
   assert.ok(phraseTool.inputSchema.properties.structureOperations);
@@ -132,11 +132,52 @@ try {
   assert.match(phraseTool.description, /does not allow changing an existing reference target/);
   assert.ok(rangeTool.inputSchema.properties.budgets.properties.automationPoints);
   assert.ok(rangeTool.inputSchema.properties.computedPitchSampling);
+  assert.equal(rangeTool.inputSchema.additionalProperties, false);
+  assert.equal(rangeTool.inputSchema.anyOf, undefined);
+  assert.equal(batchCurveTool.inputSchema.properties.target.type, "object");
+  assert.equal(batchCurveTool.inputSchema.properties.target.anyOf, undefined);
+  assert.equal(
+    batchCurveTool.inputSchema.properties.curves.items.properties.points.items.oneOf,
+    undefined
+  );
+  assert.deepEqual(
+    batchCurveTool.inputSchema.properties.curves.items.properties.points.items.properties.anchor
+      .properties.position.enum,
+    ["onset", "center", "end", "ratio"]
+  );
   assert.equal(auditionTool.inputSchema.properties.autoStop.default, false);
+
+  const invalidStructureOperation = parseToolError(
+    await client.callTool({
+      name: "sv_edit_phrase",
+      arguments: {
+        target: { contextId: "ctx_schema", occurrenceId: "occ_schema" },
+        structureOperations: [{ op: "splitt" }],
+      },
+    })
+  );
+  assert.equal(invalidStructureOperation.error.code, "INVALID_ARGUMENTS");
+  assert.match(invalidStructureOperation.error.message, /tag "op"/);
+  assert.doesNotMatch(invalidStructureOperation.error.message, /must be equal to constant/);
 
   const resources = await client.listResources();
   assert.ok(resources.resources.some((resource) => resource.uri === "svapi://manifest"));
   assert.ok(resources.resources.some((resource) => resource.uri === "svcopilot://capabilities"));
+  assert.ok(
+    resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/music-workflow"
+    )
+  );
+  assert.ok(
+    resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/sv_edit_phrase"
+    )
+  );
+  assert.ok(
+    resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/sv_patch_parameter_curves"
+    )
+  );
   const manifest = parseResource(await client.readResource({ uri: "svapi://manifest" }));
   assert.ok(manifest.summary.methodOverloadCount >= 200);
   const capabilities = parseResource(
@@ -158,18 +199,71 @@ try {
   assert.equal(capabilities.knownLimits.audioRendering.status, "capability_blocked");
   assert.ok(capabilities.interfaces.music.includes("sv_edit_phrase"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
-  assert.equal(capabilities.interfaceVersion, "0.4.0");
+  assert.equal(
+    capabilities.interfaces.schemas.musicWorkflowIndex,
+    "svcopilot://schemas/music-workflow"
+  );
+  assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
+  assert.equal(capabilities.interfaceVersion, "0.4.1");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
     automationPoints: 20000,
     computedPitchFrames: 20000,
   });
+  assert.equal(capabilities.limits.rangeRequest.computedPitchFramesPerGroup, 2000);
+  assert.equal(capabilities.limits.rangePage.defaults.computedPitchFrames, 2000);
+  assert.equal(capabilities.limits.rangePage.maximums.computedPitchFrames, 20000);
+  assert.equal(capabilities.limits.snapshotContextTtlMs, 5 * 60_000);
   assert.equal(capabilities.knownLimits.singer.installedCatalogObservable, false);
+  const workflowSchemaIndex = parseResource(
+    await client.readResource({ uri: "svcopilot://schemas/music-workflow" })
+  );
+  assert.deepEqual(
+    workflowSchemaIndex.tools.map((tool) => tool.name),
+    ["sv_patch_parameter_curves", "sv_edit_phrase"]
+  );
+  const phraseResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_edit_phrase",
+  });
+  const batchResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_patch_parameter_curves",
+  });
+  console.log("[client] workflow schema resource chars", {
+    sv_edit_phrase: phraseResource.contents[0].text.length,
+    sv_patch_parameter_curves: batchResource.contents[0].text.length,
+  });
+  assert.ok(phraseResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  assert.ok(batchResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const phraseSchema = parseResource(phraseResource).inputSchema;
+  const batchSchema = parseResource(batchResource).inputSchema;
+  assert.equal(
+    phraseSchema.properties.notePatches.items.properties.set.properties.pitch.maximum,
+    127
+  );
+  assert.deepEqual(
+    phraseSchema.properties.structureOperations.items.oneOf.map(
+      (schema) => schema.properties.op.const
+    ),
+    ["insert", "delete", "split", "merge"]
+  );
+  assert.equal(
+    batchSchema.properties.curves.items.properties.points.items.properties.value.type,
+    "number"
+  );
+  assert.equal(
+    batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
+    "object"
+  );
   const resourceTemplates = await client.listResourceTemplates();
   assert.ok(
     resourceTemplates.resourceTemplates.some(
       (template) => template.uriTemplate === "svapi://class/{class}"
+    )
+  );
+  assert.ok(
+    resourceTemplates.resourceTemplates.some(
+      (template) => template.uriTemplate === "svcopilot://schemas/{tool}"
     )
   );
   const apiClass = parseResource(await client.readResource({ uri: "svapi://class/Note" }));
@@ -434,6 +528,39 @@ try {
   assert.match(rangeSnapshot.data.notes[0].id, /:n:0$/);
   assert.ok(Number.isFinite(rangeSnapshot.timings.serviceTotalMs));
 
+  const rangeProcessing = parseToolResult(
+    await client.callTool({
+      name: "sv_wait_for_processing",
+      arguments: {
+        contextId: rangeSnapshot.contextId,
+        occurrenceId: rangeSnapshot.data.tracks[0].groups[0].occurrenceId,
+        kind: "phonemes",
+        timeoutMs: 0,
+      },
+    })
+  );
+  assert.equal(rangeProcessing.ok, true);
+  assert.equal(rangeProcessing.data.state, "ready");
+  assert.equal(rangeProcessing.data.evidence.expectedNotes, 2);
+  assert.equal(
+    rangeProcessing.target.occurrenceId,
+    rangeSnapshot.data.tracks[0].groups[0].occurrenceId
+  );
+
+  const invalidRangeArguments = parseToolError(
+    await client.callTool({
+      name: "sv_snapshot_range",
+      arguments: {
+        scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 2 } },
+        responseMod: "compact",
+        definitelyUnknownOption: true,
+      },
+    })
+  );
+  assert.equal(invalidRangeArguments.ok, false);
+  assert.equal(invalidRangeArguments.error.code, "INVALID_ARGUMENTS");
+  assert.match(invalidRangeArguments.error.message, /responseMod/);
+
   const anchorDryRun = parseToolResult(
     await client.callTool({
       name: "sv_patch_parameter_curves",
@@ -452,6 +579,21 @@ try {
                 anchor: { noteId: rangeSnapshot.data.notes[0].id, position: "onset" },
                 value: 1,
               },
+              {
+                anchor: {
+                  noteId: rangeSnapshot.data.notes[0].id,
+                  position: "ratio",
+                  ratio: 0.5,
+                },
+                value: 1.5,
+              },
+              {
+                anchor: {
+                  noteId: rangeSnapshot.data.notes[1].id,
+                  position: { ratio: 0.5 },
+                },
+                value: 2,
+              },
             ],
           },
         ],
@@ -461,7 +603,13 @@ try {
   );
   assert.equal(anchorDryRun.status, "dry_run");
   assert.equal(anchorDryRun.curves[0].resolvedPositions[0].localBlick, 0);
-  assert.ok(anchorDryRun.warnings.some((warning) => warning.code === "SHARED_TARGET_DRY_RUN"));
+  assert.deepEqual(
+    anchorDryRun.curves[0].resolvedPositions.map((point) => point.localBlick),
+    [0, Q / 2, Q + Q / 2]
+  );
+  assert.ok(
+    anchorDryRun.warnings.some((warning) => warning.code === "SHARED_TARGET_CHECK_DEFERRED")
+  );
   const rangeAgain = parseToolResult(
     await client.callTool({
       name: "sv_snapshot_range",
@@ -474,6 +622,16 @@ try {
   );
   assert.equal(rangeAgain.status, "no_change");
   assert.equal(rangeAgain.data, null);
+  assert.match(rangeAgain.contextExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.ok(rangeAgain.page.detailCursor);
+  const refreshedRangeIdentity = parseToolResult(
+    await client.callTool({
+      name: "sv_snapshot_range",
+      arguments: { cursor: rangeAgain.page.detailCursor },
+    })
+  );
+  assert.equal(refreshedRangeIdentity.contextId, rangeAgain.contextId);
+  assert.match(refreshedRangeIdentity.data.notes[0].id, new RegExp(`^${rangeAgain.contextId}`));
 
   // 参数曲线：读取（双坐标 + definition），replace 写入 + 精确读回验证。
   const curve = parseToolResult(

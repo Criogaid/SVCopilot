@@ -216,7 +216,7 @@ async function executeCurveTransaction(capture, input, clock) {
       transaction.target = await resolveCurveTarget(capture, input.target, {
         ...clock,
         readOnly: input.dryRun,
-        scanSharedTargets: input.dryRun,
+        scanSharedTargets: false,
       });
       if (
         input.target.expectedGroupUuid !== undefined &&
@@ -295,6 +295,13 @@ async function executeCurveTransaction(capture, input, clock) {
       transaction.ok = true;
       transaction.status = "dry_run";
       for (const plan of transaction.plans) plan.status = "planned";
+      if (input.target.contextId) {
+        transaction.warnings.push({
+          code: "SHARED_TARGET_CHECK_DEFERRED",
+          message:
+            "Project-wide shared-target scanning is deferred to commit; dry-run remains side-effect free.",
+        });
+      }
       if (
         Math.max(
           transaction.target.sharedTargetOccurrences.length,
@@ -1901,7 +1908,11 @@ function normalizeNoteAnchor(anchor, index) {
   if (!isRecord(anchor) || typeof anchor.noteId !== "string" || !anchor.noteId) {
     throw codedError("INVALID_ARGUMENTS", `${label}.noteId must be a non-empty string`);
   }
-  const position = normalizeRelativePosition(anchor.position, label, ["onset", "center", "end"]);
+  const position = normalizeRelativePosition(
+    anchor.position === "ratio" ? { ratio: anchor.ratio } : anchor.position,
+    label,
+    ["onset", "center", "end"]
+  );
   const offset = normalizeAnchorOffset(anchor.offset, label);
   return { noteId: anchor.noteId, position, offset };
 }
@@ -1921,7 +1932,11 @@ function normalizeNoteGap(gap, index) {
   return {
     afterNoteId: gap.afterNoteId,
     beforeNoteId: gap.beforeNoteId,
-    position: normalizeRelativePosition(gap.position, label, ["start", "center", "end"]),
+    position: normalizeRelativePosition(
+      gap.position === "ratio" ? { ratio: gap.ratio } : gap.position,
+      label,
+      ["start", "center", "end"]
+    ),
     offset: normalizeAnchorOffset(gap.offset, label),
   };
 }

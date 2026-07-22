@@ -521,6 +521,79 @@ test("ProcessingService derives expected notes from a group snapshot context", a
   assert.equal(result.data.evidence.computedItems, 2);
 });
 
+test("ProcessingService resolves single and explicit range occurrences", async () => {
+  const model = createSynthModel();
+  const callHost = model.host.call;
+  let noteGetterCalls = 0;
+  model.host.call = async (request) => {
+    if (
+      model.handles.notes.some((note) => note.__handle__ === request.handle?.__handle__) &&
+      request.method.startsWith("get")
+    ) {
+      noteGetterCalls += 1;
+    }
+    return callHost(request);
+  };
+  const session = { withExclusive: (task) => task(model.host) };
+  const store = new SnapshotStore({ now: () => 1000 });
+  const snapshots = new SnapshotService(session, { store, now: () => 1000 });
+  const stored = store.create({
+    epoch: 1,
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrenceId = `${stored.contextId}:t:0:r:0`;
+  stored.context.occurrences.push({
+    occurrenceId,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "group-1",
+  });
+  const processing = new ProcessingService(session, snapshots, {
+    sleepFn: async () => {},
+    now: () => 1000,
+  });
+
+  const automatic = await processing.wait({
+    contextId: stored.contextId,
+    kind: "phonemes",
+    timeoutMs: 0,
+  });
+  assert.equal(automatic.ok, true);
+  assert.equal(automatic.target.occurrenceId, occurrenceId);
+  assert.equal(automatic.target.groupUuid, "group-1");
+  assert.equal(automatic.data.evidence.expectedNotes, 2);
+
+  const secondOccurrenceId = `${stored.contextId}:t:0:r:1`;
+  stored.context.occurrences.push({
+    occurrenceId: secondOccurrenceId,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "group-1",
+  });
+  await assert.rejects(
+    processing.wait({ contextId: stored.contextId, kind: "phonemes", timeoutMs: 0 }),
+    (error) => {
+      assert.equal(error.code, "AMBIGUOUS_CONTEXT");
+      assert.deepEqual(
+        error.details.candidateOccurrences.map((candidate) => candidate.occurrenceId),
+        [occurrenceId, secondOccurrenceId]
+      );
+      return true;
+    }
+  );
+
+  const explicit = await processing.wait({
+    contextId: stored.contextId,
+    occurrenceId: secondOccurrenceId,
+    kind: "phonemes",
+    timeoutMs: 0,
+  });
+  assert.equal(explicit.ok, true);
+  assert.equal(explicit.target.occurrenceId, secondOccurrenceId);
+  assert.equal(explicit.data.evidence.computedItems, 2);
+  assert.equal(noteGetterCalls, 0);
+});
+
 test("HostSession classifies stable host failures", async () => {
   class ErrorBridge extends EventEmitter {
     getStatus() {

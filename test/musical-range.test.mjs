@@ -40,6 +40,7 @@ function createRangeModel() {
   ];
   const model = {
     hostCalls: [],
+    computedPitchCalls: [],
     fetchedNotesOfOutOfRangeGroup: false,
     secondReferenceInRange: false,
     noteState,
@@ -67,6 +68,7 @@ function createRangeModel() {
       if (id === h.sv.__handle__) {
         if (method === "getPhonemesForGroup") return ["d ow", "r ey", "m iy", "f aa"];
         if (method === "getComputedPitchForGroup") {
+          model.computedPitchCalls.push(args);
           return Array.from({ length: args[3] }, (_, index) => 60 + index / 100);
         }
       }
@@ -307,11 +309,21 @@ test("range snapshot token is stable and sinceToken returns no_change", async ()
   const service = createService(model);
   const request = { scope: { kind: "range", from: { bar: 1 }, to: { bar: 4 } } };
   const first = await service.snapshot(request);
+  const hostCallsAfterFirst = model.hostCalls.length;
   const second = await service.snapshot({ ...request, sinceToken: first.snapshotToken });
+  const hostCallsAfterRefresh = model.hostCalls.length;
 
   assert.equal(second.status, "no_change");
   assert.equal(second.data, null);
   assert.equal(second.snapshotToken, first.snapshotToken);
+  assert.notEqual(second.contextId, first.contextId);
+  assert.match(second.contextExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.ok(second.page.detailCursor);
+  const identityPage = await service.snapshot({ cursor: second.page.detailCursor });
+  assert.equal(identityPage.contextId, second.contextId);
+  assert.ok(identityPage.data.notes.every((note) => note.id.startsWith(second.contextId)));
+  assert.ok(hostCallsAfterRefresh > hostCallsAfterFirst);
+  assert.equal(model.hostCalls.length, hostCallsAfterRefresh);
 
   const different = await service.snapshot({
     scope: { kind: "range", from: { bar: 1 }, to: { bar: 5 } },
@@ -319,6 +331,44 @@ test("range snapshot token is stable and sinceToken returns no_change", async ()
   });
   assert.equal(different.status, "succeeded");
   assert.equal(different.changedSinceToken, true);
+});
+
+test("range snapshot rejects unknown fields at every request level", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const baseScope = { kind: "range", from: { bar: 1 }, to: { bar: 2 } };
+  for (const request of [
+    { scope: baseScope, responseMod: "compact" },
+    { scope: baseScope, definitelyUnknownOption: true },
+    { scope: { ...baseScope, trackIndice: [0] } },
+    {
+      scope: {
+        ...baseScope,
+        from: { bar: 1, beat: { numerator: 1, denominator: 2, typo: true } },
+      },
+    },
+    { scope: baseScope, computedPitchSampling: { frames: 4, framez: 4 } },
+    { scope: baseScope, budgets: { notes: 1, notez: 1 } },
+  ]) {
+    await assert.rejects(
+      service.snapshot(request),
+      (error) => error.code === "INVALID_ARGUMENTS" && /unknown field/.test(error.message)
+    );
+  }
+  assert.equal(model.hostCalls.length, 0);
+});
+
+test("range snapshot rejects mixed cursor and host-read arguments", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const first = await service.snapshot({
+    scope: { kind: "range", from: { bar: 1 }, to: { bar: 2 } },
+    responseMode: "compact",
+  });
+  await assert.rejects(
+    service.snapshot({ cursor: first.page.detailCursor, responseMode: "compact" }),
+    (error) => error.code === "INVALID_ARGUMENTS" && /cursor reads/.test(error.message)
+  );
 });
 
 test("range snapshot validates scope and track indices", async () => {
@@ -407,6 +457,28 @@ test("range snapshot budgets page captured data without repeating host reads", a
   assert.equal(model.hostCalls.length, hostCallCount);
   assert.equal(second.contextId, first.contextId);
   assert.equal(second.snapshotToken, first.snapshotToken);
+});
+
+test("range snapshot samples computed pitch with absolute BLICK for offset occurrences", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const result = await service.snapshot({
+    scope: {
+      kind: "range",
+      trackIndices: [0],
+      from: { bar: 2 },
+      to: { bar: 4 },
+    },
+    include: ["computedPitch"],
+    computedPitchSampling: { frames: 4 },
+  });
+
+  assert.equal(model.computedPitchCalls.length, 1);
+  const [, startBlick, intervalBlick, frames] = model.computedPitchCalls[0];
+  assert.equal(startBlick, BAR_4_4);
+  assert.equal(intervalBlick, BAR_4_4 / 2);
+  assert.equal(frames, 4);
+  assert.equal(result.data.computedPitch[0].startBlick, BAR_4_4);
 });
 
 test("range snapshot enforces global Automation and computed-pitch capture limits", async () => {
