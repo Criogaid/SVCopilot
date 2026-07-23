@@ -12,7 +12,7 @@ export async function resolveContextTarget(
     if (!acceptRange) {
       throw codedError(
         "INVALID_CONTEXT",
-        "this tool does not accept range contexts; use a group or selection snapshot from sv_snapshot"
+        "sv_set_lyrics only accepts group or selection contexts from sv_snapshot; for range contexts use sv_patch_notes for per-note lyrics or sv_edit_phrase for atomic phrase edits"
       );
     }
     return resolveRangeContextTarget(host, stored, { verify, occurrenceId });

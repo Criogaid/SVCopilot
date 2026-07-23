@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.4.3");
+  assert.equal(client.getServerVersion()?.version, "0.4.4");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -102,10 +102,25 @@ try {
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
   const runTool = listed.tools.find((tool) => tool.name === "sv_run");
   assert.match(runTool.description, /#\/steps\/track\/result/);
+  assert.match(runTool.description, /caller-owned/);
   assert.match(runTool.inputSchema.properties.steps.items.properties.target.description, /#\/roots\/project/);
   assert.ok(runTool.inputSchema.properties.steps.items.properties.verifiesStep);
+  assert.equal(runTool.inputSchema.properties.steps.items.additionalProperties, false);
+  assert.equal(
+    runTool.inputSchema.properties.steps.items.properties.retainResult.default,
+    false
+  );
+  assert.equal(runTool.inputSchema.properties.steps.items.properties.return, undefined);
+  assert.match(
+    runTool.inputSchema.properties.steps.items.properties.retainResult.description,
+    /sv_free/
+  );
+  assert.match(runTool.inputSchema.properties.exports.description, /sv_free/);
   const waitTool = listed.tools.find((tool) => tool.name === "sv_wait_for_processing");
   const setLyricsTool = listed.tools.find((tool) => tool.name === "sv_set_lyrics");
+  const cloneTrackTool = listed.tools.find(
+    (tool) => tool.name === "sv_clone_track_from_template"
+  );
   const batchCurveTool = listed.tools.find(
     (tool) => tool.name === "sv_patch_parameter_curves"
   );
@@ -121,6 +136,8 @@ try {
   assert.equal(waitTool.inputSchema.properties.minimumObservedFrames.minimum, 1);
   assert.equal(waitTool.inputSchema.properties.minimumObservedFrames.maximum, 2_000);
   assert.equal(setLyricsTool.inputSchema.properties.requireNonEmptyPhonemes.default, false);
+  assert.match(cloneTrackTool.description, /not an isolated musical-data fork/);
+  assert.match(cloneTrackTool.description, /sharedTargetGroups/);
   assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
   assert.equal(batchCurveTool.inputSchema.properties.responseMode.default, "standard");
   const curveTarget = batchCurveTool.inputSchema.properties.target;
@@ -213,7 +230,7 @@ try {
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.4.3");
+  assert.equal(capabilities.interfaceVersion, "0.4.4");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -317,7 +334,7 @@ try {
             target: { $ref: "#/steps/track/result" },
             method: "getName",
             expect: { operator: "equals", value: "Pipe Vocal" },
-            return: true,
+            retainResult: true,
           },
         ],
         exports: { name: { $ref: "#/steps/name/result" } },
@@ -326,6 +343,67 @@ try {
   );
   assert.equal(workflow.ok, true);
   assert.equal(workflow.exports.name, "Pipe Vocal");
+  assert.deepEqual(workflow.handleOwnership.returnedHandles, []);
+  assert.equal(workflow.handleOwnership.callerMustFree, false);
+
+  const legacyReturn = parseToolError(
+    await client.callTool({
+      name: "sv_run",
+      arguments: {
+        mode: "read",
+        steps: [
+          {
+            id: "host",
+            op: "call",
+            method: "getHostInfo",
+            return: true,
+          },
+        ],
+      },
+    })
+  );
+  assert.equal(legacyReturn.error.code, "INVALID_ARGUMENTS");
+  assert.match(legacyReturn.error.message, /unknown field return/);
+
+  const handlesBeforeRetain = parseResource(
+    await client.readResource({ uri: "svcopilot://capabilities" })
+  ).connection.knownHandleCount;
+  const retainedWorkflow = parseToolResult(
+    await client.callTool({
+      name: "sv_run",
+      arguments: {
+        mode: "write",
+        undoBoundary: "none",
+        steps: [
+          {
+            id: "note",
+            op: "call",
+            method: "create",
+            args: ["Note"],
+            retainResult: true,
+          },
+        ],
+      },
+    })
+  );
+  const retainedNote = retainedWorkflow.steps[0].result;
+  assert.equal(retainedNote.__type__, "Note");
+  assert.equal(retainedWorkflow.handleOwnership.callerMustFree, true);
+  assert.deepEqual(retainedWorkflow.handleOwnership.returnedHandles, [retainedNote]);
+  const handlesAfterRetain = parseResource(
+    await client.readResource({ uri: "svcopilot://capabilities" })
+  ).connection.knownHandleCount;
+  assert.equal(handlesAfterRetain, handlesBeforeRetain + 1);
+  parseToolResult(
+    await client.callTool({
+      name: "sv_free",
+      arguments: { handle: retainedNote },
+    })
+  );
+  const handlesAfterFree = parseResource(
+    await client.readResource({ uri: "svcopilot://capabilities" })
+  ).connection.knownHandleCount;
+  assert.equal(handlesAfterFree, handlesBeforeRetain);
 
   const projectPage = parseToolResult(
     await client.callTool({

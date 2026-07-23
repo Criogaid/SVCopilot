@@ -88,7 +88,7 @@ MCP 客户端配置示例：
 | `sv_search_api` | 搜索本地解析的官方 API（类、方法、重载、参数、版本与文档锚点） |
 | `sv_describe` | 获取一个类或指定方法的完整官方 API 元数据 |
 | `sv_snapshot` | 将选择区、工程或指定组读取为统一的 0-based 数据，并签发短期 `contextId` |
-| `sv_run` | 在一个不可插队的执行单元中运行有序 call/index 步骤、局部引用、断言与句柄清理 |
+| `sv_run` | 在一个不可插队的执行单元中运行有序 call/index 步骤、局部引用和断言；未返回的临时句柄自动释放，`retainResult`/`exports` 返回的句柄转移给调用方 |
 | `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高；直接接受 group/selection context 或 range context + occurrenceId，单 occurrence 可自动选择，超时返回最后一次观测而非伪造成功 |
 | `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
 | `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚；接受 group/selection snapshot context 和 range context（range noteId 自带 occurrence，共享 target 需显式确认） |
@@ -96,7 +96,7 @@ MCP 客户端配置示例：
 | `sv_restructure_notes` | 结构操作：insert / delete（clone 备份）/ split（延音第二半）/ merge（连续音符），按调用顺序执行、活动 index 解析、Undo 边界与已验证补偿回滚；同样接受 range context（insert-only 的多 occurrence range 需给 occurrenceId） |
 | `sv_get_parameter_curve` | 在必填 blick 范围内读取经官方/动态 vocal mode 白名单验证的 group 参数曲线：requested/resolved 名称、definition、插值方式、local/absolute 双坐标、统计和续读游标 |
 | `sv_get_voice_profile` | 读取轨道各 group 的可观测 voice 参数与 vocalMode 名称；singer 身份/声库目录/分配关系明确报告 unobservable |
-| `sv_clone_track_from_template` | Track.clone + addTrack 克隆轨道（如和声轨），Undo 边界 + 读回验证；隐藏 singer 状态是否保留报告 `host_opaque` |
+| `sv_clone_track_from_template` | Track.clone + addTrack 克隆轨道（如和声轨），Undo 边界 + 读回验证；官方 Reference clone 不复制目标 NoteGroup，因此响应会报告共享 target，不能把它当作独立编辑沙箱；隐藏 singer/database 状态报告 `host_opaque` |
 | `sv_start_audition` / `sv_get_audition` / `sv_stop_audition` / `sv_restore_audition` | 非阻塞试听状态机：可选 `autoStop`，区分 timer/queue/overrun，恢复原 playback status、playhead 和未被用户改动的 solo；recovery payload 可跨 server 崩溃使用。MCP 听不到声音，感知判断属于人 |
 | `sv_patch_parameter_curve` | 用 BLICK、音乐位置、范围边界、note 或相邻音符 gap 锚点 replace/add/scale 参数控制点；参数白名单、宿主 typeName 复核、Undo、读回验证和已验证补偿 |
 | `sv_patch_parameter_curves` | 在同一 group 上预检并批量写入 1--16 条曲线：范围上下文/共享 target 前置条件、一次 Undo、逐曲线读回、跨曲线补偿、三档响应和统一 timings |
@@ -137,14 +137,16 @@ MCP 资源还提供：
   "mode": "read",
   "steps": [
     {"id":"track","op":"call","target":{"$ref":"#/roots/project"},"method":"getTrack","args":[1]},
-    {"id":"name","op":"call","target":{"$ref":"#/steps/track/result"},"method":"getName","return":true}
+    {"id":"name","op":"call","target":{"$ref":"#/steps/track/result"},"method":"getName","retainResult":true}
   ]
 }
 ```
 
 `$track`、`$track.result` 和 `{"$ref":"track"}` 都不是有效语法。
 
-`coverageAtLeast` 的报告会同时返回 `observedCoverage` 和 `requiredCoverage`。超过 32 项的断言观测只返回形状、数量、覆盖和数值范围摘要；一个 step result 同时设置 `return:true` 和直接 export 时，step 使用 `resultRef` 指向 exports，不重复内联大数组。
+步骤结果默认只在本次 workflow 内可供后续 `$ref` 使用，不进入响应；其中新产生且未导出的 handle 会在结束时自动释放。`retainResult:true` 会把该步骤结果放进 `steps[].result`，`exports` 会把命名结果放进顶层 `exports`；两者中可达的 handle 均转移给调用方，必须在使用完毕后调用 `sv_free`。每次响应的 `handleOwnership` 会列出 `returnedHandles`、自动释放数量和清理失败句柄；旧的 `return` 字段已删除并会被 schema 拒绝。
+
+`coverageAtLeast` 的报告会同时返回 `observedCoverage` 和 `requiredCoverage`。超过 32 项的断言观测只返回形状、数量、覆盖和数值范围摘要；一个 step result 同时设置 `retainResult:true` 和直接 export 时，step 使用 `resultRef` 指向 exports，不重复内联大数组。
 
 音素处理完成度和内容覆盖率是两个独立维度。typed-v2 envelope 的实际观测项未齐时为 `pending`；实际观测项齐全时即为 `ready`，`-`、`+` 等延音产生的合法空字符串不会降低处理状态。`phonemeCoverage` 单独报告非空数、空值数、空值索引与缺项索引。`requireNonEmpty` 和 `requireNonEmptyPhonemes` 默认关闭；显式启用后，它们只增加全非空质量条件，超时返回 `phoneme_coverage_unsatisfied`，但 `data.state` 仍保持 `ready`。
 

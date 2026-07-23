@@ -22,7 +22,12 @@ export class WorkflowExecutor {
 
   async run(request) {
     const validation = validatePlan(request);
-    if (!validation.ok) return failureReport(validation.error, { outcome: "not-started" });
+    if (!validation.ok) {
+      return failureReport(validation.error, {
+        outcome: "not-started",
+        inputHandleCount: collectHandleRefs(request?.inputs).size,
+      });
+    }
     return this.session.withExclusive((host) => this._execute(host, validation.plan));
   }
 
@@ -103,7 +108,7 @@ export class WorkflowExecutor {
           }
 
           context.steps[step.id] = { result };
-          if (step.return === true) {
+          if (step.retainResult === true) {
             const exportName = directResultExports.get(step.id);
             if (exportName !== undefined) {
               report.resultRef = `#/exports/${escapePointerSegment(exportName)}`;
@@ -164,24 +169,41 @@ export class WorkflowExecutor {
       }
     }
 
-    const retainedHandles = collectHandleRefs(plan.inputs);
+    const inputHandles = collectHandleRefs(plan.inputs);
+    const responseHandles = collectHandleRefs(exports);
+    for (const step of stepReports) {
+      if (step.result !== undefined) collectHandleRefs(step.result, responseHandles);
+    }
+    // 只有进入响应的句柄才转移给调用方；inputs 中的句柄继续由原调用方持有。
+    const retainedHandles = new Map(inputHandles);
     collectHandleRefs(exports, retainedHandles);
     for (const step of stepReports) {
       if (step.result !== undefined) collectHandleRefs(step.result, retainedHandles);
     }
     const generatedHandles = collectHandleRefs({ roots: context.roots, steps: context.steps });
-    for (const handle of generatedHandles.keys()) {
+    const autoFreedHandles = [];
+    const cleanupFailedHandles = [];
+    for (const [handle, handleRef] of generatedHandles) {
       if (retainedHandles.has(handle)) continue;
       try {
         hostCalls += 1;
         await host.free(handle);
+        autoFreedHandles.push(handleRef);
       } catch (error) {
+        cleanupFailedHandles.push(handleRef);
         warnings.push({
           code: "HANDLE_CLEANUP_FAILED",
           message: `Could not release handle ${handle}: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
     }
+    const handleOwnership = buildHandleOwnership({
+      inputHandles,
+      generatedHandles,
+      responseHandles,
+      autoFreedHandles,
+      cleanupFailedHandles,
+    });
 
     const elapsedMs = this.now() - startedAt;
     if (failed) {
@@ -205,6 +227,7 @@ export class WorkflowExecutor {
         steps: stepReports,
         effects: outcome === "unknown" ? "unknown" : writeAttempted ? "may_remain" : "none",
         undo: undoEvidence(undoBoundaryCalls),
+        handleOwnership,
         warnings,
         timing: { elapsedMs, hostCalls },
       };
@@ -221,6 +244,7 @@ export class WorkflowExecutor {
       exports,
       steps: stepReports,
       undo: undoEvidence(undoBoundaryCalls),
+      handleOwnership,
       warnings,
       timing: { elapsedMs, hostCalls },
     };
@@ -245,6 +269,12 @@ export function validatePlan(request) {
     if (seen.has(rawStep.id)) return invalidPlan(`duplicate step id: ${rawStep.id}`);
     if (rawStep.op !== "call" && rawStep.op !== "index") {
       return invalidPlan(`unsupported op in step ${rawStep.id}: ${String(rawStep.op)}`);
+    }
+    if (Object.hasOwn(rawStep, "return")) {
+      return invalidPlan(`step ${rawStep.id} field return was removed; use retainResult`);
+    }
+    if (rawStep.retainResult !== undefined && typeof rawStep.retainResult !== "boolean") {
+      return invalidPlan(`step ${rawStep.id} retainResult must be a boolean`);
     }
     if (rawStep.op === "call") {
       if (typeof rawStep.method !== "string" || !rawStep.method) {
@@ -484,7 +514,7 @@ function isUnknownOutcomeError(error) {
   );
 }
 
-function failureReport(error, { outcome }) {
+function failureReport(error, { outcome, inputHandleCount = 0 }) {
   return {
     ok: false,
     status: "failed",
@@ -493,9 +523,53 @@ function failureReport(error, { outcome }) {
     steps: [],
     effects: "none",
     undo: undoEvidence(0),
+    handleOwnership: emptyHandleOwnership(inputHandleCount),
     warnings: [],
     timing: { elapsedMs: 0, hostCalls: 0 },
   };
+}
+
+function buildHandleOwnership({
+  inputHandles,
+  generatedHandles,
+  responseHandles,
+  autoFreedHandles,
+  cleanupFailedHandles,
+}) {
+  const returnedHandles = [...responseHandles.values()]
+    .map(summarizeHandleRef)
+    .sort((left, right) => left.__handle__ - right.__handle__);
+  const failedHandles = cleanupFailedHandles
+    .map(summarizeHandleRef)
+    .sort((left, right) => left.__handle__ - right.__handle__);
+  return {
+    policy: "caller_frees_returned_handles",
+    inputHandleCount: inputHandles.size,
+    observedHandleCount: generatedHandles.size,
+    autoFreedHandleCount: autoFreedHandles.length,
+    returnedHandles,
+    cleanupFailedHandles: failedHandles,
+    callerMustFree: returnedHandles.length > 0 || failedHandles.length > 0,
+  };
+}
+
+function emptyHandleOwnership(inputHandleCount = 0) {
+  return {
+    policy: "caller_frees_returned_handles",
+    inputHandleCount,
+    observedHandleCount: 0,
+    autoFreedHandleCount: 0,
+    returnedHandles: [],
+    cleanupFailedHandles: [],
+    callerMustFree: false,
+  };
+}
+
+function summarizeHandleRef(value) {
+  const output = { __handle__: value.__handle__ };
+  if (typeof value.__type__ === "string") output.__type__ = value.__type__;
+  if (Number.isSafeInteger(value.__epoch__)) output.__epoch__ = value.__epoch__;
+  return output;
 }
 
 function invalidPlan(message) {

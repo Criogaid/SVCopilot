@@ -257,7 +257,8 @@ const TOOLS = [
   },
   {
     name: "sv_free",
-    description: "Release a raw dispatcher handle that is no longer needed.",
+    description:
+      "Release a raw dispatcher handle that is no longer needed, including handles retained by sv_run through retainResult or exports.",
     inputSchema: {
       type: "object",
       properties: { handle: HANDLE_SCHEMA },
@@ -339,7 +340,7 @@ const TOOLS = [
   {
     name: "sv_run",
     description:
-      'Run an ordered, fail-fast workflow of raw call/index steps with local JSON Pointer references, read-back assertions, undo boundaries, structured partial failure, and scoped handle cleanup. Exact two-step example: {"mode":"read","steps":[{"id":"track","op":"call","target":{"$ref":"#/roots/project"},"method":"getTrack","args":[1]},{"id":"name","op":"call","target":{"$ref":"#/steps/track/result"},"method":"getName","return":true}]}. It is not atomic and never auto-rolls back.',
+      'Run an ordered, fail-fast workflow of raw call/index steps with local JSON Pointer references, read-back assertions, undo boundaries, structured partial failure, and explicit handle ownership. Step results remain available to later references without being returned. Set retainResult:true or place a value in exports to return it; every returned handle becomes caller-owned and must be released with sv_free. Unreturned temporary handles are freed automatically, with counts and retained handles reported in handleOwnership. Exact two-step example: {"mode":"read","steps":[{"id":"track","op":"call","target":{"$ref":"#/roots/project"},"method":"getTrack","args":[1]},{"id":"name","op":"call","target":{"$ref":"#/steps/track/result"},"method":"getName","retainResult":true}]}. It is not atomic and never auto-rolls back.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -357,6 +358,7 @@ const TOOLS = [
           maxItems: 128,
           items: {
             type: "object",
+            additionalProperties: false,
             properties: {
               id: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
               op: { enum: ["call", "index"] },
@@ -401,7 +403,12 @@ const TOOLS = [
                 description:
                   "Previous mutation step whose postcondition is established by this step's successful expect assertion.",
               },
-              return: { type: "boolean" },
+              retainResult: {
+                type: "boolean",
+                default: false,
+                description:
+                  "Include this step result in the response. Any reachable handle remains live, transfers to the caller, and must later be released with sv_free. When false or omitted, the result is still available to later $ref steps but is not returned.",
+              },
             },
             required: ["id", "op"],
           },
@@ -409,7 +416,7 @@ const TOOLS = [
         exports: {
           type: "object",
           description:
-            'Named output values, typically {"name":{"$ref":"#/steps/name/result"}}.',
+            'Named output values, typically {"name":{"$ref":"#/steps/name/result"}}. Any handle reachable from exports remains live, transfers to the caller, and must later be released with sv_free.',
         },
       },
       required: ["mode", "steps"],
@@ -1192,7 +1199,7 @@ const TOOLS = [
   {
     name: "sv_clone_track_from_template",
     description:
-      "Clone an existing track (Track.clone + Project.addTrack) to create e.g. a harmony track inheriting the template's groups and voice settings, inside undo boundaries with read-back verification. Track.clone only promises a deep copy: whether hidden singer state survives is host-opaque and reported as identityPreservation: \"host_opaque\".",
+      "Clone an existing track (Track.clone + Project.addTrack) to create e.g. a harmony track inheriting the template's references and voice settings, inside undo boundaries with read-back verification. This is not an isolated musical-data fork: cloned NoteGroupReference objects do not copy their target NoteGroups, so editing a shared target can also change the template. The response reports sharedTargetGroups/isIsolatedEditableTarget and warns when targets are shared. Hidden singer/database preservation remains host-opaque.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1208,7 +1215,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.4.3" },
+  { name: "sv-copilot", version: "0.4.4" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1518,7 +1525,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.4.3",
+    interfaceVersion: "0.4.4",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1613,7 +1620,7 @@ function capabilities() {
 function musicWorkflowSchemaIndex() {
   const names = ["sv_patch_parameter_curves", "sv_edit_phrase"];
   return {
-    schemaVersion: "0.4.3",
+    schemaVersion: "0.4.4",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -1631,7 +1638,7 @@ function toolInputSchema(name) {
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.4.3",
+    schemaVersion: "0.4.4",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };

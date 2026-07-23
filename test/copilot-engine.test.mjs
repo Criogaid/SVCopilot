@@ -150,7 +150,7 @@ test("sv_run groups undo, resolves references, verifies read-back, and cleans te
           operator: "equals",
           value: { $ref: "#/inputs/expectedLyrics" },
         },
-        return: true,
+        retainResult: true,
       },
     ],
     exports: { lyrics: { $ref: "#/steps/verify/result" } },
@@ -168,6 +168,124 @@ test("sv_run groups undo, resolves references, verifies read-back, and cleans te
   assert.equal(result.undo.automaticRollback, false);
   assert.ok(state.freed.includes(project.__handle__));
   assert.ok(!state.freed.includes(note.__handle__), "input handles belong to the caller");
+  assert.deepEqual(result.handleOwnership, {
+    policy: "caller_frees_returned_handles",
+    inputHandleCount: 1,
+    observedHandleCount: 2,
+    autoFreedHandleCount: 2,
+    returnedHandles: [],
+    cleanupFailedHandles: [],
+    callerMustFree: false,
+  });
+});
+
+test("sv_run retains only explicit step results and exports", async () => {
+  const state = { freed: [] };
+  const project = handle(10, "Project");
+  const track = handle(11, "Track");
+  const group = handle(12, "NoteGroupReference");
+  const target = handle(13, "NoteGroup");
+  const host = {
+    epoch: () => 1,
+    roots: async () => ({ project }),
+    call: async ({ handle: owner, method }) => {
+      if (owner?.__handle__ === project.__handle__ && method === "getTrack") return track;
+      if (owner?.__handle__ === track.__handle__ && method === "getGroupReference") return group;
+      if (owner?.__handle__ === group.__handle__ && method === "getTarget") return target;
+      throw new Error(`unsupported call: ${method}`);
+    },
+    index: async () => null,
+    free: async (value) => state.freed.push(value?.__handle__ ?? value),
+  };
+  const executor = new WorkflowExecutor({ withExclusive: (task) => task(host) });
+
+  const result = await executor.run({
+    mode: "read",
+    steps: [
+      {
+        id: "track",
+        op: "call",
+        target: { $ref: "#/roots/project" },
+        method: "getTrack",
+        args: [1],
+      },
+      {
+        id: "group",
+        op: "call",
+        target: { $ref: "#/steps/track/result" },
+        method: "getGroupReference",
+        args: [1],
+      },
+      {
+        id: "target",
+        op: "call",
+        target: { $ref: "#/steps/group/result" },
+        method: "getTarget",
+        retainResult: true,
+      },
+    ],
+    exports: { group: { $ref: "#/steps/group/result" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.steps[0].result, undefined);
+  assert.equal(result.steps[1].result, undefined);
+  assert.deepEqual(result.steps[2].result, target);
+  assert.deepEqual(result.exports.group, group);
+  assert.deepEqual(result.handleOwnership, {
+    policy: "caller_frees_returned_handles",
+    inputHandleCount: 0,
+    observedHandleCount: 4,
+    autoFreedHandleCount: 2,
+    returnedHandles: [group, target],
+    cleanupFailedHandles: [],
+    callerMustFree: true,
+  });
+  assert.deepEqual(state.freed, [project.__handle__, track.__handle__]);
+
+  await host.free(group);
+  await host.free(target);
+  assert.deepEqual(state.freed, [
+    project.__handle__,
+    track.__handle__,
+    group.__handle__,
+    target.__handle__,
+  ]);
+});
+
+test("sv_run exposes handles whose automatic cleanup failed", async () => {
+  const project = handle(14, "Project");
+  const host = {
+    epoch: () => 1,
+    roots: async () => ({ project }),
+    call: async ({ method }) => {
+      if (method === "getFileName") return "Example";
+      throw new Error(`unsupported call: ${method}`);
+    },
+    index: async () => null,
+    free: async () => {
+      throw new Error("temporary failure");
+    },
+  };
+  const executor = new WorkflowExecutor({ withExclusive: (task) => task(host) });
+
+  const result = await executor.run({
+    mode: "read",
+    steps: [
+      {
+        id: "name",
+        op: "call",
+        target: { $ref: "#/roots/project" },
+        method: "getFileName",
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.handleOwnership.autoFreedHandleCount, 0);
+  assert.deepEqual(result.handleOwnership.cleanupFailedHandles, [project]);
+  assert.equal(result.handleOwnership.callerMustFree, true);
+  assert.ok(result.warnings.some((warning) => warning.code === "HANDLE_CLEANUP_FAILED"));
 });
 
 test("sv_run rejects missing input references before calling the host", async () => {
@@ -180,7 +298,7 @@ test("sv_run rejects missing input references before calling the host", async ()
   });
   const result = await executor.run({
     mode: "write",
-    inputs: {},
+    inputs: { owned: handle(99, "Note") },
     steps: [
       {
         id: "write",
@@ -196,6 +314,9 @@ test("sv_run rejects missing input references before calling the host", async ()
   assert.equal(result.error.phase, "validate");
   assert.equal(hostCalls, 0);
   assert.match(result.error.message, /input reference does not exist/);
+  assert.equal(result.handleOwnership.inputHandleCount, 1);
+  assert.equal(result.handleOwnership.observedHandleCount, 0);
+  assert.equal(result.handleOwnership.callerMustFree, false);
   assert.equal(
     validatePlan({
       mode: "read",
@@ -211,6 +332,12 @@ test("sv_run rejects missing input references before calling the host", async ()
     }).ok,
     true
   );
+  const legacyReturn = validatePlan({
+    mode: "read",
+    steps: [{ id: "legacy", op: "call", method: "getFileName", return: true }],
+  });
+  assert.equal(legacyReturn.ok, false);
+  assert.match(legacyReturn.error.message, /return was removed; use retainResult/);
 });
 
 test("sv_run still closes its undo boundary after the workflow deadline", async () => {
@@ -277,7 +404,7 @@ test("sv_run reports coverage details and deduplicates exported large arrays", a
         op: "call",
         method: "getComputedPitchForGroup",
         expect: { operator: "coverageAtLeast", value: 0.9 },
-        return: true,
+        retainResult: true,
       },
     ],
     exports: { pitch: { $ref: "#/steps/pitch/result" } },
@@ -466,6 +593,31 @@ test("selection snapshot and sv_set_lyrics form a verified high-level workflow",
   assert.equal(result.data.processing.evidence.nonEmptyPhonemes, 2);
   assert.equal(result.data.processing.evidence.expectedNotes, 2);
   assert.equal(result.undo.expectedUserUndoSteps, 1);
+});
+
+test("sv_set_lyrics directs range contexts to range-capable editors", async () => {
+  const model = createSynthModel();
+  const session = { withExclusive: (task) => task(model.host) };
+  const store = new SnapshotStore({ now: () => 1000 });
+  const snapshots = new SnapshotService(session, { store, now: () => 1000 });
+  const entry = store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const lyrics = new LyricsService(session, snapshots, { now: () => 1000 });
+
+  const result = await lyrics.setLyrics({
+    contextId: entry.contextId,
+    lyrics: ["where"],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INVALID_CONTEXT");
+  assert.match(result.error.message, /sv_patch_notes/);
+  assert.match(result.error.message, /sv_edit_phrase/);
+  assert.equal(model.undoCount, 0);
 });
 
 test("sv_set_lyrics reports processed and actually changed notes with full evidence", async () => {
