@@ -103,6 +103,8 @@ MCP 客户端配置示例：
 | `sv_edit_phrase` | 在一个 Undo 中组合 note patch、歌词/语言、结构操作、多曲线和可观测 voice patch；音符/结构使用 detached clone，curve/voice-only 使用轻量 live preflight，失败时按 journal 恢复并读回验证 |
 | `sv_compare_computed_pitch` | 对 `sv_snapshot_range` 已存的 computed pitch 做客观演唱分析（纯内存只读，不访问宿主）：`compare_to_target` 报告逐音符稳态段 `centerErrorCent`、逐帧诊断、去趋势自相关颤音 rate/depth/regularity、转换 overshoot/arrival/settling 与异常区段；`compare_contexts` 在同一采样栅格上按乐谱位置逐帧对比调前/调后（after−before），并给出 §13.8 风格半音差值统计。null 帧保留不进统计；帧率对颤音的适配度分级 ok/borderline/too_coarse 而不是硬拒；全部阈值为未经真机校准的工程默认值，听感判断仍属人类 |
 | `sv_plan_expression` | dry-run 表情规划器（纯内存只读，不写宿主）：显式手势（scoop/fall/portamento/vibrato/hairpin，quarter 音乐时间参数）与小词表意图（jpop、controlled_belt/soft_airy/light_rasp、cool_anger/tender、段落）编译为单位显式（cents/dB/x/±1，writeSurface=automation）的可审阅计划，同参数重叠手势求和、基线守卫、约束 clamp 与点数预算；产出可直接提交 `sv_patch_parameter_curves` 的 applyRequests（同参数多簇时按序分成 K 次调用并如实报告 K 个 Undo）。replace 覆盖区间内既有点且规划器不读宿主（review 显式声明）；natural vibrato 不可观测；意图映射为启发式；是否更好听 human_only |
+| `sv_align_lyrics` | 无副作用咬字规划器（纯内存只读）：混排歌词分词并铺排到音符——日语假名确定性 mora 切分（拗音并前拍、促音/拨音/长音各占一拍）、英语元音簇音节启发式（词 + "+" 续拍，~85-90% 文献准确率）、中/粤一字一音节、汉字读音不可知按 1 音符标 needs_review、"br" 显式换气；单元/音符数不匹配如实报告不自作主张。产出带 `expected.lyrics` 前置条件的 `sv_patch_notes` patchRequest；不承诺与宿主 G2P 一致，"+"/"-"/"br" 为宿主约定 |
+| `sv_analyze_phrase` | 只读乐理分析（纯内存）：时值加权音级直方图 × 24 个 Krumhansl-Kessler profile 的皮尔逊相关返回**排序**调性候选与次名差距（关系大小调/长属音歧义如实暴露，不隐藏）；音级与外音标记（升号拼写、自然小调）；休止阈值乐句切分（climax/ambitus/休止）；音域/音程/节奏统计。全部 derived/heuristic，绝不冒充宿主事实 |
 
 MCP 资源还提供：
 

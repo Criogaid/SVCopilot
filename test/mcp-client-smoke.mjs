@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.5.0");
+  assert.equal(client.getServerVersion()?.version, "0.6.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -93,12 +93,14 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 26);
+  assert.equal(listed.tools.length, 28);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_compare_computed_pitch"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_plan_expression"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_align_lyrics"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_phrase"));
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -238,13 +240,15 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_edit_phrase"));
   assert.ok(capabilities.interfaces.music.includes("sv_compare_computed_pitch"));
   assert.ok(capabilities.interfaces.music.includes("sv_plan_expression"));
+  assert.ok(capabilities.interfaces.music.includes("sv_align_lyrics"));
+  assert.ok(capabilities.interfaces.music.includes("sv_analyze_phrase"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.5.0");
+  assert.equal(capabilities.interfaceVersion, "0.6.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -266,6 +270,8 @@ try {
       "sv_edit_phrase",
       "sv_compare_computed_pitch",
       "sv_plan_expression",
+      "sv_align_lyrics",
+      "sv_analyze_phrase",
     ]
   );
   const phraseResource = await client.readResource({
@@ -349,6 +355,44 @@ try {
     })
   );
   assert.equal(planInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  // v0.6.0：咬字规划与乐理分析（均为纯内存服务，未知 context 结构化报错）。
+  const alignResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_align_lyrics",
+  });
+  assert.ok(alignResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const alignSchema = parseResource(alignResource).inputSchema;
+  assert.deepEqual(alignSchema.properties.language.enum, [
+    "auto",
+    "japanese",
+    "english",
+    "mandarin",
+    "cantonese",
+  ]);
+  const alignUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_align_lyrics",
+      arguments: { contextId: "ctx_smoke_missing", lyrics: "あさひ" },
+    })
+  );
+  assert.equal(alignUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const analyzeResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_analyze_phrase",
+  });
+  assert.ok(analyzeResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const analyzeSchema = parseResource(analyzeResource).inputSchema;
+  assert.deepEqual(analyzeSchema.properties.include.items.enum, [
+    "key",
+    "scaleDegrees",
+    "phrases",
+    "statistics",
+  ]);
+  const analyzeUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_analyze_phrase",
+      arguments: { contextId: "ctx_smoke_missing" },
+    })
+  );
+  assert.equal(analyzeUnknownContext.error.code, "UNKNOWN_CONTEXT");
   assert.equal(
     batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
     "object"

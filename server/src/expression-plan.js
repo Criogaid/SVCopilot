@@ -769,8 +769,8 @@ function candidateSpanBounds(spec, loaded) {
 }
 
 // 乐句切分：休止 >= phraseGapBlick 即边界；climax 为最高目标音（并列取更长者）。
-// 全部 derived/heuristic，不伪装成宿主事实。
-function segmentPhrases(notes, phraseGapBlick) {
+// 全部 derived/heuristic，不伪装成宿主事实。phrase-analysis 复用同一实现。
+export function segmentPhrases(notes, phraseGapBlick) {
   const phrases = [];
   let current = [];
   for (const note of notes) {

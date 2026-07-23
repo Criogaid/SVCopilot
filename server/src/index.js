@@ -23,6 +23,7 @@ import { HostSession } from "./host-session.js";
 import { AuditionService } from "./audition.js";
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
 import { ExpressionPlanService } from "./expression-plan.js";
+import { LyricAlignService } from "./lyric-align.js";
 import { LyricsService } from "./lyrics.js";
 import {
   RANGE_CAPTURE_LIMITS,
@@ -38,6 +39,7 @@ import {
 } from "./parameter-curve.js";
 import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
 import { PhraseEditService } from "./phrase-edit.js";
+import { PhraseAnalysisService } from "./phrase-analysis.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
 import { VoiceProfileService } from "./voice-profile.js";
@@ -61,6 +63,8 @@ const computedPitchCompareService = new ComputedPitchCompareService({
   store: snapshotService.store,
 });
 const expressionPlanService = new ExpressionPlanService({ store: snapshotService.store });
+const lyricAlignService = new LyricAlignService({ store: snapshotService.store });
+const phraseAnalysisService = new PhraseAnalysisService({ store: snapshotService.store });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -963,6 +967,92 @@ const TOOLS = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
+    name: "sv_align_lyrics",
+    description:
+      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects the number of "+" continuation notes); Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review; "br" is an explicit breath note. Returns per-note planned lyrics/languageOverride with tiered confidence plus a ready-to-submit sv_patch_notes patchRequest whose expected.lyrics preconditions guard against post-snapshot drift. "+"/"-"/"br" are host conventions; G2P parity with the host is not guaranteed.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range captured with notes.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when startNoteId implies it or the context has one occurrence with notes.",
+        },
+        lyrics: {
+          type: "string",
+          minLength: 1,
+          maxLength: 2000,
+          description: "Free lyric text; kana/CJK/latin segments are classified automatically.",
+        },
+        language: {
+          enum: ["auto", "japanese", "english", "mandarin", "cantonese"],
+          default: "auto",
+          description:
+            "auto classifies per segment; CJK ideographs without surrounding kana then need an explicit language.",
+        },
+        startNoteId: {
+          type: "string",
+          minLength: 1,
+          description: "First note to fill; defaults to the occurrence's first captured note.",
+        },
+        setLanguageOverride: {
+          type: "boolean",
+          default: true,
+          description: "Also plan per-note languageOverride values where the token language is known.",
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId", "lyrics"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_analyze_phrase",
+    description:
+      'Read-only music-theory analysis over a range context (include ["notes"]): duration-weighted pitch-class histogram correlated against all 24 Krumhansl-Kessler key profiles returns RANKED key candidates with Pearson correlations and the margin to the runner-up (relative major/minor ambiguity on short melodies is expected and exposed, not hidden); per-note scale degrees with non-diatonic flags (sharps-only spelling, natural-minor degrees); rest-threshold phrase segmentation with climax/ambitus/rests; register, interval, and rhythm statistics. Everything is derived/heuristic, never claimed as host fact; musical judgment stays human-only.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range captured with notes.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when the context has exactly one occurrence with notes.",
+        },
+        include: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { enum: ["key", "scaleDegrees", "phrases", "statistics"] },
+          description: "Defaults to all sections; scaleDegrees implies key detection.",
+        },
+        phraseGapQuarter: {
+          type: "number",
+          minimum: 0.25,
+          maximum: 8,
+          default: 1,
+          description: "Rest length (in quarters) treated as a phrase boundary.",
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "sv_get_parameter_curve",
     description:
       "Read one Automation parameter curve of a note group within a required blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> is accepted only when <Name> exists in the target group's observable vocalModeParams. Names are case-insensitive and the response reports requestedParameter and resolvedParameter. Unknown names are rejected before NoteGroup.getParameter because SynthV may silently return a default curve. The host curve is read once with getAllPoints and filtered locally; only an oversized 64 KiB result falls back to density-based range bisection. Automation lives in group-local blicks; every point reports localBlick and absoluteBlick together with the official definition and interpolation method.",
@@ -1455,7 +1545,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.5.0" },
+  { name: "sv-copilot", version: "0.6.0" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1509,6 +1599,18 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://schemas/sv_plan_expression",
       name: "sv_plan_expression input schema",
       description: "Exact JSON input schema used to validate sv_plan_expression.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_align_lyrics",
+      name: "sv_align_lyrics input schema",
+      description: "Exact JSON input schema used to validate sv_align_lyrics.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_analyze_phrase",
+      name: "sv_analyze_phrase input schema",
+      description: "Exact JSON input schema used to validate sv_analyze_phrase.",
       mimeType: "application/json",
     },
   ],
@@ -1607,6 +1709,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_plan_expression":
         result = await expressionPlanService.plan(args);
+        break;
+      case "sv_align_lyrics":
+        result = await lyricAlignService.align(args);
+        break;
+      case "sv_analyze_phrase":
+        result = await phraseAnalysisService.analyze(args);
         break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
@@ -1783,7 +1891,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.5.0",
+    interfaceVersion: "0.6.0",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1815,6 +1923,8 @@ function capabilities() {
         "sv_edit_phrase",
         "sv_compare_computed_pitch",
         "sv_plan_expression",
+        "sv_align_lyrics",
+        "sv_analyze_phrase",
       ],
       audition: [
         "sv_start_audition",
@@ -1846,6 +1956,8 @@ function capabilities() {
         sv_edit_phrase: ["range"],
         sv_compare_computed_pitch: ["range"],
         sv_plan_expression: ["range"],
+        sv_align_lyrics: ["range"],
+        sv_analyze_phrase: ["range"],
       },
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
@@ -1885,9 +1997,11 @@ function musicWorkflowSchemaIndex() {
     "sv_edit_phrase",
     "sv_compare_computed_pitch",
     "sv_plan_expression",
+    "sv_align_lyrics",
+    "sv_analyze_phrase",
   ];
   return {
-    schemaVersion: "0.5.0",
+    schemaVersion: "0.6.0",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -1906,11 +2020,13 @@ function toolInputSchema(name) {
         "sv_edit_phrase",
         "sv_compare_computed_pitch",
         "sv_plan_expression",
+        "sv_align_lyrics",
+        "sv_analyze_phrase",
       ].includes(candidate.name)
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.5.0",
+    schemaVersion: "0.6.0",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };
