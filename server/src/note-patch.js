@@ -110,7 +110,7 @@ export class NotePatchService {
               attemptedChangedNotes: 0,
               remainingChangedNotes: 0,
               actuallyChangedNotes: 0,
-              plannedDiff,
+              plannedDiff: publicDiff(plannedDiff),
               appliedDiff: [],
             },
             rollback: { attempted: false, verified: null },
@@ -160,7 +160,7 @@ export class NotePatchService {
             await host.call({
               handle: target.note,
               method: spec.setter,
-              args: [entry.to],
+              args: [entry.writeValue],
             });
             appliedDiff.push(entry);
           }
@@ -399,7 +399,7 @@ export class NotePatchService {
         await host.call({
           handle: targetByPosition.get(entry.position).note,
           method: spec.setter,
-          args: [entry.from],
+          args: [entry.rollbackValue],
         });
       } catch (error) {
         if (isUnknownOutcomeError(error)) {
@@ -432,8 +432,7 @@ export class NotePatchService {
         const value = await readField(host, targetByPosition.get(entry.position).note, spec);
         evidence.restored[entry.noteId] = evidence.restored[entry.noteId] ?? {};
         evidence.restored[entry.noteId][entry.field] = value;
-        // 回滚验证要求恢复到完整旧值：attributes 也做全量比较（含浮点容差），
-        // patch 新增的 key 可能无法通过 setAttributes(old) 删除，此时如实报告未恢复。
+        // 回滚后比较完整旧值；官方部分更新无法删除新增 key，此时如实报告未恢复。
         const restoredMatches =
           spec.kind === "attributes"
             ? jsonValueCloseEnough(value, entry.from)
@@ -474,12 +473,13 @@ export class NotePatchService {
 }
 
 async function readField(host, note, spec) {
-  return host.call({
+  const value = await host.call({
     handle: note,
     method: spec.getter,
     args: [],
     ...(spec.kind === "attributes" ? { resultFormat: "typed-v2" } : {}),
   });
+  return spec.kind === "attributes" ? normalizeAttributes(value) : value;
 }
 
 function resolveNoteTargets(input, resolved) {
@@ -537,12 +537,12 @@ function buildPlannedDiff(targets) {
     for (const target of targets) {
       if (!Object.hasOwn(target.set, spec.field)) continue;
       const from = target.current[spec.field];
-      // attributes 统一按"读旧值→合并→写全量"落盘：无论官方 setAttributes 是合并
-      // 还是替换语义，写出的都是完整对象，未提供的 key 不可能被静默清掉；
-      // 读回也因此可以做全量比较而不是只查请求过的 key。
+      // 官方 setAttributes 是部分更新；只把请求字段送回宿主，避免把 typed-v2 的
+      // NaN/Inf 信封或空 table 形状标记误当作 Note 属性写入。
+      const writeValue = target.set[spec.field];
       const to =
         spec.kind === "attributes"
-          ? { ...(isRecord(from) ? from : {}), ...target.set[spec.field] }
+          ? { ...from, ...writeValue }
           : target.set[spec.field];
       if (fieldMatches(spec, to, from)) continue;
       diff.push({
@@ -552,6 +552,11 @@ function buildPlannedDiff(targets) {
         field: spec.field,
         from,
         to,
+        writeValue,
+        rollbackValue:
+          spec.kind === "attributes"
+            ? pickAttributeValues(from, Object.keys(writeValue))
+            : from,
       });
     }
   }
@@ -634,9 +639,34 @@ function patchResultData(targets, plannedDiff, appliedDiff, remainingChangedNote
     attemptedChangedNotes: attempted,
     remainingChangedNotes: remaining,
     actuallyChangedNotes: remaining,
-    plannedDiff,
-    appliedDiff,
+    plannedDiff: publicDiff(plannedDiff),
+    appliedDiff: publicDiff(appliedDiff),
   };
+}
+
+function publicDiff(diff) {
+  return diff.map(({ writeValue: _writeValue, rollbackValue: _rollbackValue, ...entry }) => entry);
+}
+
+function pickAttributeValues(source, keys) {
+  const selected = {};
+  for (const key of keys) {
+    if (Object.hasOwn(source, key)) selected[key] = source[key];
+  }
+  return selected;
+}
+
+function normalizeAttributes(value) {
+  if (
+    isRecord(value) &&
+    value.$sv === "table" &&
+    value.shape === "unknown" &&
+    Array.isArray(value.entries) &&
+    value.entries.length === 0
+  ) {
+    return {};
+  }
+  return isRecord(value) ? value : {};
 }
 
 function normalizeRequest(request) {

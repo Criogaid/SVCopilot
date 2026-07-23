@@ -1463,6 +1463,28 @@ test("shared target occurrences require explicit mutation confirmation", async (
   assert.equal(model.undoCount, 2);
 });
 
+test("shared target mathematical no-op does not require mutation confirmation", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model, { shared: true });
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId },
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "add",
+        amount: 0,
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.status, "no_change");
+  assert.equal(result.effects, "none");
+  assert.equal(result.undo.expectedUserUndoSteps, 0);
+  assert.equal(model.undoCount, 0);
+});
+
 test("sv_get_parameter_curve enforces expectedGroupUuid on direct targets like the write path", async () => {
   const model = createCurveModel();
   const service = createService(model);

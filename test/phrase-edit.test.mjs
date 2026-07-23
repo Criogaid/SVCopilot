@@ -238,7 +238,11 @@ function createPhraseModel({
           setAttributes: "attributes",
         };
         if (setters[method]) {
-          data[setters[method]] = structuredClone(args[0]);
+          if (method === "setAttributes") {
+            data.attributes = { ...data.attributes, ...structuredClone(args[0]) };
+          } else {
+            data[setters[method]] = structuredClone(args[0]);
+          }
           if (method === "setOnset" && parentState) sortGroupNotes(parentState);
           return null;
         }
@@ -683,4 +687,36 @@ test("sv_edit_phrase rejects unobservable voice fields without project effects",
   assert.equal(result.error.code, "UNKNOWN_VOICE_PARAMETER");
   assert.equal(model.currentTarget, model.originalGroup);
   assert.equal(model.undoCount, 0);
+});
+
+test("sv_edit_phrase sends only requested attributes when old values contain typed sentinels", async () => {
+  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const originalState = model.states.get(model.originalGroup.__handle__);
+  model.states.get(originalState.notes[0].__handle__).data.attributes.tF0Offset = {
+    $sv: "number",
+    value: "nan",
+  };
+  const writes = [];
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "setAttributes") writes.push(structuredClone(request.args[0]));
+    return originalCall(request);
+  };
+
+  const result = await service.edit({
+    target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
+    notePatches: [
+      {
+        noteId: `${occurrenceId}:n:0`,
+        set: { attributes: { rapAccent: 0.5 } },
+      },
+    ],
+    structureOperations: [],
+    curves: [],
+    waitFor: "none",
+    dryRun: true,
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(writes, [{ rapAccent: 0.5 }]);
 });

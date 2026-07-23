@@ -1196,7 +1196,7 @@ test("sv_set_lyrics keeps verified success when post-commit processing observati
   assert.ok(result.warnings.some((warning) => warning.code === "PROCESSING_OBSERVATION_FAILED"));
 });
 
-test("sv_wait_for_processing validates expectedNotes and minimumObservedFrames bounds", async () => {
+test("sv_wait_for_processing validates expectedNotes, frames, and observation bounds", async () => {
   const model = createSynthModel();
   const session = { withExclusive: (task) => task(model.host) };
   const snapshots = new SnapshotService(session, {
@@ -1222,8 +1222,19 @@ test("sv_wait_for_processing validates expectedNotes and minimumObservedFrames b
       kind: "computedPitch",
       startBlick: 0,
       intervalBlick: 1,
+      frames: 2_001,
+      minimumObservedFrames: 1,
+    }),
+    (error) => error.code === "INVALID_ARGUMENTS"
+  );
+  await assert.rejects(
+    processing.wait({
+      contextId: snapshot.contextId,
+      kind: "computedPitch",
+      startBlick: 0,
+      intervalBlick: 1,
       frames: 4,
-      minimumObservedFrames: -1,
+      minimumObservedFrames: 0,
     }),
     (error) => error.code === "INVALID_ARGUMENTS"
   );

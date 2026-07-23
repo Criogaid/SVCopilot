@@ -6,6 +6,7 @@ import { ServiceTiming } from "./service-timing.js";
 // MCP 无法听到声音：audition 只驱动宿主播放，感知判断永远属于人。
 // Node 崩溃可能遗留 solo/mute，因此 start 返回可跨重启使用的 recovery payload。
 const PLAYHEAD_EPSILON_SECONDS = 1e-6;
+const PLAYBACK_STATUSES = new Set(["stopped", "playing", "looping"]);
 
 export class AuditionService {
   constructor(
@@ -587,29 +588,7 @@ export class AuditionService {
 
   async restore(request) {
     const timer = new ServiceTiming({ now: this.now });
-    const recovery = request?.recovery;
-    // 逃生通道接受客户端回传的 payload：逐项校验 mixerChanges 形状（E7），
-    // 越界 trackIndex 在恢复期由宿主报错并走结构化 restore_failed。
-    if (
-    !isRecord(recovery) ||
-      recovery.version !== 1 ||
-      !Array.isArray(recovery.mixerChanges) ||
-      !Number.isFinite(recovery.savedPlayheadSeconds) ||
-      !recovery.mixerChanges.every(
-        (change) =>
-          isRecord(change) &&
-          Number.isSafeInteger(change.trackIndex) &&
-          change.trackIndex >= 0 &&
-          change.field === "solo" &&
-          typeof change.previousValue === "boolean" &&
-          typeof change.setValue === "boolean"
-      )
-    ) {
-      throw codedError(
-        "INVALID_ARGUMENTS",
-        "recovery must be the payload returned by sv_start_audition (version 1)"
-      );
-    }
+    const recovery = normalizeRecoveryPayload(request?.recovery);
     timer.requestCoordinator();
     let result;
     try {
@@ -828,6 +807,33 @@ async function restoreSavedPlaybackState(capture, playback, savedStatus) {
   if (savedStatus !== "stopped") await capture.call(playback, "play", []);
   const observed = await capture.call(playback, "getStatus");
   return { expected: savedStatus, observed, restored: observed === savedStatus };
+}
+
+function normalizeRecoveryPayload(recovery) {
+  // recovery 会驱动 stop/seek/play，所有字段必须在首次宿主调用前完成校验。
+  const valid =
+    isRecord(recovery) &&
+    recovery.version === 1 &&
+    Array.isArray(recovery.mixerChanges) &&
+    Number.isFinite(recovery.savedPlayheadSeconds) &&
+    recovery.savedPlayheadSeconds >= 0 &&
+    PLAYBACK_STATUSES.has(recovery.savedStatus) &&
+    recovery.mixerChanges.every(
+      (change) =>
+        isRecord(change) &&
+        Number.isSafeInteger(change.trackIndex) &&
+        change.trackIndex >= 0 &&
+        change.field === "solo" &&
+        typeof change.previousValue === "boolean" &&
+        typeof change.setValue === "boolean"
+    );
+  if (!valid) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "recovery must be the payload returned by sv_start_audition (version 1)"
+    );
+  }
+  return recovery;
 }
 
 function normalizeStartRequest(request) {

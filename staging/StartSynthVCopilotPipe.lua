@@ -293,6 +293,13 @@ local function unmarshal(v)
   if v == json.null then
     return nil
   elseif t == 'table' then
+    -- typed-v2 特殊数字必须能无损回送宿主，否则属性回滚会把 NaN 信封当普通 table。
+    if v['$sv'] == 'number' then
+      if v.value == 'nan' then return 0 / 0 end
+      if v.value == '+inf' then return math.huge end
+      if v.value == '-inf' then return -math.huge end
+      error('invalid typed-v2 number envelope')
+    end
     if v.__handle__ ~= nil then
       return handles[v.__handle__]
     end

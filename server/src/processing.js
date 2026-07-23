@@ -1,8 +1,10 @@
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
+import { RANGE_REQUEST_LIMITS } from "./musical-range.js";
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const MAX_PROCESSING_EXPECTED_NOTES = 100_000;
 
 export class ProcessingService {
   constructor(session, snapshotService, { sleepFn = sleep, now = () => Date.now() } = {}) {
@@ -247,6 +249,13 @@ function normalizeRequest(request) {
         throw codedError("INVALID_ARGUMENTS", `${name} must be a valid non-negative integer`);
       }
     }
+    // frames 会直接进入宿主计算并决定结果规模，必须在调用 SynthV 前应用单组硬上限。
+    if (request.frames > RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `frames must be between 1 and ${RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup}`
+      );
+    }
   }
   if (request.requireNonEmpty !== undefined && typeof request.requireNonEmpty !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "requireNonEmpty must be a boolean");
@@ -256,11 +265,19 @@ function normalizeRequest(request) {
     request.expectedNotes !== undefined &&
     (!Number.isSafeInteger(request.expectedNotes) ||
       request.expectedNotes < 0 ||
-      request.expectedNotes > 100_000)
+      request.expectedNotes > MAX_PROCESSING_EXPECTED_NOTES)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "expectedNotes must be an integer between 0 and 100000");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `expectedNotes must be an integer between 0 and ${MAX_PROCESSING_EXPECTED_NOTES}`
+    );
   }
-  const minimumObservedFrames = clampInteger(request.minimumObservedFrames, 1, 1_000_000, 1);
+  const minimumObservedFrames = clampInteger(
+    request.minimumObservedFrames,
+    1,
+    RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
+    1
+  );
   if (kind === "computedPitch" && minimumObservedFrames > request.frames) {
     throw codedError(
       "INVALID_ARGUMENTS",

@@ -112,9 +112,14 @@ try {
   const phraseTool = listed.tools.find((tool) => tool.name === "sv_edit_phrase");
   const rangeTool = listed.tools.find((tool) => tool.name === "sv_snapshot_range");
   const auditionTool = listed.tools.find((tool) => tool.name === "sv_start_audition");
+  const restoreAuditionTool = listed.tools.find((tool) => tool.name === "sv_restore_audition");
   assert.equal(waitTool.inputSchema.properties.requireNonEmpty.default, false);
   assert.equal(waitTool.inputSchema.properties.occurrenceId.type, "string");
   assert.equal(waitTool.inputSchema.additionalProperties, false);
+  assert.equal(waitTool.inputSchema.properties.expectedNotes.maximum, 100_000);
+  assert.equal(waitTool.inputSchema.properties.frames.maximum, 2_000);
+  assert.equal(waitTool.inputSchema.properties.minimumObservedFrames.minimum, 1);
+  assert.equal(waitTool.inputSchema.properties.minimumObservedFrames.maximum, 2_000);
   assert.equal(setLyricsTool.inputSchema.properties.requireNonEmptyPhonemes.default, false);
   assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
   assert.equal(batchCurveTool.inputSchema.properties.responseMode.default, "standard");
@@ -146,6 +151,10 @@ try {
     ["onset", "center", "end", "ratio"]
   );
   assert.equal(auditionTool.inputSchema.properties.autoStop.default, false);
+  const recoverySchema = restoreAuditionTool.inputSchema.properties.recovery;
+  assert.equal(recoverySchema.additionalProperties, false);
+  assert.deepEqual(recoverySchema.properties.savedStatus.enum, ["stopped", "playing", "looping"]);
+  assert.ok(recoverySchema.required.includes("savedStatus"));
 
   const invalidStructureOperation = parseToolError(
     await client.callTool({

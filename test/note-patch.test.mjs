@@ -105,7 +105,12 @@ function callNote(model, note, method, args) {
   };
   if (Object.hasOwn(getters, method)) return getters[method];
   // 模拟真实 PIPE 解码：返回 null-prototype 的深层对象。
-  if (method === "getAttributes") return toNullProto(note.attributes);
+  if (method === "getAttributes") {
+    if (Object.keys(note.attributes).length === 0) {
+      return { $sv: "table", shape: "unknown", entries: [] };
+    }
+    return toNullProto(note.attributes);
+  }
   if (model.ignoreSetters.has(method)) return null;
   if (method === "setLyrics") note.lyrics = args[0];
   else if (method === "setPhonemes") note.phonemes = args[0];
@@ -115,10 +120,8 @@ function callNote(model, note, method, args) {
   else if (method === "setDuration") note.duration = args[0];
   else if (method === "setDetune") note.detune = args[0];
   else if (method === "setAttributes") {
-    // 统一按"替换"语义模拟（与 phrase-edit 夹具一致）：官方 setAttributes 的合并/替换语义
-    // 未经真机确认，服务层已改为"读旧值→合并→写全量"，两种宿主语义下结果一致；夹具取
-    // 替换是更严苛的一侧——服务若回退成部分写，未提供的 key 会被清掉、测试立即暴露。
-    note.attributes = { ...args[0] };
+    // 官方 setAttributes 只更新给定字段；夹具保持相同语义，避免掩盖协议层信封回写。
+    note.attributes = { ...note.attributes, ...args[0] };
   }
   else throw new Error(`unsupported note method ${method}`);
   return null;
@@ -481,6 +484,40 @@ test("sv_patch_notes verifies null-prototype nested attributes from the pipe dec
   assert.deepEqual(model.notes[0].attributes.expr, { depth: 1, kind: "soft" });
 });
 
+test("sv_patch_notes does not echo typed-v2 sentinels in partial attribute writes", async () => {
+  const { model, service, snapshot } = await createFixture();
+  model.notes[0].attributes.tF0Offset = { $sv: "number", value: "nan" };
+  const writes = [];
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "setAttributes") writes.push(structuredClone(request.args[0]));
+    return originalCall(request);
+  };
+
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [{ noteId: nid(snapshot, 0), set: { attributes: { dur: 1.25 } } }],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(writes, [{ dur: 1.25 }]);
+  assert.deepEqual(model.notes[0].attributes.tF0Offset, { $sv: "number", value: "nan" });
+});
+
+test("sv_patch_notes normalizes a typed empty attribute table before writing", async () => {
+  const { model, service, snapshot } = await createFixture();
+  model.notes[0].attributes = {};
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [{ noteId: nid(snapshot, 0), set: { attributes: { muted: true } } }],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(model.notes[0].attributes, { muted: true });
+});
+
 test("sv_patch_notes atomic mode rolls back when the read-back getter throws", async () => {
   const { model, service, snapshot } = await createFixture();
   // 注入发生在快照之后：resolve 指纹 3 次 + 写前 current 读 1 次，第 5 次才是读回验证。
@@ -552,9 +589,21 @@ test("sv_patch_notes reports rollback_failed when a merge-semantics host cannot 
   assert.equal(model.notes[0].attributes.brandNewKey, 0.7);
 });
 
-test("sv_patch_notes rollback removes new attribute keys under a replace-semantics host", async () => {
+test("sv_patch_notes reports rollback_failed under an undocumented replace-semantics host", async () => {
   const { model, service, snapshot } = await createFixture();
-  // 默认夹具为替换语义：setAttributes(old) 整体覆盖，新 key 可被删除，回滚可验证成功。
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "setAttributes") {
+      const noteIndex = model.handles.notes.findIndex(
+        (note) => note.__handle__ === request.handle?.__handle__
+      );
+      if (noteIndex >= 0) {
+        model.notes[noteIndex].attributes = { ...request.args[0] };
+        return null;
+      }
+    }
+    return originalCall(request);
+  };
   model.ignoreSetters.add("setPitch");
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
@@ -567,11 +616,11 @@ test("sv_patch_notes rollback removes new attribute keys under a replace-semanti
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.status, "rolled_back");
-  assert.equal(result.rollback.verified, true);
-  assert.equal(result.data.remainingChangedNotes, 0);
+  assert.equal(result.status, "rollback_failed");
+  assert.equal(result.rollback.verified, false);
+  assert.equal(result.data.remainingChangedNotes, 1);
   assert.equal(model.notes[0].attributes.brandNewKey, undefined);
-  assert.equal(model.notes[0].attributes.dur, 1);
+  assert.equal(model.notes[0].attributes.dur, undefined);
 });
 
 test("sv_patch_notes reports zero remaining changes after a verified rollback", async () => {
@@ -804,7 +853,10 @@ test("sv_patch_notes tolerates float32 quantization on detune and attribute floa
       for (const [key, value] of Object.entries(request.args[0])) {
         quantized[key] = typeof value === "number" ? Math.fround(value) : value;
       }
-      model.notes[noteIndex].attributes = quantized;
+      model.notes[noteIndex].attributes = {
+        ...model.notes[noteIndex].attributes,
+        ...quantized,
+      };
       return null;
     }
     return originalCall(request);

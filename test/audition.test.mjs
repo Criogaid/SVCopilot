@@ -315,6 +315,29 @@ test("sv_restore_audition works from the recovery payload alone", async () => {
   );
 });
 
+test("sv_restore_audition rejects malformed playback state before touching the host", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const baseRecovery = {
+    version: 1,
+    savedPlayheadSeconds: 12.5,
+    savedStatus: "stopped",
+    mixerChanges: [],
+  };
+  for (const recovery of [
+    { ...baseRecovery, savedStatus: undefined },
+    { ...baseRecovery, savedStatus: "paused" },
+    { ...baseRecovery, savedPlayheadSeconds: -1 },
+  ]) {
+    await assert.rejects(
+      service.restore({ recovery }),
+      (error) => error.code === "INVALID_ARGUMENTS"
+    );
+  }
+  assert.deepEqual(model.playbackCalls, []);
+  assert.equal(model.status, "stopped");
+});
+
 test("sv_start_audition validates range and track indices", async () => {
   const model = createAuditionModel();
   const service = createService(model);

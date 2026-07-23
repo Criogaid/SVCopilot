@@ -589,7 +589,9 @@ async function applyNotePatches(capture, notesById, patches) {
       const before = await readNoteField(capture, note, field);
       const planned = field === "attributes" ? { ...before, ...requested } : requested;
       if (noteFieldEqual(field, before, planned)) continue;
-      await writeNoteField(capture, note, field, planned);
+      // setAttributes 按官方契约只更新给定字段；完整 planned 仅用于读回验证，
+      // 不能把 typed-v2 的特殊数字信封随旧属性一起写回。
+      await writeNoteField(capture, note, field, field === "attributes" ? requested : planned);
       const observed = await readNoteField(capture, note, field);
       if (!noteFieldEqual(field, observed, planned)) {
         throw codedError("DETACHED_PREPARATION_FAILED", `${patch.noteId}.${field} did not read back`);
@@ -936,9 +938,20 @@ function pickFingerprint(value) {
 async function readNoteField(capture, note, field) {
   const spec = NOTE_FIELDS[field];
   if (!spec) throw codedError("UNKNOWN_FIELD", `unsupported note field: ${field}`);
-  return capture.call(note, spec.getter, [], {
+  const value = await capture.call(note, spec.getter, [], {
     ...(field === "attributes" ? { resultFormat: "typed-v2" } : {}),
   });
+  if (
+    field === "attributes" &&
+    isRecord(value) &&
+    value.$sv === "table" &&
+    value.shape === "unknown" &&
+    Array.isArray(value.entries) &&
+    value.entries.length === 0
+  ) {
+    return {};
+  }
+  return value;
 }
 
 async function writeNoteField(capture, note, field, value) {

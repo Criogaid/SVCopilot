@@ -68,6 +68,7 @@ SV = {
   create       = function(_, typ) return makeObj({ getType = function() return typ end }) end,
   boxSet       = function(_, v) boxContent = v end,
   boxGet       = function() return boxContent end,
+  isNan        = function(_, v) return type(v) == 'number' and v ~= v end,
 }
 
 dofile(bridgePath)
@@ -157,6 +158,11 @@ check("\\u escapes round-trip (control char re-escaped, UTF-8 preserved)",
 r = step('{"id":18,"op":"call","handle":' .. (projH or 0) .. ',"method":"getNan"}')
 check("legacy NaN degrades to null instead of invalid JSON",
   r:find('"result":null', 1, true) and not r:find('nan', 1, true), r)
+
+-- typed-v2 特殊数字入站必须反解为 Lua number，供 attributes 默认值回滚复用。
+r = step('{"id":19,"op":"call","method":"isNan","args":[{"$sv":"number","value":"nan"}]}')
+check("typed-v2 NaN envelope unmarshals back to a Lua number",
+  r:find('"result":true', 1, true) ~= nil, r)
 
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -34,7 +34,7 @@ import {
   BUILTIN_AUTOMATION_PARAMETERS,
   ParameterCurveService,
 } from "./parameter-curve.js";
-import { ProcessingService } from "./processing.js";
+import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
 import { PhraseEditService } from "./phrase-edit.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
@@ -441,7 +441,11 @@ const TOOLS = [
           required: ["__handle__"],
         },
         kind: { enum: ["phonemes", "computedAttributes", "computedPitch"] },
-        expectedNotes: { type: "integer", minimum: 0 },
+        expectedNotes: {
+          type: "integer",
+          minimum: 0,
+          maximum: MAX_PROCESSING_EXPECTED_NOTES,
+        },
         requireNonEmpty: {
           type: "boolean",
           default: false,
@@ -450,8 +454,16 @@ const TOOLS = [
         },
         startBlick: { type: "integer", minimum: 0 },
         intervalBlick: { type: "integer", minimum: 1 },
-        frames: { type: "integer", minimum: 1 },
-        minimumObservedFrames: { type: "integer", minimum: 0 },
+        frames: {
+          type: "integer",
+          minimum: 1,
+          maximum: RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
+        },
+        minimumObservedFrames: {
+          type: "integer",
+          minimum: 1,
+          maximum: RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
+        },
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
         stablePolls: { type: "integer", minimum: 1, maximum: 10 },
@@ -1128,7 +1140,28 @@ const TOOLS = [
       properties: {
         recovery: {
           type: "object",
+          additionalProperties: false,
           description: "The recovery payload from sv_start_audition (version 1).",
+          properties: {
+            version: { const: 1 },
+            savedPlayheadSeconds: { type: "number", minimum: 0 },
+            savedStatus: { enum: ["stopped", "playing", "looping"] },
+            mixerChanges: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  trackIndex: { type: "integer", minimum: 0 },
+                  field: { const: "solo" },
+                  previousValue: { type: "boolean" },
+                  setValue: { type: "boolean" },
+                },
+                required: ["trackIndex", "field", "previousValue", "setValue"],
+              },
+            },
+          },
+          required: ["version", "savedPlayheadSeconds", "savedStatus", "mixerChanges"],
         },
       },
       required: ["recovery"],

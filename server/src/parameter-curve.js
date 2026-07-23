@@ -215,7 +215,7 @@ async function executeCurveTransaction(capture, input, clock) {
     await timed(timings, "preflightReadMs", clock.now, async () => {
       transaction.target = await resolveCurveTarget(capture, input.target, {
         ...clock,
-        readOnly: input.dryRun,
+        readOnly: true,
         scanSharedTargets: false,
       });
       if (
@@ -341,6 +341,9 @@ async function executeCurveTransaction(capture, input, clock) {
       return finish();
     }
 
+    await timed(timings, "preflightReadMs", clock.now, () =>
+      assertSharedTargetMutationConfirmed(capture, transaction.target, input.target)
+    );
     phase = "execute";
     await timed(timings, "hostWriteMs", clock.now, async () => {
       await capture.call(transaction.target.roots.project, "newUndoRecord", []);
@@ -826,6 +829,31 @@ function curvePlanIsNoOp(plan) {
     (point, index) =>
       point.blick === plan.journal[index].blick && point.value === plan.journal[index].value
   );
+}
+
+async function assertSharedTargetMutationConfirmed(capture, resolved, requested) {
+  const confirmed = requested.allowSharedTargetMutation === true;
+  if (!confirmed && resolved.sharedTargetOccurrences.length > 1) {
+    const error = codedError(
+      "SHARED_TARGET_REQUIRES_CONFIRMATION",
+      "the target NoteGroup is referenced by multiple occurrences; set allowSharedTargetMutation:true to confirm that every reference may change"
+    );
+    error.sharedTargetOccurrences = resolved.sharedTargetOccurrences;
+    throw error;
+  }
+  resolved.projectTargetOccurrences = await scanTargetOccurrences(
+    capture,
+    resolved.roots.project,
+    resolved.groupUuid
+  );
+  if (!confirmed && resolved.projectTargetOccurrences.length > 1) {
+    const error = codedError(
+      "SHARED_TARGET_REQUIRES_CONFIRMATION",
+      "the target NoteGroup has multiple project occurrences; set allowSharedTargetMutation:true to confirm a project-wide edit"
+    );
+    error.projectTargetOccurrences = resolved.projectTargetOccurrences;
+    throw error;
+  }
 }
 
 export async function applyCurvePlan(capture, plan) {
