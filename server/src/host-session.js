@@ -27,6 +27,9 @@ export class HostSession {
     this.handleTypes = new Map();
     this.hostVersion = null;
     this.epoch = bridge.getStatus?.().epoch ?? 0;
+    // 桥一旦重连过，同一整数 id 可能已被新桥重新分配给另一个对象；
+    // 之后不带 __epoch__ 的 handle 无法证明自己来自当前 epoch，必须整体拒绝。
+    this.hasReattached = false;
 
     bridge.on?.("attach", ({ epoch }) => this._resetForEpoch(epoch));
     bridge.on?.("detach", () => this._clearHostState());
@@ -170,14 +173,20 @@ export class HostSession {
     if (!Number.isSafeInteger(handleId) || handleId < 1) {
       throw codedError("INVALID_HANDLE", "handle must be a positive safe integer");
     }
-    if (
-      typeof handle === "object" &&
-      Number.isSafeInteger(handle.__epoch__) &&
-      handle.__epoch__ !== this.epoch
-    ) {
+    const carriesEpoch =
+      typeof handle === "object" && Number.isSafeInteger(handle.__epoch__);
+    if (carriesEpoch && handle.__epoch__ !== this.epoch) {
       throw codedError(
         "STALE_HANDLE",
         `handle ${handleId} belongs to bridge epoch ${handle.__epoch__}; current epoch is ${this.epoch}`
+      );
+    }
+    // 裸整数 / 无 __epoch__ 的 handle 在重连后无法与旧 epoch 区分：
+    // 新桥会把低位 id 重新分配给别的对象，放行等于允许静默操作错对象。
+    if (!carriesEpoch && this.hasReattached) {
+      throw codedError(
+        "STALE_HANDLE",
+        `handle ${handleId} carries no __epoch__ and the bridge has reconnected (current epoch ${this.epoch}); re-resolve handles via sv_root/sv_call and pass the full handle objects returned by the server`
       );
     }
     return handleId;
@@ -226,6 +235,7 @@ export class HostSession {
   }
 
   _resetForEpoch(epoch) {
+    if (this.epoch > 0 && epoch !== this.epoch) this.hasReattached = true;
     this._clearHostState();
     this.epoch = epoch;
   }

@@ -115,7 +115,10 @@ function callNote(model, note, method, args) {
   else if (method === "setDuration") note.duration = args[0];
   else if (method === "setDetune") note.detune = args[0];
   else if (method === "setAttributes") {
-    for (const [key, item] of Object.entries(args[0])) note.attributes[key] = item;
+    // 统一按"替换"语义模拟（与 phrase-edit 夹具一致）：官方 setAttributes 的合并/替换语义
+    // 未经真机确认，服务层已改为"读旧值→合并→写全量"，两种宿主语义下结果一致；夹具取
+    // 替换是更严苛的一侧——服务若回退成部分写，未提供的 key 会被清掉、测试立即暴露。
+    note.attributes = { ...args[0] };
   }
   else throw new Error(`unsupported note method ${method}`);
   return null;
@@ -508,9 +511,26 @@ test("sv_patch_notes accepts fractional detuneCents", async () => {
   assert.equal(model.notes[0].detune, -7.5);
 });
 
-test("sv_patch_notes reports rollback_failed when new attribute keys cannot be removed", async () => {
+test("sv_patch_notes reports rollback_failed when a merge-semantics host cannot remove new attribute keys", async () => {
   const { model, service, snapshot } = await createFixture();
-  // pitch setter 被忽略触发回滚；attributes 已写入新 key，setAttributes(old) 删不掉它。
+  // 单测内模拟"合并"语义宿主：官方 setAttributes 语义未经真机确认，回滚验证在两种
+  // 语义下都必须诚实——合并语义下 setAttributes(old) 删不掉新 key，必须报 rollback_failed。
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "setAttributes") {
+      const noteIndex = model.handles.notes.findIndex(
+        (note) => note.__handle__ === request.handle?.__handle__
+      );
+      if (noteIndex >= 0) {
+        for (const [key, item] of Object.entries(request.args[0])) {
+          model.notes[noteIndex].attributes[key] = item;
+        }
+        return null;
+      }
+    }
+    return originalCall(request);
+  };
+  // pitch setter 被忽略触发回滚；attributes 已写入新 key，合并语义下无法删除。
   model.ignoreSetters.add("setPitch");
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
@@ -532,6 +552,28 @@ test("sv_patch_notes reports rollback_failed when new attribute keys cannot be r
   assert.equal(model.notes[0].attributes.brandNewKey, 0.7);
 });
 
+test("sv_patch_notes rollback removes new attribute keys under a replace-semantics host", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 默认夹具为替换语义：setAttributes(old) 整体覆盖，新 key 可被删除，回滚可验证成功。
+  model.ignoreSetters.add("setPitch");
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    patches: [
+      {
+        noteId: nid(snapshot, 0),
+        set: { pitch: 61, attributes: { brandNewKey: 0.7 } },
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.rollback.verified, true);
+  assert.equal(result.data.remainingChangedNotes, 0);
+  assert.equal(model.notes[0].attributes.brandNewKey, undefined);
+  assert.equal(model.notes[0].attributes.dur, 1);
+});
+
 test("sv_patch_notes reports zero remaining changes after a verified rollback", async () => {
   const { model, service, snapshot } = await createFixture();
   injectFailure(model, "setLyrics", { code: "ARGUMENT_MISMATCH" });
@@ -547,4 +589,239 @@ test("sv_patch_notes reports zero remaining changes after a verified rollback", 
   assert.equal(result.data.attemptedChangedNotes, 1);
   assert.equal(result.data.remainingChangedNotes, 0);
   assert.equal(result.data.actuallyChangedNotes, 0);
+});
+
+// range context fixture：与 sv_snapshot_range prepareStoredRange 存储的 occurrence 结构一致。
+function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
+  const model = createPatchModel();
+  const session = { withExclusive: (task) => task(model.host) };
+  const snapshots = new SnapshotService(session, {
+    store: new SnapshotStore({ now: () => 1000 }),
+    now: () => 1000,
+  });
+  const service = new NotePatchService(session, snapshots, {
+    sleepFn: async () => {},
+    now: () => 1000,
+  });
+  const entry = snapshots.store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrenceId = `${entry.contextId}:t:0:r:0`;
+  const secondOccurrenceId = `${entry.contextId}:t:1:r:0`;
+  const noteFingerprints = model.notes.map((note) => ({
+    noteId: `${occurrenceId}:n:${note.index}`,
+    indexInGroup: note.index,
+    onsetBlick: note.onset,
+    durationBlick: note.duration,
+    pitch: note.pitch,
+    lyrics: note.lyrics,
+    phonemesOverride: note.phonemes,
+    languageOverride: note.language,
+    detuneCents: note.detune,
+  }));
+  entry.context.occurrences.push({
+    occurrenceId,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "group-1",
+    timeOffsetBlick: 0,
+    sharedTargetOccurrences: shared ? [occurrenceId, secondOccurrenceId] : [occurrenceId],
+    noteFingerprints,
+  });
+  if (extraOccurrence) {
+    entry.context.occurrences.push({
+      occurrenceId: secondOccurrenceId,
+      trackIndex: 1,
+      groupIndex: 0,
+      targetGroupUuid: "group-1",
+      timeOffsetBlick: 0,
+      sharedTargetOccurrences: [],
+      noteFingerprints: [],
+    });
+  }
+  return { model, snapshots, service, contextId: entry.contextId, occurrenceId };
+}
+
+test("sv_patch_notes accepts a range context and derives the occurrence from noteIds", async () => {
+  const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();
+  const result = await service.patchNotes({
+    contextId,
+    patches: [{ noteId: `${occurrenceId}:n:1`, set: { lyrics: "ne", pitch: 65 } }],
+    waitFor: "none",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.effects, "verified");
+  assert.equal(model.notes[1].lyrics, "ne");
+  assert.equal(model.notes[1].pitch, 65);
+  // Undo 边界一开一关；成功写入后 range context 失效。
+  assert.equal(model.undoCount, 2);
+  assert.equal(snapshots.store.get(contextId), null);
+  assert.deepEqual(
+    result.data.appliedDiff.map((entry) => entry.noteId),
+    [`${occurrenceId}:n:1`, `${occurrenceId}:n:1`]
+  );
+});
+
+test("sv_patch_notes range context enforces shared-target confirmation", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
+  const refused = await service.patchNotes({
+    contextId,
+    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    waitFor: "none",
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, "SHARED_TARGET_REQUIRES_CONFIRMATION");
+  assert.equal(refused.effects, "none");
+  assert.ok(Array.isArray(refused.error.details.projectTargetOccurrences));
+  assert.equal(model.notes[0].lyrics, "a");
+  assert.equal(model.undoCount, 0);
+
+  const confirmed = await service.patchNotes({
+    contextId,
+    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    allowSharedTargetMutation: true,
+    waitFor: "none",
+  });
+  assert.equal(confirmed.ok, true);
+  assert.equal(model.notes[0].lyrics, "x");
+});
+
+test("sv_patch_notes range context dry-run defers the shared-target scan with warnings", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
+  const result = await service.patchNotes({
+    contextId,
+    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+  });
+  assert.equal(result.status, "dry_run");
+  assert.deepEqual(
+    result.warnings.map((warning) => warning.code).sort(),
+    ["SHARED_TARGET_CHECK_DEFERRED", "SHARED_TARGET_DRY_RUN"]
+  );
+  assert.equal(model.notes[0].lyrics, "a");
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_notes range context rejects foreign and mixed noteIds", async () => {
+  const { service, contextId } = createRangeFixture();
+  const foreign = await service.patchNotes({
+    contextId,
+    patches: [{ noteId: `${contextId}:t:9:r:9:n:0`, set: { lyrics: "x" } }],
+    waitFor: "none",
+  });
+  assert.equal(foreign.error.code, "UNKNOWN_OCCURRENCE");
+
+  const mixed = await service.patchNotes({
+    contextId,
+    patches: [
+      { noteId: `${contextId}:t:0:r:0:n:0`, set: { lyrics: "x" } },
+      { noteId: `${contextId}:t:9:r:9:n:0`, set: { lyrics: "y" } },
+    ],
+    waitFor: "none",
+  });
+  assert.equal(mixed.error.code, "INVALID_NOTE_ID");
+});
+
+test("sv_patch_notes range context detects stale fingerprints before writing", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture();
+  model.notes[2].lyrics = "changed-behind-context";
+  const result = await service.patchNotes({
+    contextId,
+    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    waitFor: "none",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "STALE_CONTEXT");
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_notes keeps verified success when post-commit processing observation fails", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 提交与读回验证已完成、Undo 边界已关闭之后，处理观测失败不能把成功污染成
+  // outcome_unknown/partial（对齐 phrase-edit 的 processing_observation_failed 降级）。
+  injectFailure(model, "getPhonemesForGroup", {
+    code: "HOST_TIMEOUT",
+    message: "Timeout waiting for SynthV bridge",
+  });
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "phonemes",
+    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.effects, "verified");
+  assert.equal(result.verification.passed, true);
+  assert.equal(result.data.processing.state, "unknown");
+  assert.equal(result.data.processing.error.code, "HOST_TIMEOUT");
+  assert.ok(result.warnings.some((warning) => warning.code === "PROCESSING_OBSERVATION_FAILED"));
+  // 写入已提交且是干净的一步 Undo；调用方绝不应据此重试写入。
+  assert.equal(model.notes[0].lyrics, "ka");
+  assert.equal(model.undoCount, 2);
+  assert.equal(result.undo.expectedUserUndoSteps, 1);
+});
+
+test("sv_patch_notes no_change keeps the context valid for reuse", async () => {
+  const { model, snapshots, service, snapshot } = await createFixture();
+  const noop = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "a" } }],
+  });
+  assert.equal(noop.status, "no_change");
+  // 没有写入发生，context 仍然准确；不应强迫调用方重新快照。
+  assert.ok(snapshots.store.get(snapshot.contextId));
+
+  const real = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+  });
+  assert.equal(real.ok, true);
+  assert.equal(model.notes[0].lyrics, "ka");
+});
+
+test("sv_patch_notes tolerates float32 quantization on detune and attribute floats", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 模拟宿主以 float32 存储浮点：写入即量化，读回与请求值在第 7 位有效数字附近偏离。
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    const noteIndex = model.handles.notes.findIndex(
+      (note) => note.__handle__ === request.handle?.__handle__
+    );
+    if (noteIndex >= 0 && request.method === "setDetune") {
+      model.notes[noteIndex].detune = Math.fround(request.args[0]);
+      return null;
+    }
+    if (noteIndex >= 0 && request.method === "setAttributes") {
+      const quantized = {};
+      for (const [key, value] of Object.entries(request.args[0])) {
+        quantized[key] = typeof value === "number" ? Math.fround(value) : value;
+      }
+      model.notes[noteIndex].attributes = quantized;
+      return null;
+    }
+    return originalCall(request);
+  };
+  const result = await service.patchNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    patches: [
+      { noteId: nid(snapshot, 0), set: { detuneCents: -7.3, attributes: { tF0Offset: 0.1 } } },
+    ],
+  });
+
+  // 量化误差在容差内：读回验证通过，不误触发回滚。
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.verification.passed, true);
+  assert.equal(model.notes[0].detune, Math.fround(-7.3));
+  assert.equal(model.notes[0].attributes.tF0Offset, Math.fround(0.1));
+  assert.equal(model.notes[0].attributes.dur, 1);
 });

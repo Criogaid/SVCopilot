@@ -318,6 +318,29 @@ async function executeCurveTransaction(capture, input, clock) {
       return finish();
     }
 
+    // 数学空操作（计划点与现有点完全一致且无 simplify）不开启 Undo 边界、不触碰宿主：
+    // 反复预览/归一化曲线的调用方不应制造一串空 Undo 记录（黑盒审计 F-06）。
+    if (transaction.plans.every((plan) => curvePlanIsNoOp(plan))) {
+      transaction.ok = true;
+      transaction.status = "no_change";
+      transaction.effects = "none";
+      for (const plan of transaction.plans) {
+        plan.status = "no_change";
+        plan.observed = plan.journal;
+        plan.verification = {
+          attempted: true,
+          passed: true,
+          mode: "no_change",
+          evidence: {
+            observedPointCount: plan.journal.length,
+            plannedPointCount: plan.planned.length,
+            noChange: true,
+          },
+        };
+      }
+      return finish();
+    }
+
     phase = "execute";
     await timed(timings, "hostWriteMs", clock.now, async () => {
       await capture.call(transaction.target.roots.project, "newUndoRecord", []);
@@ -794,6 +817,17 @@ function resolveAnchorOffset(offset, absoluteBase, meterMarks, quarterBlick) {
   return numerator / fraction.denominator;
 }
 
+// 空操作判定必须精确：planned 与 journal 逐点 blick/value 全等（二者均按 blick 升序），
+// 且未请求 simplify——simplify 即使在等值计划下也可能合法地删除控制点。
+function curvePlanIsNoOp(plan) {
+  if (plan.simplifyThreshold !== undefined) return false;
+  if (plan.planned.length !== plan.journal.length) return false;
+  return plan.planned.every(
+    (point, index) =>
+      point.blick === plan.journal[index].blick && point.value === plan.journal[index].value
+  );
+}
+
 export async function applyCurvePlan(capture, plan) {
   await capture.call(plan.automation, "remove", [plan.range.fromLocal, plan.range.toLocal]);
   for (const point of plan.planned) {
@@ -810,6 +844,18 @@ export async function applyCurvePlan(capture, plan) {
 
 async function resolveAutomation(capture, target, parameter, context = {}) {
   const resolvedTarget = await resolveCurveTarget(capture, target, context);
+  // expectedGroupUuid 是读写共用的目标身份守卫：直连 target（无 contextId）在读取路径
+  // 也必须校验，否则读端接受错误 UUID、写端 TARGET_CONFLICT，语义不一致（黑盒审计 F-02）。
+  // 写路径的同一校验在 executeCurveTransaction 的 preflight 里。
+  if (
+    target.expectedGroupUuid !== undefined &&
+    target.expectedGroupUuid !== resolvedTarget.groupUuid
+  ) {
+    throw codedError(
+      "TARGET_CONFLICT",
+      `expected group UUID ${target.expectedGroupUuid}, observed ${resolvedTarget.groupUuid}`
+    );
+  }
   const resolvedParameter = await resolveParameterName(capture, resolvedTarget, parameter);
   return {
     ...resolvedTarget,
@@ -1423,10 +1469,11 @@ function formatSingleTransaction(transaction) {
     };
   }
   if (transaction.ok) {
+    const noChange = transaction.status === "no_change";
     return {
       ok: true,
-      status: "succeeded",
-      effects: "verified",
+      status: transaction.status,
+      effects: transaction.effects,
       atomicity: transaction.atomicity,
       data: {
         parameter: plan.typeName,
@@ -1445,9 +1492,11 @@ function formatSingleTransaction(transaction) {
         ...formatResolvedInputPositions(plan),
       },
       rollback: { attempted: false, verified: null },
-      undo: undoEvidence(transaction.boundaryCalls, {
-        automaticRollback: transaction.rollback.attempted,
-      }),
+      undo: noChange
+        ? { boundaryCallsCompleted: 0, expectedUserUndoSteps: 0, automaticRollback: false }
+        : undoEvidence(transaction.boundaryCalls, {
+            automaticRollback: transaction.rollback.attempted,
+          }),
       verification: plan.verification,
       warnings: transaction.warnings,
       timing,
@@ -1561,9 +1610,12 @@ function formatBatchTransaction(transaction, input) {
     )
   );
   const verifiedPlans = transaction.plans.filter((plan) => plan.verification?.attempted);
-  const undo = undoEvidence(transaction.boundaryCalls, {
-    automaticRollback: transaction.rollback.attempted,
-  });
+  const noChange = transaction.status === "no_change";
+  const undo = noChange
+    ? { boundaryCallsCompleted: 0, expectedUserUndoSteps: 0, automaticRollback: false }
+    : undoEvidence(transaction.boundaryCalls, {
+        automaticRollback: transaction.rollback.attempted,
+      });
   const expectedUndoSteps = undo.expectedUserUndoSteps;
   return {
     ok: transaction.ok,

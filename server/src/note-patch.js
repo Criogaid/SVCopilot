@@ -1,4 +1,11 @@
-import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
+import {
+  appendSharedTargetDryRunWarnings,
+  contextGroupNoteCount,
+  deriveRangeOccurrenceId,
+  ensureSharedTargetConfirmed,
+  parseContextNoteId,
+  resolveContextTarget,
+} from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
 
 // 字段表同时决定确定性写入顺序：先时间/音高结构，再文本，再表达属性。
@@ -41,7 +48,13 @@ export class NotePatchService {
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
         const stored = this.snapshotService.getContext(input.contextId, host.epoch());
-        resolved = await resolveContextTarget(host, stored, { verify: true });
+        resolved = await resolveContextTarget(host, stored, {
+          verify: true,
+          acceptRange: true,
+          occurrenceId:
+            input.occurrenceId ??
+            deriveRangeOccurrenceId(stored, input.patches.map((patch) => patch.noteId)),
+        });
         const targets = resolveNoteTargets(input, resolved);
         const targetByPosition = new Map(targets.map((target) => [target.position, target]));
 
@@ -85,6 +98,7 @@ export class NotePatchService {
         }
 
         if (input.dryRun) {
+          appendSharedTargetDryRunWarnings(resolved, input, warnings);
           return {
             ok: true,
             status: "dry_run",
@@ -108,7 +122,8 @@ export class NotePatchService {
         }
 
         if (plannedDiff.length === 0) {
-          this.snapshotService.store.delete(input.contextId);
+          // no_change 没有写入，context 仍然准确；保留它让调用方免于无谓的重新快照
+          // （与 dry_run/EXPECTED_MISMATCH 路径一致）。
           return {
             ok: true,
             status: "no_change",
@@ -130,6 +145,8 @@ export class NotePatchService {
             timing: { elapsedMs: this.now() - startedAt },
           };
         }
+
+        await ensureSharedTargetConfirmed(resolved, input);
 
         await host.call({ handle: resolved.roots.project, method: "newUndoRecord", args: [] });
         boundaryCalls += 1;
@@ -256,17 +273,39 @@ export class NotePatchService {
             : PROCESSING_FIELDS;
         const touchesProcessing = plannedDiff.some((entry) => processingFields.has(entry.field));
         if (input.waitFor !== "none" && touchesProcessing) {
-          processing = await waitForProcessing(host, {
-            roots: resolved.roots,
-            group: resolved.group,
-            kind: input.waitFor,
-            expectedNotes: contextGroupNoteCount(stored, resolved.notes.length),
-            timeoutMs: input.timeoutMs,
-            pollIntervalMs: input.pollIntervalMs,
-            sleepFn: this.sleep,
-            now: this.now,
-          });
-          warnings.push(...processing.warnings);
+          // 提交与逐字段读回已完成、Undo 边界已关闭；处理观测只是后续附加信息。
+          // 观测失败绝不能把已验证成功的写入降级为 outcome_unknown/partial（对齐 phrase-edit）。
+          try {
+            processing = await waitForProcessing(host, {
+              roots: resolved.roots,
+              group: resolved.group,
+              kind: input.waitFor,
+              expectedNotes: contextGroupNoteCount(
+                stored,
+                resolved.targetNoteCount ?? resolved.notes.length
+              ),
+              timeoutMs: input.timeoutMs,
+              pollIntervalMs: input.pollIntervalMs,
+              sleepFn: this.sleep,
+              now: this.now,
+            });
+            warnings.push(...processing.warnings);
+          } catch (error) {
+            processing = {
+              ok: false,
+              status: "processing_observation_failed",
+              data: { state: "unknown", attempts: null, elapsedMs: null, evidence: null },
+              error: {
+                code: typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
+                message: error instanceof Error ? error.message : String(error),
+              },
+              warnings: [],
+            };
+            warnings.push({
+              code: "PROCESSING_OBSERVATION_FAILED",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
         this.snapshotService.store.delete(input.contextId);
 
@@ -284,6 +323,7 @@ export class NotePatchService {
                     attempts: processing.data.attempts,
                     elapsedMs: processing.data.elapsedMs,
                     evidence: processing.data.evidence,
+                    ...(processing.error ? { error: processing.error } : {}),
                   },
                 }
               : {}),
@@ -311,7 +351,8 @@ export class NotePatchService {
           ...failed(
             typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
             error instanceof Error ? error.message : String(error),
-            effects
+            effects,
+            error?.details
           ),
           status: writeAttempted ? (unknown ? "outcome_unknown" : "partial") : "failed",
           atomicity,
@@ -391,11 +432,11 @@ export class NotePatchService {
         const value = await readField(host, targetByPosition.get(entry.position).note, spec);
         evidence.restored[entry.noteId] = evidence.restored[entry.noteId] ?? {};
         evidence.restored[entry.noteId][entry.field] = value;
-        // 回滚验证要求恢复到完整旧值：attributes 也做全量比较，而不是部分 key 匹配。
+        // 回滚验证要求恢复到完整旧值：attributes 也做全量比较（含浮点容差），
         // patch 新增的 key 可能无法通过 setAttributes(old) 删除，此时如实报告未恢复。
         const restoredMatches =
           spec.kind === "attributes"
-            ? jsonValueEquals(value, entry.from)
+            ? jsonValueCloseEnough(value, entry.from)
             : fieldMatches(spec, entry.from, value);
         if (!restoredMatches) {
           verified = false;
@@ -445,7 +486,7 @@ function resolveNoteTargets(input, resolved) {
   const seen = new Set();
   const targets = [];
   for (const patch of input.patches) {
-    const position = parseNoteId(patch.noteId, input.contextId, resolved.notes.length);
+    const position = parseContextNoteId(patch.noteId, input.contextId, resolved);
     if (seen.has(position)) {
       throw codedError("DUPLICATE_NOTE_ID", `noteId appears more than once: ${patch.noteId}`);
     }
@@ -470,28 +511,6 @@ function resolveNoteTargets(input, resolved) {
   return targets;
 }
 
-function parseNoteId(noteId, contextId, noteCount) {
-  const prefix = `${contextId}:n:`;
-  if (!noteId.startsWith(prefix)) {
-    throw codedError(
-      "INVALID_NOTE_ID",
-      `noteId must be of the form ${prefix}<index> from the same snapshot context`
-    );
-  }
-  const suffix = noteId.slice(prefix.length);
-  const position = Number(suffix);
-  if (!/^\d+$/.test(suffix) || !Number.isSafeInteger(position)) {
-    throw codedError("INVALID_NOTE_ID", `noteId index is not a non-negative integer: ${noteId}`);
-  }
-  if (position >= noteCount) {
-    throw codedError(
-      "NOTE_INDEX_OUT_OF_RANGE",
-      `noteId ${noteId} refers to position ${position}, but the context has ${noteCount} note(s)`
-    );
-  }
-  return position;
-}
-
 function collectExpectedMismatches(targets) {
   const mismatches = [];
   for (const target of targets) {
@@ -501,7 +520,9 @@ function collectExpectedMismatches(targets) {
       const matches =
         spec.kind === "attributes"
           ? attributeKeysMatch(expectedValue, current)
-          : jsonValueEquals(current, expectedValue);
+          : spec.kind === "finiteNumber"
+            ? numbersClose(current, expectedValue)
+            : jsonValueEquals(current, expectedValue);
       if (!matches) {
         mismatches.push({ noteId: target.noteId, field, expected: expectedValue, observed: current });
       }
@@ -516,7 +537,13 @@ function buildPlannedDiff(targets) {
     for (const target of targets) {
       if (!Object.hasOwn(target.set, spec.field)) continue;
       const from = target.current[spec.field];
-      const to = target.set[spec.field];
+      // attributes 统一按"读旧值→合并→写全量"落盘：无论官方 setAttributes 是合并
+      // 还是替换语义，写出的都是完整对象，未提供的 key 不可能被静默清掉；
+      // 读回也因此可以做全量比较而不是只查请求过的 key。
+      const to =
+        spec.kind === "attributes"
+          ? { ...(isRecord(from) ? from : {}), ...target.set[spec.field] }
+          : target.set[spec.field];
       if (fieldMatches(spec, to, from)) continue;
       diff.push({
         noteId: target.noteId,
@@ -537,15 +564,44 @@ function buildPlannedDiff(targets) {
 }
 
 function fieldMatches(spec, requested, observed) {
-  if (spec.kind !== "attributes") return jsonValueEquals(observed, requested);
-  return attributeKeysMatch(requested, observed);
+  // 写入的 attributes 已是全量合并对象，读回按完整对象比较（含浮点容差）。
+  if (spec.kind === "attributes") return jsonValueCloseEnough(observed, requested);
+  // 宿主可能以 float32 存储 detune 等浮点字段，读回带量化误差；精确比较会误触发回滚。
+  if (spec.kind === "finiteNumber") return numbersClose(observed, requested);
+  return jsonValueEquals(observed, requested);
 }
 
-// attributes 是部分写：只要求请求过的 key 与观测值一致，其余 key 不参与比较。
+// attributes 的 expected 仍是部分匹配：只要求请求过的 key 与观测值一致。
 function attributeKeysMatch(requested, observed) {
   if (!isRecord(requested)) return false;
   if (!isRecord(observed)) return false;
-  return Object.entries(requested).every(([key, value]) => jsonValueEquals(observed[key], value));
+  return Object.entries(requested).every(([key, value]) =>
+    jsonValueCloseEnough(observed[key], value)
+  );
+}
+
+// 浮点相对容差比较：覆盖 float32 量化（相对误差 ~1.2e-7 < 1e-6）。
+// 只用于浮点字段；blick/pitch 等整数结构字段必须精确比较。
+function numbersClose(a, b) {
+  if (a === b) return true;
+  if (typeof a !== "number" || typeof b !== "number") return false;
+  if (Number.isNaN(a) && Number.isNaN(b)) return true;
+  return Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 1e-6);
+}
+
+function jsonValueCloseEnough(a, b) {
+  if (typeof a === "number" || typeof b === "number") return numbersClose(a, b);
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => jsonValueCloseEnough(item, b[index]));
+  }
+  if (isRecord(a) && isRecord(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key) => Object.hasOwn(b, key) && jsonValueCloseEnough(a[key], b[key]));
+  }
+  return false;
 }
 
 // 管道解码出的嵌套对象是 null-prototype；比较必须按 JSON 值结构进行，
@@ -621,9 +677,23 @@ function normalizeRequest(request) {
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
+  if (
+    request.occurrenceId !== undefined &&
+    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string");
+  }
+  if (
+    request.allowSharedTargetMutation !== undefined &&
+    typeof request.allowSharedTargetMutation !== "boolean"
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "allowSharedTargetMutation must be a boolean");
+  }
   return {
     contextId: request.contextId,
     patches,
+    occurrenceId: request.occurrenceId,
+    allowSharedTargetMutation: request.allowSharedTargetMutation === true,
     dryRun: request.dryRun === true,
     atomic: request.atomic !== false,
     waitFor,
@@ -680,7 +750,7 @@ function validateFieldValue(spec, value, label) {
   }
 }
 
-function failed(code, message, effects) {
+function failed(code, message, effects, details) {
   return {
     ok: false,
     status: "failed",
@@ -695,6 +765,7 @@ function failed(code, message, effects) {
             ? "unknown"
             : "partial",
       retryable: false,
+      ...(details !== undefined ? { details } : {}),
     },
     undo: undoEvidence(0),
     verification: { attempted: false, passed: null },

@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.4.1");
+  assert.equal(client.getServerVersion()?.version, "0.4.3");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -204,7 +204,7 @@ try {
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.4.1");
+  assert.equal(capabilities.interfaceVersion, "0.4.3");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -546,6 +546,58 @@ try {
     rangeProcessing.target.occurrenceId,
     rangeSnapshot.data.tracks[0].groups[0].occurrenceId
   );
+
+  // range context 必须穿过 MCP schema 和 dispatch，不能只在 service 单测中成立。
+  const rangeOccurrenceId = rangeSnapshot.data.tracks[0].groups[0].occurrenceId;
+  const rangeNote = rangeSnapshot.data.notes[0];
+  const rangePatchPlan = parseToolResult(
+    await client.callTool({
+      name: "sv_patch_notes",
+      arguments: {
+        contextId: rangeSnapshot.contextId,
+        occurrenceId: rangeOccurrenceId,
+        allowSharedTargetMutation: true,
+        patches: [
+          {
+            noteId: rangeNote.id,
+            expected: { lyrics: rangeNote.lyrics },
+            set: { lyrics: "仮" },
+          },
+        ],
+        dryRun: true,
+        waitFor: "none",
+      },
+    })
+  );
+  assert.equal(rangePatchPlan.ok, true);
+  assert.equal(rangePatchPlan.status, "dry_run");
+  assert.equal(rangePatchPlan.effects, "none");
+  assert.equal(rangePatchPlan.data.plannedChangedNotes, 1);
+
+  const rangeStructurePlan = parseToolResult(
+    await client.callTool({
+      name: "sv_restructure_notes",
+      arguments: {
+        contextId: rangeSnapshot.contextId,
+        occurrenceId: rangeOccurrenceId,
+        allowSharedTargetMutation: true,
+        operations: [
+          {
+            op: "split",
+            noteId: rangeNote.id,
+            atBlick: rangeNote.onsetBlick + Math.floor(rangeNote.durationBlick / 2),
+          },
+        ],
+        dryRun: true,
+        waitFor: "none",
+      },
+    })
+  );
+  assert.equal(rangeStructurePlan.ok, true);
+  assert.equal(rangeStructurePlan.status, "dry_run");
+  assert.equal(rangeStructurePlan.effects, "none");
+  assert.equal(rangeStructurePlan.data.initialNoteCount, 2);
+  assert.equal(rangeStructurePlan.data.expectedNoteCount, 3);
 
   const invalidRangeArguments = parseToolError(
     await client.callTool({

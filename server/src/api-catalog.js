@@ -240,11 +240,13 @@ function compareVersions(left, right) {
 
 function parseVersion(value) {
   if (typeof value !== "string") return null;
-  const match = value.trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?([A-Za-z].*)?$/);
+  // 宿主可能上报 "2.2.1-beta" / "2.2.1 Pro" 这类带分隔符的后缀；解析失败会让最低
+  // 版本预检整体 fail-open，所以后缀允许以空格/./-/_/+ 开头。
+  const match = value.trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?([\s._+-]?[A-Za-z].*)?$/);
   if (!match) return null;
   return {
     parts: [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)],
-    suffix: (match[4] ?? "").toLocaleLowerCase(),
+    suffix: (match[4] ?? "").trim().replace(/^[._+-]/, "").toLocaleLowerCase(),
   };
 }
 

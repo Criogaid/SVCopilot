@@ -17,11 +17,15 @@ function createVoiceModel() {
   };
   const vocalRef = handle("NoteGroupReference");
   const instRef = handle("NoteGroupReference");
+  // 模拟宿主 Track.clone 语义：group reference 是新对象，但仍指向同一个 NoteGroup target。
+  const leadTarget = handle("NoteGroup");
   makeTrack("Lead", [
     {
       handle: vocalRef,
       instrumental: false,
       isMain: true,
+      target: leadTarget,
+      uuid: "lead-group",
       voice: {
         paramLoudness: 0,
         paramTension: 0.3,
@@ -81,7 +85,12 @@ function createVoiceModel() {
           if (method === "isInstrumental") return group.instrumental;
           if (method === "isMain") return group.isMain ?? false;
           if (method === "getVoice") return group.voice;
+          if (method === "getTarget") return group.target;
         }
+        const byTarget = item.groups.find(
+          (candidate) => candidate.target?.__handle__ === id
+        );
+        if (byTarget && method === "getUUID") return byTarget.uuid;
       }
       throw new Error(`unsupported voice call ${id}.${method}`);
     },
@@ -154,6 +163,18 @@ test("sv_clone_track_from_template clones, renames, and verifies", async () => {
   assert.equal(result.data.name, "Harmony 1");
   assert.equal(result.data.groupCount, 2);
   assert.equal(result.data.identityPreservation, "host_opaque");
+  // 克隆轨的 reference 仍指向模板的同一 NoteGroup：如实报告"非隔离可编辑目标"，
+  // 而不是让调用方误以为它是安全的和声/替代 take 沙箱（黑盒审计 F-03）。
+  assert.equal(result.data.isIsolatedEditableTarget, false);
+  assert.deepEqual(result.data.sharedTargetGroups, [
+    {
+      groupIndex: 0,
+      targetGroupUuid: "lead-group",
+      projectOccurrenceCount: 2,
+      sharedOutsideClone: true,
+    },
+  ]);
+  assert.ok(result.warnings.some((warning) => warning.code === "CLONE_SHARES_NOTE_GROUPS"));
   assert.equal(model.tracks[1].name, "Harmony 1");
   assert.equal(model.undoCount, 2);
   assert.equal(result.undo.expectedUserUndoSteps, 1);

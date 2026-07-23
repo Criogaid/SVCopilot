@@ -1,4 +1,10 @@
-import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
+import {
+  appendSharedTargetDryRunWarnings,
+  deriveRangeOccurrenceId,
+  ensureSharedTargetConfirmed,
+  parseContextNoteId,
+  resolveContextTarget,
+} from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
 
 // 结构操作按调用方顺序逐个执行；每步都在执行时读取活动 index，避免删除导致的漂移。
@@ -25,7 +31,12 @@ export class NoteStructureService {
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
         const stored = this.snapshotService.getContext(input.contextId, host.epoch());
-        resolved = await resolveContextTarget(host, stored, { verify: true });
+        resolved = await resolveContextTarget(host, stored, {
+          verify: true,
+          acceptRange: true,
+          occurrenceId:
+            input.occurrenceId ?? deriveRangeOccurrenceId(stored, operationNoteIdList(input)),
+        });
         const scope = resolved.scope;
         const initialNoteCount = await scope.call(resolved.target, "getNumNotes");
 
@@ -44,6 +55,7 @@ export class NoteStructureService {
         }
 
         if (input.dryRun) {
+          appendSharedTargetDryRunWarnings(resolved, input, warnings);
           return {
             ok: true,
             status: "dry_run",
@@ -62,6 +74,8 @@ export class NoteStructureService {
             timing: { elapsedMs: this.now() - startedAt },
           };
         }
+
+        await ensureSharedTargetConfirmed(resolved, input);
 
         await scope.call(resolved.roots.project, "newUndoRecord", []);
         boundaryCalls += 1;
@@ -156,17 +170,36 @@ export class NoteStructureService {
 
         let processing = null;
         if (input.waitFor !== "none") {
-          processing = await waitForProcessing(host, {
-            roots: resolved.roots,
-            group: resolved.group,
-            kind: input.waitFor,
-            expectedNotes: initialNoteCount + plan.noteCountDelta,
-            timeoutMs: input.timeoutMs,
-            pollIntervalMs: input.pollIntervalMs,
-            sleepFn: this.sleep,
-            now: this.now,
-          });
-          warnings.push(...processing.warnings);
+          // 提交与结构读回已完成、Undo 边界已关闭；处理观测失败只降级 processing 子结果，
+          // 绝不把已验证成功的写入误报为 outcome_unknown/partial（对齐 phrase-edit）。
+          try {
+            processing = await waitForProcessing(host, {
+              roots: resolved.roots,
+              group: resolved.group,
+              kind: input.waitFor,
+              expectedNotes: initialNoteCount + plan.noteCountDelta,
+              timeoutMs: input.timeoutMs,
+              pollIntervalMs: input.pollIntervalMs,
+              sleepFn: this.sleep,
+              now: this.now,
+            });
+            warnings.push(...processing.warnings);
+          } catch (error) {
+            processing = {
+              ok: false,
+              status: "processing_observation_failed",
+              data: { state: "unknown", attempts: null, elapsedMs: null, evidence: null },
+              error: {
+                code: typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
+                message: error instanceof Error ? error.message : String(error),
+              },
+              warnings: [],
+            };
+            warnings.push({
+              code: "PROCESSING_OBSERVATION_FAILED",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
         this.snapshotService.store.delete(input.contextId);
 
@@ -187,6 +220,7 @@ export class NoteStructureService {
                     attempts: processing.data.attempts,
                     elapsedMs: processing.data.elapsedMs,
                     evidence: processing.data.evidence,
+                    ...(processing.error ? { error: processing.error } : {}),
                   },
                 }
               : {}),
@@ -208,7 +242,8 @@ export class NoteStructureService {
           ...failedResult(
             typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
             error instanceof Error ? error.message : String(error),
-            effects
+            effects,
+            error?.details
           ),
           status: writeAttempted ? (unknown ? "outcome_unknown" : "partial") : "failed",
           atomicity,
@@ -259,7 +294,7 @@ function buildPlan(input, resolved, initialNoteCount) {
       continue;
     }
     if (op.op === "delete") {
-      const position = parseNoteId(op.noteId, input.contextId, resolved.notes.length);
+      const position = parseContextNoteId(op.noteId, input.contextId, resolved);
       claimPosition(op.noteId, position);
       const fingerprint = resolved.fingerprints[position];
       for (const [field, expected] of Object.entries(op.expected ?? {})) {
@@ -273,7 +308,7 @@ function buildPlan(input, resolved, initialNoteCount) {
       continue;
     }
     if (op.op === "split") {
-      const position = parseNoteId(op.noteId, input.contextId, resolved.notes.length);
+      const position = parseContextNoteId(op.noteId, input.contextId, resolved);
       claimPosition(op.noteId, position);
       const fingerprint = resolved.fingerprints[position];
       const onset = fingerprint.onsetBlick;
@@ -296,7 +331,7 @@ function buildPlan(input, resolved, initialNoteCount) {
     }
     // merge：noteIds 必须是组内 index 连续的音符，按时间升序合并进第一个。
     const positions = op.noteIds.map((noteId) =>
-      parseNoteId(noteId, input.contextId, resolved.notes.length)
+      parseContextNoteId(noteId, input.contextId, resolved)
     );
     for (const [itemIndex, position] of positions.entries()) claimPosition(op.noteIds[itemIndex], position);
     const fingerprints = positions.map((position) => resolved.fingerprints[position]);
@@ -310,7 +345,11 @@ function buildPlan(input, resolved, initialNoteCount) {
       }
     }
     const order = positions
-      .map((position, itemIndex) => ({ position, fingerprint: fingerprints[itemIndex] }))
+      .map((position, itemIndex) => ({
+        position,
+        fingerprint: fingerprints[itemIndex],
+        noteId: op.noteIds[itemIndex],
+      }))
       .sort((a, b) => a.fingerprint.indexInGroup - b.fingerprint.indexInGroup);
     noteCountDelta -= op.noteIds.length - 1;
     operations.push({
@@ -319,6 +358,7 @@ function buildPlan(input, resolved, initialNoteCount) {
         position: item.position,
         note: resolved.notes[item.position],
         fingerprint: item.fingerprint,
+        noteId: item.noteId,
       })),
     });
     summaries.push({ op: "merge", noteIds: op.noteIds, lyricsJoin: op.lyricsJoin });
@@ -404,6 +444,27 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
   // merge
   const first = operation.ordered[0];
   const last = operation.ordered[operation.ordered.length - 1];
+  // 执行期用活动 index 复核相邻性：同请求中先前的 insert/split 可能已把新音符排进
+  // 计划相邻的 merge 音符之间，按计划期指纹继续合并会把它静默埋进时值里（对齐 phrase-edit）。
+  const liveIndices = [];
+  for (const item of operation.ordered) {
+    const liveIndex = await scope.call(item.note, "getIndexInParent");
+    if (!Number.isSafeInteger(liveIndex) || liveIndex < 1) {
+      throw codedError(
+        "STALE_CONTEXT",
+        `merge note is no longer in the target group: ${item.noteId}`
+      );
+    }
+    liveIndices.push(liveIndex);
+  }
+  for (let itemIndex = 1; itemIndex < liveIndices.length; itemIndex += 1) {
+    if (liveIndices[itemIndex] !== liveIndices[itemIndex - 1] + 1) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        "merge noteIds are no longer consecutive at execution time; an earlier operation in this request placed a note between them"
+      );
+    }
+  }
   const span =
     last.fingerprint.onsetBlick + last.fingerprint.durationBlick - first.fingerprint.onsetBlick;
   const mergedLyrics =
@@ -517,26 +578,14 @@ function rollbackError(error) {
   };
 }
 
-function parseNoteId(noteId, contextId, noteCount) {
-  const prefix = `${contextId}:n:`;
-  if (typeof noteId !== "string" || !noteId.startsWith(prefix)) {
-    throw codedError(
-      "INVALID_NOTE_ID",
-      `noteId must be of the form ${prefix}<index> from the same snapshot context`
-    );
+// range occurrence 推导使用的 noteId 全集：insert 没有 noteId,delete/split 一个,merge 多个。
+function operationNoteIdList(input) {
+  const noteIds = [];
+  for (const op of input.operations) {
+    if (typeof op.noteId === "string") noteIds.push(op.noteId);
+    if (Array.isArray(op.noteIds)) noteIds.push(...op.noteIds.filter((id) => typeof id === "string"));
   }
-  const suffix = noteId.slice(prefix.length);
-  const position = Number(suffix);
-  if (!/^\d+$/.test(suffix) || !Number.isSafeInteger(position)) {
-    throw codedError("INVALID_NOTE_ID", `noteId index is not a non-negative integer: ${noteId}`);
-  }
-  if (position >= noteCount) {
-    throw codedError(
-      "NOTE_INDEX_OUT_OF_RANGE",
-      `noteId ${noteId} refers to position ${position}, but the context has ${noteCount} note(s)`
-    );
-  }
-  return position;
+  return noteIds;
 }
 
 function normalizeRequest(request) {
@@ -561,9 +610,23 @@ function normalizeRequest(request) {
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
+  if (
+    request.occurrenceId !== undefined &&
+    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string");
+  }
+  if (
+    request.allowSharedTargetMutation !== undefined &&
+    typeof request.allowSharedTargetMutation !== "boolean"
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "allowSharedTargetMutation must be a boolean");
+  }
   return {
     contextId: request.contextId,
     operations,
+    occurrenceId: request.occurrenceId,
+    allowSharedTargetMutation: request.allowSharedTargetMutation === true,
     dryRun: request.dryRun === true,
     atomic: request.atomic !== false,
     waitFor,
@@ -645,7 +708,7 @@ function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function failedResult(code, message, effects) {
+function failedResult(code, message, effects, details) {
   return {
     ok: false,
     status: "failed",
@@ -660,6 +723,7 @@ function failedResult(code, message, effects) {
             ? "unknown"
             : "partial",
       retryable: false,
+      ...(details !== undefined ? { details } : {}),
     },
     undo: undoEvidence(0),
     verification: { attempted: false, passed: null },

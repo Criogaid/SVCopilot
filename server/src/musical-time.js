@@ -27,9 +27,10 @@ export function musicalToBlick(point, meterMarks, quarterBlick) {
     else break;
   }
   if (!active) throw codedError("INVALID_MUSICAL_POSITION", "the project has no measure marks");
+  // 拍空间为 [1, N+1)：最后一拍内部的小数位（如 4/4 的 4.5）合法，到达下一小节 downbeat 才越界。
   if (
-    point.beatNumerator >
-    checkedMultiply(active.numerator, point.beatDenominator, "beat range")
+    point.beatNumerator >=
+    checkedMultiply(active.numerator + 1, point.beatDenominator, "beat range")
   ) {
     throw codedError(
       "INVALID_MUSICAL_POSITION",

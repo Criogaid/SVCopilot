@@ -113,6 +113,46 @@ test("PipeRelay validates handshake and preserves lockstep serialization", async
   assert.equal(await second, 705600000);
 });
 
+test("sequential awaited calls chain through the result reply without a poll wait", async (t) => {
+  const session = `relay-chain-${process.pid}-${Date.now()}`;
+  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  await relay.init();
+
+  const toSv = await connect(relay.paths.toSv);
+  const fromSv = await connect(relay.paths.fromSv);
+  const nextReply = createLineReader(toSv);
+  t.after(async () => {
+    toSv.destroy();
+    fromSv.destroy();
+    await relay.close();
+  });
+
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
+  JSON.parse(await nextReply());
+
+  // 顺序 await：第二条命令只有在第一条 resolve 之后才会入队。
+  const sequence = (async () => {
+    const first = await relay.call({ op: "ping" });
+    const second = await relay.call({ op: "index", field: "QUARTER" });
+    return [first, second];
+  })();
+
+  writeFrame(fromSv, { type: "poll" });
+  const firstCommand = JSON.parse(await nextReply());
+  assert.equal(firstCommand.type, "command");
+  assert.equal(firstCommand.op, "ping");
+
+  writeFrame(fromSv, { type: "result", id: firstCommand.id, ok: true, result: "pong" });
+  // 关键断言：result 帧的回包直接携带下一条 command，而不是 noop 后再等一个 IDLE 轮询。
+  const chained = JSON.parse(await nextReply());
+  assert.equal(chained.type, "command");
+  assert.equal(chained.op, "index");
+
+  writeFrame(fromSv, { type: "result", id: chained.id, ok: true, result: 705600000 });
+  assert.equal(JSON.parse(await nextReply()).type, "noop");
+  assert.deepEqual(await sequence, ["pong", 705600000]);
+});
+
 test("control pipe requests bridge shutdown", async (t) => {
   const session = `control-test-${process.pid}-${Date.now()}`;
   const relay = new PipeRelay({ session, timeoutMs: 1000 });
@@ -183,4 +223,46 @@ test("oversized result frames fail the command without detaching the bridge", as
   assert.equal(await second, "pong");
   assert.equal(JSON.parse(await nextReply()).type, "noop");
   assert.equal(relay.getStatus().state, "attached");
+});
+
+test("_closeServers tears down servers unconditionally, including ones still binding", async () => {
+  const { EventEmitter } = await import("node:events");
+  const relay = new PipeRelay({ session: "close-race-test" });
+  const events = [];
+  // 模拟 net.Server：close() 在未 listening 时以 ERR_SERVER_NOT_RUNNING 回调，
+  // 但异步绑定仍可能随后完成——旧实现按 listening 短路会把它泄漏成无引用 server。
+  const makeStub = (listeningNow) => {
+    const stub = new EventEmitter();
+    stub.listening = listeningNow;
+    stub.close = (callback) => {
+      if (stub.listening) {
+        stub.listening = false;
+        events.push("closed");
+        callback?.();
+        stub.emit("close");
+      } else {
+        const error = new Error("Server is not running.");
+        error.code = "ERR_SERVER_NOT_RUNNING";
+        callback?.(error);
+      }
+      return stub;
+    };
+    return stub;
+  };
+  const bound = makeStub(true);
+  const stillBinding = makeStub(false);
+  relay.servers = [bound, stillBinding];
+
+  await relay._closeServers();
+  // 已绑定的立即关闭；仍在绑定的那个此刻无 handle 可关。
+  assert.equal(events.length, 1);
+  assert.deepEqual(relay.servers, []);
+
+  // 拆除请求之后绑定才完成：一次性 listening 兜底必须立即补一次 close，
+  // 否则它会长期占用命名管道并让重试 init 永久 EADDRINUSE。
+  stillBinding.listening = true;
+  stillBinding.emit("listening");
+  assert.equal(events.length, 2);
+  assert.equal(stillBinding.listening, false);
+  await relay.close();
 });

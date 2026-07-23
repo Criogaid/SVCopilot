@@ -28,6 +28,9 @@ local function escape_str(s)
   local in_char  = {'\\', '"', '/', '\b', '\f', '\n', '\r', '\t'}
   local out_char = {'\\', '"', '/',  'b',  'f',  'n',  'r',  't'}
   for i, c in ipairs(in_char) do s = s:gsub(c, '\\' .. out_char[i]) end
+  -- 其余控制字符（<0x20 与 0x7f）必须转成 \u00XX，否则写出的帧不是合法 JSON。
+  -- 具名转义已在上面替换为两字符序列，此处不会二次命中。
+  s = s:gsub('%c', function(c) return string.format('\\u%04x', string.byte(c)) end)
   return s
 end
 local function skip_delim(str, pos, delim, err_if_missing)
@@ -38,16 +41,44 @@ local function skip_delim(str, pos, delim, err_if_missing)
   end
   return pos + 1, true
 end
-local function parse_str_val(str, pos, val)
-  val = val or ''
-  if pos > #str then error('End of input found while parsing string.') end
-  local c = str:sub(pos, pos)
-  if c == '"'  then return val, pos + 1 end
-  if c ~= '\\' then return parse_str_val(str, pos + 1, val .. c) end
+-- 迭代 + 分段缓冲：逐字符 val..c 的旧实现对大字符串是 O(n²)，会在 UI 线程上卡顿。
+-- 同时补齐 \uXXXX 解码（Node 对 <0x20 控制字符只发 \u00XX 形式），含 UTF-16 代理对。
+local function parse_str_val(str, pos)
+  local parts = {}
   local esc_map = {b = '\b', f = '\f', n = '\n', r = '\r', t = '\t'}
-  local nextc = str:sub(pos + 1, pos + 1)
-  if not nextc then error('End of input found while parsing string.') end
-  return parse_str_val(str, pos + 2, val .. (esc_map[nextc] or nextc))
+  local start = pos
+  while true do
+    if pos > #str then error('End of input found while parsing string.') end
+    local c = str:sub(pos, pos)
+    if c == '"' then
+      parts[#parts + 1] = str:sub(start, pos - 1)
+      return table.concat(parts), pos + 1
+    elseif c == '\\' then
+      parts[#parts + 1] = str:sub(start, pos - 1)
+      local nextc = str:sub(pos + 1, pos + 1)
+      if nextc == '' then error('End of input found while parsing string.') end
+      if nextc == 'u' then
+        local hex = str:sub(pos + 2, pos + 5)
+        local code = #hex == 4 and tonumber(hex, 16) or nil
+        if not code then error('Invalid \\u escape at position ' .. pos) end
+        pos = pos + 6
+        if code >= 0xD800 and code <= 0xDBFF and str:sub(pos, pos + 1) == '\\u' then
+          local low = tonumber(str:sub(pos + 2, pos + 5), 16)
+          if low and low >= 0xDC00 and low <= 0xDFFF then
+            code = 0x10000 + (code - 0xD800) * 0x400 + (low - 0xDC00)
+            pos = pos + 6
+          end
+        end
+        parts[#parts + 1] = utf8.char(code)
+      else
+        parts[#parts + 1] = esc_map[nextc] or nextc
+        pos = pos + 2
+      end
+      start = pos
+    else
+      pos = pos + 1
+    end
+  end
 end
 local function parse_num_val(str, pos)
   local num_str = str:match('^-?%d+%.?%d*[eE]?[+-]?%d*', pos)
@@ -82,6 +113,9 @@ function json.stringify(obj, as_key)
     return '"' .. escape_str(obj) .. '"'
   elseif kind == 'number' then
     if as_key then return '"' .. tostring(obj) .. '"' end
+    -- legacy 路径的 NaN/Inf 会被 %.17g 写成非法 JSON（nan/inf）；降级为 null。
+    -- typed-v2 路径在 marshalTyped 里以 {$sv:"number"} 无损承载，不受影响。
+    if obj ~= obj or obj == math.huge or obj == -math.huge then return 'null' end
     if math.type and math.type(obj) == 'integer' then return tostring(obj) end
     return string.format('%.17g', obj)
   elseif kind == 'boolean' then

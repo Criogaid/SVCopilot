@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { RangeSnapshotService } from "../server/src/musical-range.js";
+import { blickToMusical, musicalToBlick, normalizeMusicalPoint } from "../server/src/musical-time.js";
 
 const Q = 705600000;
 const BAR_4_4 = 4 * Q;
@@ -558,4 +559,45 @@ test("range occurrence identity distinguishes references to one shared target", 
     groups[0].occurrenceId,
     groups[1].occurrenceId,
   ]);
+});
+
+test("musicalToBlick reaches fractional positions inside the last beat of a measure", () => {
+  const marks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
+  // 4/4 的 beat 4.5（"第 4 拍的后半"——切分/上勾/句末表情最常用的锚点）此前因
+  // off-by-one 完全不可达，且没有任何等价写法。
+  const half = musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: 4.5 }), marks, Q);
+  assert.equal(half, 3.5 * Q);
+  assert.equal(
+    musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: 4.75 }), marks, Q),
+    3.75 * Q
+  );
+  assert.equal(
+    musicalToBlick(normalizeMusicalPoint({ bar: 2, beat: 4.25 }), marks, Q),
+    (4 + 3.25) * Q
+  );
+
+  // 往返：blick → musical 落回第 4 拍 + 半拍余量，两侧对"最后一拍"的可达性对称。
+  const round = blickToMusical(half, marks, Q);
+  assert.equal(round.bar, 1);
+  assert.equal(round.beat, 4);
+  assert.equal(round.tickInBeatBlick, Q / 2);
+
+  // 3/4 的 3.5 同样可达；6/8 的 6.5 也是。
+  const waltz = [{ position: 0, positionBlick: 0, numerator: 3, denominator: 4 }];
+  assert.equal(musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: 3.5 }), waltz, Q), 2.5 * Q);
+  const compound = [{ position: 0, positionBlick: 0, numerator: 6, denominator: 8 }];
+  assert.equal(
+    musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: 6.5 }), compound, Q),
+    5.5 * (Q / 2)
+  );
+
+  // 下一小节的 downbeat（beat N+1）与整数越界拍仍然拒绝。
+  assert.throws(
+    () => musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: 5 }), marks, Q),
+    (error) => error.code === "INVALID_MUSICAL_POSITION"
+  );
+  assert.throws(
+    () => musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: { numerator: 10, denominator: 2 } }), marks, Q),
+    (error) => error.code === "INVALID_MUSICAL_POSITION"
+  );
 });

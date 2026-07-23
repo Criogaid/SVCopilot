@@ -118,6 +118,72 @@ export class VoiceProfileService {
           (input.name === undefined || observedName === input.name) &&
           observedGroupCount === template.groupCount;
 
+        // F-03（黑盒审计）：Track.clone 的 group reference 通常仍指向模板的同一
+        // NoteGroup——视觉上的新轨不是可安全独立编辑的音乐数据分支。这里做一次
+        // 只读全工程扫描如实报告共享情况；真正的数据分叉（detachTargets）待宿主
+        // setTarget 语义验证后再提供。扫描失败只降级为 null + 警告，绝不改动
+        // 已提交且已验证的 clone 结果。
+        let sharedTargetGroups = null;
+        let isIsolatedEditableTarget = null;
+        if (verified) {
+          try {
+            const cloneTrackIndex = hostIndex - 1;
+            const occurrencesByUuid = new Map();
+            for (let trackIndex = 0; trackIndex < trackCountAfter; trackIndex += 1) {
+              const scanTrack = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
+                inferredType: "Track",
+              });
+              const scanGroupCount = await capture.call(scanTrack, "getNumGroups");
+              for (let groupIndex = 0; groupIndex < scanGroupCount; groupIndex += 1) {
+                const reference = await capture.call(
+                  scanTrack,
+                  "getGroupReference",
+                  [groupIndex + 1],
+                  { inferredType: "NoteGroupReference" }
+                );
+                if (await capture.call(reference, "isInstrumental")) continue;
+                const target = await capture.call(reference, "getTarget", [], {
+                  inferredType: "NoteGroup",
+                });
+                const uuid = await capture.call(target, "getUUID");
+                if (!occurrencesByUuid.has(uuid)) occurrencesByUuid.set(uuid, []);
+                occurrencesByUuid.get(uuid).push({ trackIndex, groupIndex });
+              }
+            }
+            sharedTargetGroups = [];
+            isIsolatedEditableTarget = true;
+            for (const [uuid, occurrences] of occurrencesByUuid) {
+              const onClone = occurrences.filter((item) => item.trackIndex === cloneTrackIndex);
+              if (onClone.length === 0) continue;
+              const sharedOutsideClone = occurrences.length > onClone.length;
+              if (sharedOutsideClone) isIsolatedEditableTarget = false;
+              for (const item of onClone) {
+                sharedTargetGroups.push({
+                  groupIndex: item.groupIndex,
+                  targetGroupUuid: uuid,
+                  projectOccurrenceCount: occurrences.length,
+                  sharedOutsideClone,
+                });
+              }
+            }
+            sharedTargetGroups.sort((left, right) => left.groupIndex - right.groupIndex);
+            if (!isIsolatedEditableTarget) {
+              warnings.push({
+                code: "CLONE_SHARES_NOTE_GROUPS",
+                message:
+                  "The cloned track's group references share NoteGroup targets with the template; structural or note edits on the clone mutate the template too. A visual track clone is not an isolated musical-data fork.",
+              });
+            }
+          } catch (scanError) {
+            sharedTargetGroups = null;
+            isIsolatedEditableTarget = null;
+            warnings.push({
+              code: "SHARED_TARGET_SCAN_FAILED",
+              message: scanError instanceof Error ? scanError.message : String(scanError),
+            });
+          }
+        }
+
         return {
           ok: verified,
           status: verified ? "succeeded" : "verification_failed",
@@ -141,6 +207,8 @@ export class VoiceProfileService {
             groupCount: observedGroupCount,
             // Track.clone 只承诺深拷贝；隐藏 singer 状态是否随 clone 保留宿主不透明。
             identityPreservation: "host_opaque",
+            sharedTargetGroups,
+            isIsolatedEditableTarget,
           },
           undo: {
             boundaryCallsCompleted: boundaryCalls,

@@ -1046,3 +1046,196 @@ function noteState(index, onset, duration, pitch, lyrics) {
 function handle(id, type) {
   return { __handle__: id, __type__: type, __epoch__: 1 };
 }
+
+test("HostSession rejects epoch-less handles after any reconnect", async () => {
+  class FakeBridge extends EventEmitter {
+    getStatus() {
+      return { state: "listening", epoch: 0, session: "test" };
+    }
+
+    async call(command) {
+      if (command.op === "root") return { project: { __handle__: 1, __type__: "Project" } };
+      if (command.op === "call" && command.method === "getHostInfo") {
+        return { hostVersion: "2.2.1" };
+      }
+      if (command.op === "call" && command.method === "getFileName") return "test.svp";
+      throw new Error(`unsupported command: ${command.op}.${command.method ?? ""}`);
+    }
+  }
+
+  const bridge = new FakeBridge();
+  const session = new HostSession(bridge, { logger: { error() {} } });
+  bridge.emit("attach", { epoch: 1 });
+  const roots = await session.roots();
+  // 重连前只有一个 epoch，裸 handle 无歧义，仍然放行。
+  assert.equal(
+    await session.call({ handle: roots.project.__handle__, method: "getFileName", args: [] }),
+    "test.svp"
+  );
+
+  bridge.emit("attach", { epoch: 2 });
+  const fresh = await session.roots();
+  // 重连后新桥会把低位 id 重新分配给别的对象；无 __epoch__ 的 handle 无法自证来源，
+  // 必须整体拒绝，否则会静默操作错对象。
+  await assert.rejects(
+    session.call({ handle: 1, method: "getFileName", args: [] }),
+    (error) => error.code === "STALE_HANDLE"
+  );
+  await assert.rejects(
+    session.call({ handle: { __handle__: 1 }, method: "getFileName", args: [] }),
+    (error) => error.code === "STALE_HANDLE"
+  );
+  // 服务器返回的完整 handle（带当前 __epoch__）照常工作。
+  assert.equal(
+    await session.call({ handle: fresh.project, method: "getFileName", args: [] }),
+    "test.svp"
+  );
+});
+
+test("typed-v2 decoding caps aggregate declared array allocation", () => {
+  // 单帧 ≤64KiB，但多个兄弟 length 声明可把分配放大到 GB；聚合预算必须拦截。
+  const bomb = {
+    $sv: "array",
+    length: 3,
+    entries: [
+      [0, { $sv: "sparse-array", length: 600_000, entries: [] }],
+      [1, { $sv: "sparse-array", length: 600_000, entries: [] }],
+      [2, { $sv: "sparse-array", length: 600_000, entries: [] }],
+    ],
+  };
+  assert.throws(() => decodeWireValue(bomb), /aggregate array slots/);
+  // 单个满额数组仍可解码（getComputedPitchForGroup 的 resultLength 用例）。
+  const single = decodeWireValue({ $sv: "sparse-array", length: 1_000_000, entries: [[0, 1]] });
+  assert.equal(single.length, 1_000_000);
+  assert.equal(single[0], 1);
+});
+
+test("project pagination retries the same page without losing items after a transient failure", async () => {
+  const model = createProjectTraversalModel(30);
+  // 第 2 页中途注入一次 HOST_TIMEOUT——不改 epoch 的瞬时错误，正是会绕过
+  // 所有 epoch 校验、直接考验游标提交纪律的那一类。
+  const originalCall = model.host.call;
+  let injected = false;
+  model.host.call = async (request) => {
+    if (!injected && request.method === "getGroupReference" && request.args[0] === 26) {
+      injected = true;
+      const error = new Error("Timeout waiting for SynthV bridge");
+      error.code = "HOST_TIMEOUT";
+      throw error;
+    }
+    return originalCall(request);
+  };
+  const session = { withExclusive: (task) => task(model.host) };
+  const snapshots = new SnapshotService(session, {
+    store: new SnapshotStore({ now: () => 1000 }),
+    now: () => 1000,
+  });
+
+  const first = await snapshots.snapshot({
+    scope: { kind: "project" },
+    include: ["structure"],
+    pageSize: 50,
+  });
+  assert.equal(first.page.count, 16);
+  // 单轨跨页：显式分片标记，调用方必须按 index 合并同一轨的跨页分组。
+  assert.equal(first.data.tracks[0].continuesOnNextPage, true);
+  assert.equal(first.data.tracks[0].fragment, true);
+
+  const cursor = first.page.nextCursor;
+  await assert.rejects(
+    snapshots.snapshot({ cursor, pageSize: 50 }),
+    (error) => error.code === "HOST_TIMEOUT"
+  );
+  // 同一 cursor 重试：必须从本页页首完整重读；旧实现会从已推进的索引续读，
+  // 静默丢掉 16-24 号组并仍报 snapshotComplete。
+  const second = await snapshots.snapshot({ cursor, pageSize: 50 });
+  assert.equal(second.page.count, 14);
+  assert.equal(second.data.snapshotComplete, true);
+  assert.equal(second.data.tracks[0].continuedFromPreviousPage, true);
+  const groupIndices = [...first.data.tracks, ...second.data.tracks]
+    .flatMap((track) => track.groups.map((group) => group.index))
+    .sort((a, b) => a - b);
+  assert.deepEqual(groupIndices, Array.from({ length: 30 }, (_, index) => index));
+});
+
+test("sv_set_lyrics keeps verified success when post-commit processing observation fails", async () => {
+  const model = createSynthModel();
+  const session = { withExclusive: (task) => task(model.host) };
+  const snapshots = new SnapshotService(session, {
+    store: new SnapshotStore({ now: () => 1000 }),
+    now: () => 1000,
+  });
+  const lyrics = new LyricsService(session, snapshots, { sleepFn: async () => {}, now: () => 1000 });
+  const snapshot = await snapshots.snapshot({ scope: { kind: "selection" } });
+
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "getPhonemesForGroup") {
+      const error = new Error("Timeout waiting for SynthV bridge");
+      error.code = "HOST_TIMEOUT";
+      throw error;
+    }
+    return originalCall(request);
+  };
+  const result = await lyrics.setLyrics({
+    contextId: snapshot.contextId,
+    lyrics: ["さ", "よ"],
+    waitFor: "phonemes",
+    timeoutMs: 100,
+    pollIntervalMs: 20,
+  });
+
+  // 写入已提交并逐项读回验证；处理观测失败只降级 processing 子结果 + warning。
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.effects, "verified");
+  assert.equal(result.verification.passed, true);
+  assert.deepEqual(model.notes.map((note) => note.lyrics), ["さ", "よ"]);
+  assert.equal(model.undoCount, 2);
+  assert.equal(result.data.processing.error.code, "HOST_TIMEOUT");
+  assert.ok(result.warnings.some((warning) => warning.code === "PROCESSING_OBSERVATION_FAILED"));
+});
+
+test("sv_wait_for_processing validates expectedNotes and minimumObservedFrames bounds", async () => {
+  const model = createSynthModel();
+  const session = { withExclusive: (task) => task(model.host) };
+  const snapshots = new SnapshotService(session, {
+    store: new SnapshotStore({ now: () => 1000 }),
+    now: () => 1000,
+  });
+  const processing = new ProcessingService(session, snapshots, {
+    sleepFn: async () => {},
+    now: () => 1000,
+  });
+  const snapshot = await snapshots.snapshot({
+    scope: { kind: "group", trackIndex: 0, groupIndex: 0 },
+    include: ["notes"],
+  });
+
+  await assert.rejects(
+    processing.wait({ contextId: snapshot.contextId, kind: "phonemes", expectedNotes: 1_000_000 }),
+    (error) => error.code === "INVALID_ARGUMENTS"
+  );
+  await assert.rejects(
+    processing.wait({
+      contextId: snapshot.contextId,
+      kind: "computedPitch",
+      startBlick: 0,
+      intervalBlick: 1,
+      frames: 4,
+      minimumObservedFrames: -1,
+    }),
+    (error) => error.code === "INVALID_ARGUMENTS"
+  );
+  await assert.rejects(
+    processing.wait({
+      contextId: snapshot.contextId,
+      kind: "computedPitch",
+      startBlick: 0,
+      intervalBlick: 1,
+      frames: 4,
+      minimumObservedFrames: 8,
+    }),
+    (error) => error.code === "INVALID_ARGUMENTS"
+  );
+});

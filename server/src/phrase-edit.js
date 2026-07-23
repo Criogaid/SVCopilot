@@ -578,7 +578,7 @@ async function applyNotePatches(capture, notesById, patches) {
     }
     for (const [field, expected] of Object.entries(patch.expected ?? {})) {
       const observed = await readNoteField(capture, note, field);
-      if (!jsonEqual(observed, expected)) {
+      if (!noteFieldEqual(field, observed, expected)) {
         const error = codedError("EXPECTED_MISMATCH", `${patch.noteId}.${field} changed`);
         error.expected = expected;
         error.observed = observed;
@@ -588,10 +588,10 @@ async function applyNotePatches(capture, notesById, patches) {
     for (const [field, requested] of Object.entries(patch.set)) {
       const before = await readNoteField(capture, note, field);
       const planned = field === "attributes" ? { ...before, ...requested } : requested;
-      if (jsonEqual(before, planned)) continue;
+      if (noteFieldEqual(field, before, planned)) continue;
       await writeNoteField(capture, note, field, planned);
       const observed = await readNoteField(capture, note, field);
-      if (!jsonEqual(observed, planned)) {
+      if (!noteFieldEqual(field, observed, planned)) {
         throw codedError("DETACHED_PREPARATION_FAILED", `${patch.noteId}.${field} did not read back`);
       }
       diff.push({ noteId: patch.noteId, field, before, after: observed });
@@ -602,6 +602,15 @@ async function applyNotePatches(capture, notesById, patches) {
     changedNotes: new Set(diff.map((item) => item.noteId)).size,
     diff,
   };
+}
+
+// 宿主可能以 float32 存储 detune/attributes 浮点值，读回带量化误差；
+// 这两个字段按 voiceValueEqual 的相对容差比较，其余字段（blick/pitch/文本）仍精确比较。
+function noteFieldEqual(field, observed, expected) {
+  if (field === "detuneCents" || field === "attributes") {
+    return voiceValueEqual(observed, expected);
+  }
+  return jsonEqual(observed, expected);
 }
 
 async function applyStructureOperations(

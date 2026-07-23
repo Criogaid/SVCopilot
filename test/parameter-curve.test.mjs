@@ -1462,3 +1462,125 @@ test("shared target occurrences require explicit mutation confirmation", async (
   assert.equal(accepted.target.sharedTargetOccurrences.length, 2);
   assert.equal(model.undoCount, 2);
 });
+
+test("sv_get_parameter_curve enforces expectedGroupUuid on direct targets like the write path", async () => {
+  const model = createCurveModel();
+  const service = createService(model);
+  // 读路径必须与写路径共用同一目标身份守卫：错误 UUID 不能返回真实组的点。
+  await assert.rejects(
+    service.getCurve({
+      target: { trackIndex: 0, groupIndex: 0, expectedGroupUuid: "wrong-uuid" },
+      parameter: "loudness",
+      range: { fromBlick: 0, toBlick: 2 * Q },
+    }),
+    (error) => error.code === "TARGET_CONFLICT"
+  );
+  const ok = await service.getCurve({
+    target: { trackIndex: 0, groupIndex: 0, expectedGroupUuid: "curve-group" },
+    parameter: "loudness",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.data.points.length, 3);
+
+  // 写端行为不变：同样的错误 UUID → conflict。
+  const write = await service.patchCurve({
+    target: { trackIndex: 0, groupIndex: 0, expectedGroupUuid: "wrong-uuid" },
+    parameter: "loudness",
+    mode: "add",
+    amount: 1,
+    range: { fromBlick: 0, toBlick: 2 * Q },
+  });
+  assert.equal(write.ok, false);
+  assert.equal(write.status, "conflict");
+  assert.equal(write.error.code, "TARGET_CONFLICT");
+  assert.equal(model.undoCount, 0);
+});
+
+test("mathematical no-op curve writes return no_change without undo records", async () => {
+  const model = createCurveModel();
+  const service = createService(model);
+
+  // add 0：范围内有点但值不变。
+  const addZero = await service.patchCurve({
+    target: { trackIndex: 0, groupIndex: 0 },
+    parameter: "loudness",
+    mode: "add",
+    amount: 0,
+    range: { fromBlick: 0, toBlick: 2 * Q },
+  });
+  assert.equal(addZero.ok, true);
+  assert.equal(addZero.status, "no_change");
+  assert.equal(addZero.effects, "none");
+  assert.equal(addZero.undo.boundaryCallsCompleted, 0);
+  assert.equal(addZero.undo.expectedUserUndoSteps, 0);
+  assert.equal(model.undoCount, 0);
+  assert.deepEqual(model.points, [[0, 0], [Q, 0.5], [2 * Q, 1]]);
+
+  // scale 1 在空范围（affected point set 为空）同样 no_change。
+  const scaleEmpty = await service.patchCurve({
+    target: { trackIndex: 0, groupIndex: 0 },
+    parameter: "loudness",
+    mode: "scale",
+    amount: 1,
+    range: { fromBlick: 10 * Q, toBlick: 11 * Q },
+  });
+  assert.equal(scaleEmpty.status, "no_change");
+  assert.equal(model.undoCount, 0);
+
+  // replace 相同点集也是 no_change。
+  const replaceSame = await service.patchCurve({
+    target: { trackIndex: 0, groupIndex: 0 },
+    parameter: "loudness",
+    mode: "replace",
+    points: [
+      { blick: 0, value: 0 },
+      { blick: Q, value: 0.5 },
+      { blick: 2 * Q, value: 1 },
+    ],
+    range: { fromBlick: 0, toBlick: 2 * Q },
+  });
+  assert.equal(replaceSame.status, "no_change");
+  assert.equal(model.undoCount, 0);
+
+  // 批量端点同样上报 no_change 且 undoRecords 为 0。
+  const batch = await service.patchCurves({
+    target: { trackIndex: 0, groupIndex: 0 },
+    curves: [
+      { parameter: "loudness", mode: "scale", amount: 1, range: { fromBlick: 0, toBlick: 2 * Q } },
+    ],
+  });
+  assert.equal(batch.status, "no_change");
+  assert.equal(batch.undoRecords, 0);
+  assert.equal(batch.curves[0].status, "no_change");
+  assert.equal(model.undoCount, 0);
+
+  // 真实修改仍然开一步 Undo。
+  const real = await service.patchCurve({
+    target: { trackIndex: 0, groupIndex: 0 },
+    parameter: "loudness",
+    mode: "add",
+    amount: 0.5,
+    range: { fromBlick: 0, toBlick: 2 * Q },
+  });
+  assert.equal(real.status, "succeeded");
+  assert.equal(model.undoCount, 2);
+});
+
+test("a no-op plan with simplifyThreshold still writes because simplify may remove points", async () => {
+  const model = createCurveModel();
+  // 中间点 [Q, 0.5] 恰好线性可省略：simplify 会移除它，因此不能按 no_change 跳过。
+  const service = createService(model);
+  const result = await service.patchCurve({
+    target: { trackIndex: 0, groupIndex: 0 },
+    parameter: "loudness",
+    mode: "add",
+    amount: 0,
+    simplifyThreshold: 0.01,
+    range: { fromBlick: 0, toBlick: 2 * Q },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "succeeded");
+  assert.equal(model.points.length, 2);
+  assert.equal(model.undoCount, 2);
+});

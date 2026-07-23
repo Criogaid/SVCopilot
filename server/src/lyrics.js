@@ -71,7 +71,7 @@ export class LyricsService {
           (change) => change.lyrics || change.phonemes || change.language
         ).length;
         if (plannedChangedNotes === 0) {
-          this.snapshotService.store.delete(contextId);
+          // no_change 没有写入，context 仍然准确；保留它（与 dry_run 路径一致）。
           return {
             ok: true,
             status: "no_change",
@@ -222,18 +222,37 @@ export class LyricsService {
 
         let processing = null;
         if (input.waitFor !== "none") {
-          processing = await waitForProcessing(host, {
-            roots: resolved.roots,
-            group: resolved.group,
-            kind: input.waitFor,
-            expectedNotes: contextGroupNoteCount(stored, resolved.notes.length),
-            requireNonEmpty: input.requireNonEmptyPhonemes,
-            timeoutMs: input.timeoutMs,
-            pollIntervalMs: input.pollIntervalMs,
-            sleepFn: this.sleep,
-            now: this.now,
-          });
-          warnings.push(...processing.warnings);
+          // 写入与读回验证已完成、Undo 边界已关闭；处理观测失败只降级 processing 子结果，
+          // 绝不把已验证成功的写入误报为 outcome_unknown/partial（对齐 phrase-edit）。
+          try {
+            processing = await waitForProcessing(host, {
+              roots: resolved.roots,
+              group: resolved.group,
+              kind: input.waitFor,
+              expectedNotes: contextGroupNoteCount(stored, resolved.notes.length),
+              requireNonEmpty: input.requireNonEmptyPhonemes,
+              timeoutMs: input.timeoutMs,
+              pollIntervalMs: input.pollIntervalMs,
+              sleepFn: this.sleep,
+              now: this.now,
+            });
+            warnings.push(...processing.warnings);
+          } catch (error) {
+            processing = {
+              ok: false,
+              status: "processing_observation_failed",
+              data: { state: "unknown", attempts: null, elapsedMs: null, evidence: null },
+              error: {
+                code: typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
+                message: error instanceof Error ? error.message : String(error),
+              },
+              warnings: [],
+            };
+            warnings.push({
+              code: "PROCESSING_OBSERVATION_FAILED",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
         this.snapshotService.store.delete(contextId);
 
@@ -257,6 +276,7 @@ export class LyricsService {
                     attempts: processing.data.attempts,
                     elapsedMs: processing.data.elapsedMs,
                     evidence: processing.data.evidence,
+                    ...(processing.error ? { error: processing.error } : {}),
                   },
                 }
               : {}),
@@ -372,6 +392,7 @@ function undoEvidence(boundaryCallsCompleted) {
 }
 
 function isUnknownOutcomeError(error) {
+  if (error?.code === "HOST_TIMEOUT" || error?.code === "HOST_DETACHED") return true;
   return /Timeout waiting|detached|disconnected|EOF/i.test(
     error instanceof Error ? error.message : String(error)
   );

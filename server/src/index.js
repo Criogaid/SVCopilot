@@ -463,7 +463,7 @@ const TOOLS = [
   {
     name: "sv_set_lyrics",
     description:
-      "Set lyrics on the current selection or a snapshot context. Validates cardinality and staleness before writing, creates undo boundaries, reads every value back, and optionally waits for computed processing.",
+      "Legacy lyrics writer for group/selection snapshot contexts only (range contexts are rejected by design). Prefer sv_patch_notes for simple per-note lyric edits on a range context, and sv_edit_phrase for atomic phrase edits; this tool remains for whole-selection lyric replacement. Validates cardinality and staleness before writing, creates undo boundaries, reads every value back, and optionally waits for computed processing.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -490,12 +490,24 @@ const TOOLS = [
   {
     name: "sv_patch_notes",
     description:
-      'Patch fields of existing notes identified by snapshot noteIds (from sv_snapshot data.notes[].id). Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
+      'Patch fields of existing notes identified by snapshot noteIds. Accepts group/selection contexts from sv_snapshot (noteId form ctx_...:n:4) and range contexts from sv_snapshot_range (noteId form ctx_...:t:0:r:1:n:4; the occurrence is derived from the noteIds, or pass occurrenceId). For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         contextId: { type: "string", minLength: 1 },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Range contexts only: the occurrence to edit. May be omitted when the noteIds identify one occurrence or exactly one vocal occurrence exists.",
+        },
+        allowSharedTargetMutation: {
+          type: "boolean",
+          default: false,
+          description:
+            "Range contexts: required true when the target NoteGroup has multiple project occurrences (the edit applies to all of them).",
+        },
         patches: {
           type: "array",
           minItems: 1,
@@ -928,8 +940,30 @@ const TOOLS = [
         },
         voicePatch: {
           type: "object",
+          additionalProperties: true,
+          properties: {
+            paramLoudness: { type: "number", description: "Loudness (dB)." },
+            paramTension: { type: "number", description: "Tension." },
+            paramBreathiness: { type: "number", description: "Breathiness." },
+            paramGender: { type: "number", description: "Gender." },
+            paramToneShift: { type: "number", description: "Tone shift." },
+            vocalModeParams: {
+              type: "object",
+              additionalProperties: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  pitch: { type: "number", description: "Official range 0-150." },
+                  timbre: { type: "number", description: "Official range 0-150." },
+                  pronunciation: { type: "number", description: "Official range 0-150." },
+                },
+              },
+              description:
+                "Keys are vocal mode names, dynamic per voicebank; discover them via sv_get_voice_profile or the occurrence's voiceParameters in sv_snapshot_range.",
+            },
+          },
           description:
-            "Recursive partial patch limited to fields and vocal modes observable in this occurrence's getVoice result.",
+            "Partial patch of NoteGroupReference getVoice/setVoice state. Static fields are enumerated above; every patched field must still be observable in this occurrence's getVoice result, otherwise UNKNOWN_VOICE_PARAMETER.",
         },
         dryRun: { type: "boolean", default: false },
         atomic: { type: "boolean", default: true },
@@ -946,12 +980,24 @@ const TOOLS = [
   {
     name: "sv_restructure_notes",
     description:
-      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
+      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Accepts group/selection contexts from sv_snapshot and range contexts from sv_snapshot_range (range noteIds identify the occurrence; insert-only requests on a multi-occurrence range need occurrenceId, and a shared target NoteGroup requires allowSharedTargetMutation:true after a commit-time project scan). Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         contextId: { type: "string", minLength: 1 },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Range contexts only: the occurrence to edit. May be omitted when operation noteIds identify one occurrence or exactly one vocal occurrence exists.",
+        },
+        allowSharedTargetMutation: {
+          type: "boolean",
+          default: false,
+          description:
+            "Range contexts: required true when the target NoteGroup has multiple project occurrences (the edit applies to all of them).",
+        },
         operations: {
           type: "array",
           minItems: 1,
@@ -1129,7 +1175,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.4.1" },
+  { name: "sv-copilot", version: "0.4.3" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1439,7 +1485,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.4.1",
+    interfaceVersion: "0.4.3",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1483,6 +1529,30 @@ function capabilities() {
         toolTemplate: "svcopilot://schemas/{tool}",
       },
     },
+    // context 兼容矩阵：哪些工具接受哪种 contextId。range context 由 sv_snapshot_range 签发。
+    contextCompatibility: {
+      producers: {
+        sv_snapshot: ["selection", "group", "project"],
+        sv_snapshot_range: ["range"],
+      },
+      consumers: {
+        sv_set_lyrics: ["selection", "group"],
+        sv_patch_notes: ["selection", "group", "range"],
+        sv_restructure_notes: ["selection", "group", "range"],
+        sv_wait_for_processing: ["selection", "group", "range"],
+        sv_get_parameter_curve: ["range", "direct_target"],
+        sv_patch_parameter_curve: ["range", "direct_target"],
+        sv_patch_parameter_curves: ["range", "direct_target"],
+        sv_edit_phrase: ["range"],
+      },
+      rangeSharedTargetConfirmation: [
+        "sv_patch_notes",
+        "sv_restructure_notes",
+        "sv_patch_parameter_curve",
+        "sv_patch_parameter_curves",
+        "sv_edit_phrase",
+      ],
+    },
     knownLimits: {
       snapshotConsistency: "best-effort",
       genericRollback: false,
@@ -1510,7 +1580,7 @@ function capabilities() {
 function musicWorkflowSchemaIndex() {
   const names = ["sv_patch_parameter_curves", "sv_edit_phrase"];
   return {
-    schemaVersion: "0.4.1",
+    schemaVersion: "0.4.3",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -1528,7 +1598,7 @@ function toolInputSchema(name) {
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.4.1",
+    schemaVersion: "0.4.3",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };

@@ -348,6 +348,16 @@ async function captureGroup(capture, roots, scope, include) {
 
 async function captureProjectPage(capture, roots, stored, requestedPageSize, store) {
   const state = stored.traversal;
+  // 遍历只推进影子游标；整页成功后一次性提交回 stored.traversal。
+  // 否则中途宿主报错（如不改 epoch 的 HOST_TIMEOUT）会把已推进的索引留在游标里，
+  // 同 cursor 重试时静默跳过这些音符/组，最后还谎报 snapshotComplete。
+  const shadow = {
+    trackIndex: state.trackIndex,
+    groupIndex: state.groupIndex,
+    noteIndex: state.noteIndex,
+  };
+  const startedMidTrack = shadow.groupIndex > 0 || shadow.noteIndex > 0;
+  const startTrackIndex = shadow.trackIndex;
   const include = new Set(stored.include);
   const includeNotes = include.has("notes");
   const effectivePageSize = Math.min(requestedPageSize, MAX_PROJECT_PAGE_ITEMS);
@@ -366,8 +376,8 @@ async function captureProjectPage(capture, roots, stored, requestedPageSize, sto
     return track;
   };
 
-  while (state.trackIndex < state.trackCount && emitted < effectivePageSize) {
-    const trackIndex = state.trackIndex;
+  while (shadow.trackIndex < state.trackCount && emitted < effectivePageSize) {
+    const trackIndex = shadow.trackIndex;
     const trackHandle = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
       inferredType: "Track",
     });
@@ -379,15 +389,15 @@ async function captureProjectPage(capture, roots, stored, requestedPageSize, sto
     const pageTrack = addTrack(trackSummary);
 
     if (trackSummary.groupCount === 0) {
-      state.trackIndex += 1;
-      state.groupIndex = 0;
-      state.noteIndex = 0;
+      shadow.trackIndex += 1;
+      shadow.groupIndex = 0;
+      shadow.noteIndex = 0;
       emitted += 1;
       continue;
     }
 
-    while (state.groupIndex < trackSummary.groupCount && emitted < effectivePageSize) {
-      const groupIndex = state.groupIndex;
+    while (shadow.groupIndex < trackSummary.groupCount && emitted < effectivePageSize) {
+      const groupIndex = shadow.groupIndex;
       const groupHandle = await capture.call(trackHandle, "getGroupReference", [groupIndex + 1], {
         inferredType: "NoteGroupReference",
       });
@@ -398,36 +408,51 @@ async function captureProjectPage(capture, roots, stored, requestedPageSize, sto
       pageTrack.groups.push(group);
 
       if (!includeNotes || group.noteCount === 0 || group.instrumental) {
-        state.groupIndex += 1;
-        state.noteIndex = 0;
+        shadow.groupIndex += 1;
+        shadow.noteIndex = 0;
         emitted += 1;
         continue;
       }
 
       const target = await capture.call(groupHandle, "getTarget", [], { inferredType: "NoteGroup" });
-      while (state.noteIndex < group.noteCount && emitted < effectivePageSize) {
-        const noteIndex = state.noteIndex;
+      while (shadow.noteIndex < group.noteCount && emitted < effectivePageSize) {
+        const noteIndex = shadow.noteIndex;
         const noteHandle = await capture.call(target, "getNote", [noteIndex + 1], {
           inferredType: "Note",
         });
         notes.push({ trackIndex, groupIndex, ...(await readNote(capture, noteHandle)) });
-        state.noteIndex += 1;
+        shadow.noteIndex += 1;
         emitted += 1;
       }
-      if (state.noteIndex < group.noteCount) break;
-      state.groupIndex += 1;
-      state.noteIndex = 0;
+      if (shadow.noteIndex < group.noteCount) break;
+      shadow.groupIndex += 1;
+      shadow.noteIndex = 0;
     }
 
-    if (state.groupIndex < trackSummary.groupCount) break;
-    state.trackIndex += 1;
-    state.groupIndex = 0;
-    state.noteIndex = 0;
+    if (shadow.groupIndex < trackSummary.groupCount) break;
+    shadow.trackIndex += 1;
+    shadow.groupIndex = 0;
+    shadow.noteIndex = 0;
   }
 
+  // 整页宿主读取全部成功，才提交游标推进；此前任何 await 抛错都会保持游标不变，
+  // 让同一 cursor 的重试从本页页首重新读取。
+  state.trackIndex = shadow.trackIndex;
+  state.groupIndex = shadow.groupIndex;
+  state.noteIndex = shadow.noteIndex;
   state.page += 1;
   state.emitted += emitted;
   const complete = state.trackIndex >= state.trackCount;
+  // 单轨可能跨页出现（每页只带它的一部分 group/note）；显式标注让调用方知道必须
+  // 按 track index 合并跨页分片，而不是把每页的 groups 当作该轨的全集。
+  const endedMidTrack = !complete && (state.groupIndex > 0 || state.noteIndex > 0);
+  const firstTrack = pageTrackMap.get(startTrackIndex);
+  if (startedMidTrack && firstTrack) firstTrack.continuedFromPreviousPage = true;
+  const lastTrack = pageTracks[pageTracks.length - 1];
+  if (endedMidTrack && lastTrack) lastTrack.continuesOnNextPage = true;
+  for (const track of pageTracks) {
+    if (track.continuedFromPreviousPage || track.continuesOnNextPage) track.fragment = true;
+  }
   const nextCursor = complete ? null : store.encodeCursor(stored.contextId, state.page, "project");
   const returnedGroups = pageTracks.reduce((count, track) => count + track.groups.length, 0);
   const warnings = [];
@@ -603,6 +628,7 @@ function formatSnapshotPage(stored, offset, pageSize, store) {
 }
 
 function noteFingerprint(note) {
+  // 字段集合必须与 context-target.js 的 readFingerprint 一致（含 detuneCents，与 range 指纹对齐）。
   return {
     indexInGroup: note.indexInGroup,
     onsetBlick: note.onsetBlick,
@@ -611,6 +637,7 @@ function noteFingerprint(note) {
     lyrics: note.lyrics,
     phonemesOverride: note.phonemesOverride,
     languageOverride: note.languageOverride,
+    detuneCents: note.detuneCents,
   };
 }
 

@@ -369,3 +369,187 @@ test("sv_restructure_notes verifies inserted phoneme and language overrides", as
   assert.equal(result.status, "rolled_back");
   assert.equal(model.groupNotes.length, 3);
 });
+
+// range context fixture：结构与 sv_snapshot_range prepareStoredRange 存储的 occurrence 一致。
+function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
+  const model = createStructureModel();
+  const session = { withExclusive: (task) => task(model.host) };
+  const snapshots = new SnapshotService(session, {
+    store: new SnapshotStore({ now: () => 1000 }),
+    now: () => 1000,
+  });
+  const service = new NoteStructureService(session, snapshots, {
+    sleepFn: async () => {},
+    now: () => 1000,
+  });
+  const entry = snapshots.store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrenceId = `${entry.contextId}:t:0:r:0`;
+  const secondOccurrenceId = `${entry.contextId}:t:1:r:0`;
+  const noteFingerprints = model.groupNotes.map((id, index) => {
+    const state = model.states.get(id);
+    return {
+      noteId: `${occurrenceId}:n:${index}`,
+      indexInGroup: index,
+      onsetBlick: state.onset,
+      durationBlick: state.duration,
+      pitch: state.pitch,
+      lyrics: state.lyrics,
+      phonemesOverride: state.phonemes,
+      languageOverride: state.language,
+      detuneCents: state.detune,
+    };
+  });
+  entry.context.occurrences.push({
+    occurrenceId,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "group-1",
+    timeOffsetBlick: 0,
+    sharedTargetOccurrences: shared ? [occurrenceId, secondOccurrenceId] : [occurrenceId],
+    noteFingerprints,
+  });
+  if (extraOccurrence) {
+    entry.context.occurrences.push({
+      occurrenceId: secondOccurrenceId,
+      trackIndex: 1,
+      groupIndex: 0,
+      targetGroupUuid: "group-1",
+      timeOffsetBlick: 0,
+      sharedTargetOccurrences: [],
+      noteFingerprints: [],
+    });
+  }
+  return { model, snapshots, service, contextId: entry.contextId, occurrenceId };
+}
+
+test("sv_restructure_notes accepts a range context and derives the occurrence from noteIds", async () => {
+  const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();
+  const result = await service.restructureNotes({
+    contextId,
+    operations: [
+      { op: "split", noteId: `${occurrenceId}:n:1`, atBlick: Q + Q / 2 },
+      { op: "delete", noteId: `${occurrenceId}:n:2` },
+    ],
+    waitFor: "none",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.effects, "verified");
+  // split +1、delete -1：数量不变，但第二个音符被拆为两半。
+  assert.equal(result.data.finalNoteCount, 3);
+  assert.deepEqual(model.groupLyrics(), ["a", "i", "-"]);
+  assert.equal(model.undoCount, 2);
+  assert.equal(snapshots.store.get(contextId), null);
+});
+
+test("sv_restructure_notes insert-only on a multi-occurrence range needs occurrenceId", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture({
+    extraOccurrence: true,
+  });
+  const ambiguous = await service.restructureNotes({
+    contextId,
+    operations: [{ op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67 } }],
+    waitFor: "none",
+  });
+  assert.equal(ambiguous.ok, false);
+  assert.equal(ambiguous.error.code, "AMBIGUOUS_CONTEXT");
+  assert.deepEqual(ambiguous.error.details.candidateOccurrences, [
+    occurrenceId,
+    `${contextId}:t:1:r:0`,
+  ]);
+  assert.equal(model.groupNotes.length, 3);
+
+  const explicit = await service.restructureNotes({
+    contextId,
+    occurrenceId,
+    operations: [{ op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67, lyrics: "go" } }],
+    allowSharedTargetMutation: true,
+    waitFor: "none",
+  });
+  assert.equal(explicit.ok, true);
+  assert.equal(model.groupNotes.length, 4);
+});
+
+test("sv_restructure_notes range context enforces shared-target confirmation", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
+  const refused = await service.restructureNotes({
+    contextId,
+    operations: [{ op: "delete", noteId: `${occurrenceId}:n:0` }],
+    waitFor: "none",
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, "SHARED_TARGET_REQUIRES_CONFIRMATION");
+  assert.ok(Array.isArray(refused.error.details.projectTargetOccurrences));
+  assert.equal(model.groupNotes.length, 3);
+  assert.equal(model.undoCount, 0);
+
+  const confirmed = await service.restructureNotes({
+    contextId,
+    operations: [{ op: "delete", noteId: `${occurrenceId}:n:0` }],
+    allowSharedTargetMutation: true,
+    waitFor: "none",
+  });
+  assert.equal(confirmed.ok, true);
+  assert.deepEqual(model.groupLyrics(), ["i", "u"]);
+});
+
+test("sv_restructure_notes rejects a merge whose notes stopped being adjacent after an earlier insert", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 同请求先 insert 一个落在 n0/n1 之间的音符：计划期指纹判定 n0/n1 相邻，
+  // 执行期活动 index 已变为 1 和 3。旧实现会把新音符静默埋进合并时值并报 succeeded。
+  const result = await service.restructureNotes({
+    contextId: snapshot.contextId,
+    waitFor: "none",
+    operations: [
+      { op: "insert", note: { onsetBlick: Q / 2, durationBlick: Q / 4, pitch: 61, lyrics: "n" } },
+      { op: "merge", noteIds: [nid(snapshot, 0), nid(snapshot, 1)] },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.error.code, "INVALID_ARGUMENTS");
+  assert.match(result.error.message, /no longer consecutive at execution time/);
+  assert.equal(result.rollback.verified, true);
+  // 组恢复原状：3 个原始音符，时值/歌词未被合并破坏。
+  assert.equal(model.groupNotes.length, 3);
+  assert.deepEqual(model.groupLyrics(), ["a", "i", "u"]);
+  assert.equal(model.states.get(model.groupNotes[0]).duration, Q);
+  assert.equal(model.undoCount, 2);
+});
+
+test("sv_restructure_notes keeps verified success when post-commit processing observation fails", async () => {
+  const { model, service, snapshot } = await createFixture();
+  // 结构写入与读回验证完成、Undo 边界关闭后，处理观测失败只降级 processing 子结果。
+  model.failures.push({
+    method: "getPhonemesForGroup",
+    remainingSkips: 0,
+    code: "HOST_TIMEOUT",
+    message: "Timeout waiting for SynthV bridge",
+  });
+  const result = await service.restructureNotes({
+    contextId: snapshot.contextId,
+    waitFor: "phonemes",
+    timeoutMs: 100,
+    pollIntervalMs: 20,
+    operations: [
+      { op: "split", noteId: nid(snapshot, 0), atBlick: Q / 2, secondLyrics: "-" },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.effects, "verified");
+  assert.equal(result.verification.passed, true);
+  assert.equal(result.data.processing.state, "unknown");
+  assert.equal(result.data.processing.error.code, "HOST_TIMEOUT");
+  assert.ok(result.warnings.some((warning) => warning.code === "PROCESSING_OBSERVATION_FAILED"));
+  // 拆分已提交且验证通过：4 个音符、一步干净 Undo。
+  assert.equal(model.groupNotes.length, 4);
+  assert.equal(model.undoCount, 2);
+});

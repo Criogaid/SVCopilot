@@ -272,6 +272,18 @@ export class PipeRelay extends EventEmitter {
         if (frame.ok === false) entry.reject(new Error(frame.error || "SV bridge error"));
         else entry.resolve(frame.result);
       }
+      // resolve 只是调度了等待方的微任务；此刻同步回包必然是 noop，顺序调用的下一条
+      // 命令就要再等桥的 IDLE_MS 轮询。推迟一个 macrotask 让微任务链先跑完：等待方
+      // 若紧接着发起下一次调用，本帧的回包就直接携带该 command，桥的 nextDelay=0
+      // 快速通道会连续排空整串顺序调用。锁步保证推迟期间不会有新帧到来，每帧仍恰好
+      // 一个回复，不变量不变。
+      const generation = this.connectionEpoch;
+      setImmediate(() => {
+        if (generation !== this.connectionEpoch) return;
+        if (!this.handshakeComplete || !this.toSvSocket) return;
+        this._reply();
+      });
+      return;
     }
 
     this._reply();
@@ -356,18 +368,10 @@ export class PipeRelay extends EventEmitter {
   async _closeServers() {
     const servers = this.servers;
     this.servers = [];
-    await Promise.all(
-      servers.map(
-        (server) =>
-          new Promise((resolve) => {
-            if (!server.listening) {
-              resolve();
-              return;
-            }
-            server.close(() => resolve());
-          })
-      )
-    );
+    // 关闭必须无条件执行：init 局部失败时其余 server 可能仍在异步绑定。
+    // 若按 listening 跳过，它们随后完成绑定就成了无引用泄漏 server，
+    // 长期占用命名管道并让重试 init 永久 EADDRINUSE。
+    await Promise.all(servers.map((server) => closeServerCompletely(server)));
   }
 
   async close() {
@@ -377,4 +381,37 @@ export class PipeRelay extends EventEmitter {
     await this._closeServers();
     this.initialized = false;
   }
+}
+
+// 拆除单个 pipe server，容忍它尚未完成绑定：
+// - 已 listening：正常 close 并等待完成。
+// - 绑定仍在进行：close() 会以 ERR_SERVER_NOT_RUNNING 回调；注册一次性 listening
+//   兜底，绑定一旦完成立即补一次 close，保证不留下无引用的已绑定 server。
+//   绑定最终失败则无 handle 可泄漏，直接完成。
+function closeServerCompletely(server) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    server.once("listening", () => {
+      server.close(() => finish());
+    });
+    server.close((error) => {
+      if (!error) {
+        finish();
+        return;
+      }
+      if (server.listening) {
+        server.close(() => finish());
+        return;
+      }
+      // 绑定尚未完成：上面的 listening 兜底会在绑定完成时关闭它；
+      // 这里不能无限等待（绑定可能已经失败、永远不会 listening）。
+      finish();
+    });
+  });
 }

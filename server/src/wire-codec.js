@@ -1,56 +1,73 @@
 const MAX_ARRAY_LENGTH = 1_000_000;
+// 单帧 ≤ 64 KiB，但 length 声明可把分配放大到远超帧体积：一个帧塞入数百个
+// "length:1e6" 的稀疏数组兄弟节点即可让解码分配数 GB。整帧聚合预算封住该放大。
+const MAX_TOTAL_ARRAY_ALLOCATION = 1_000_000;
+const MAX_DECODE_DEPTH = 256;
 const SPECIAL_NUMBER_VALUES = new Set(["nan", "+inf", "-inf"]);
 const WIRE_ARRAY_METADATA = Symbol("svWireArrayMetadata");
 
 export function decodeWireValue(value, { epoch = 0 } = {}) {
-  if (Array.isArray(value)) return value.map((item) => decodeWireValue(item, { epoch }));
-  if (!isRecord(value)) return value;
+  const context = { epoch, remainingAllocation: MAX_TOTAL_ARRAY_ALLOCATION, depth: 0 };
+  return decodeValue(value, context);
+}
 
-  switch (value.$sv) {
-    case "nil":
-      return null;
-    case "handle":
-      return stampHandleEpoch(
-        {
-          __handle__: value.id,
-          ...(typeof value.type === "string" ? { __type__: value.type } : {}),
-        },
-        epoch
-      );
-    case "number":
-      return SPECIAL_NUMBER_VALUES.has(value.value)
-        ? { $sv: "number", value: value.value }
-        : { $sv: "number", value: "invalid" };
-    case "array":
-    case "sparse-array":
-      return decodeArrayEnvelope(value, epoch);
-    case "tuple":
-      return {
-        $sv: "tuple",
-        items: readSequence(value.items).map((item) => decodeWireValue(item, { epoch })),
-      };
-    case "map":
-      return decodeMapEnvelope(value, epoch);
-    case "table":
-      return {
-        $sv: "table",
-        shape: value.shape === "unknown" ? "unknown" : "unknown",
-        entries: readSequence(value.entries).map((entry) => decodeEntry(entry, epoch)),
-      };
-    case "unsupported":
-      return {
-        $sv: "unsupported",
-        luaType: typeof value.luaType === "string" ? value.luaType : "unknown",
-      };
-    default:
-      break;
+function decodeValue(value, context) {
+  if (context.depth >= MAX_DECODE_DEPTH) {
+    throw new Error(`wire value nesting exceeds ${MAX_DECODE_DEPTH} levels`);
   }
+  context.depth += 1;
+  try {
+    if (Array.isArray(value)) return value.map((item) => decodeValue(item, context));
+    if (!isRecord(value)) return value;
 
-  const decoded = Object.create(null);
-  for (const [key, nested] of Object.entries(value)) {
-    decoded[key] = decodeWireValue(nested, { epoch });
+    switch (value.$sv) {
+      case "nil":
+        return null;
+      case "handle":
+        return stampHandleEpoch(
+          {
+            __handle__: value.id,
+            ...(typeof value.type === "string" ? { __type__: value.type } : {}),
+          },
+          context.epoch
+        );
+      case "number":
+        return SPECIAL_NUMBER_VALUES.has(value.value)
+          ? { $sv: "number", value: value.value }
+          : { $sv: "number", value: "invalid" };
+      case "array":
+      case "sparse-array":
+        return decodeArrayEnvelope(value, context);
+      case "tuple":
+        return {
+          $sv: "tuple",
+          items: readSequence(value.items).map((item) => decodeValue(item, context)),
+        };
+      case "map":
+        return decodeMapEnvelope(value, context);
+      case "table":
+        return {
+          $sv: "table",
+          shape: typeof value.shape === "string" ? value.shape : "unknown",
+          entries: readSequence(value.entries).map((entry) => decodeEntry(entry, context)),
+        };
+      case "unsupported":
+        return {
+          $sv: "unsupported",
+          luaType: typeof value.luaType === "string" ? value.luaType : "unknown",
+        };
+      default:
+        break;
+    }
+
+    const decoded = Object.create(null);
+    for (const [key, nested] of Object.entries(value)) {
+      decoded[key] = decodeValue(nested, context);
+    }
+    return stampHandleEpoch(decoded, context.epoch);
+  } finally {
+    context.depth -= 1;
   }
-  return stampHandleEpoch(decoded, epoch);
 }
 
 export function canonicalArray(value, { length } = {}) {
@@ -93,12 +110,18 @@ export function collectHandleRefs(value, output = new Map()) {
   return output;
 }
 
-function decodeArrayEnvelope(value, epoch) {
+function decodeArrayEnvelope(value, context) {
   const length = normalizeLength(value.length);
+  if (length > context.remainingAllocation) {
+    throw new Error(
+      `wire frame declares more than ${MAX_TOTAL_ARRAY_ALLOCATION} aggregate array slots`
+    );
+  }
+  context.remainingAllocation -= length;
   const output = Array(length).fill(null);
   const observedIndices = new Set();
   for (const rawEntry of readSequence(value.entries)) {
-    const [rawIndex, rawValue] = decodeEntry(rawEntry, epoch);
+    const [rawIndex, rawValue] = decodeEntry(rawEntry, context);
     const index = Number(rawIndex);
     if (Number.isSafeInteger(index) && index >= 0 && index < output.length) {
       output[index] = rawValue;
@@ -118,8 +141,8 @@ function decodeArrayEnvelope(value, epoch) {
   return output;
 }
 
-function decodeMapEnvelope(value, epoch) {
-  const entries = readSequence(value.entries).map((entry) => decodeEntry(entry, epoch));
+function decodeMapEnvelope(value, context) {
+  const entries = readSequence(value.entries).map((entry) => decodeEntry(entry, context));
   if (!entries.every(([key]) => typeof key === "string")) {
     return { $sv: "map", entries };
   }
@@ -128,9 +151,9 @@ function decodeMapEnvelope(value, epoch) {
   return output;
 }
 
-function decodeEntry(entry, epoch) {
+function decodeEntry(entry, context) {
   const pair = readSequence(entry);
-  return [decodeWireValue(pair[0], { epoch }), decodeWireValue(pair[1], { epoch })];
+  return [decodeValue(pair[0], context), decodeValue(pair[1], context)];
 }
 
 function readSequence(value) {

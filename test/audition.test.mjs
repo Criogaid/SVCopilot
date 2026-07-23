@@ -689,3 +689,172 @@ test("auto-stop failure remains a reusable structured terminal result", async ()
   assert.equal(fromGet.data.auditionId, started.data.auditionId);
   assert.deepEqual(fromGet.data.transitionHistory, fromStop.data.transitionHistory);
 });
+
+test("concurrent explicit stops share one restore and never misreport user changes", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    soloTrackIndices: [0],
+    loop: true,
+  });
+
+  const [first, second] = await Promise.all([
+    service.stop({ auditionId: started.data.auditionId }),
+    service.stop({ auditionId: started.data.auditionId }),
+  ]);
+
+  assert.equal(first.status, "succeeded");
+  assert.equal(second.status, "succeeded");
+  // 宿主的 stop/seek/setSolo 只执行一次；第二个并发 stop 等待同一次完成，
+  // 不会把首次恢复的效果误判成 user_modified 而报 partially_restored。
+  assert.equal(model.playbackCalls.filter(([method]) => method === "stop").length, 1);
+  assert.ok(!second.warnings.some((warning) => warning.code === "RESTORE_SKIPPED_USER_CHANGES"));
+  assert.deepEqual(model.solo, [false, true, false]);
+  assert.equal(model.playhead, 12.5);
+  assert.equal(second.data.state, "restored");
+});
+
+test("explicit stop returns structured restore_failed with recovery when the restore throws", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({
+    fromBlick: 0,
+    toBlick: Q,
+    soloTrackIndices: [0],
+    loop: false,
+  });
+  // 恢复中途宿主抛错：必须得到结构化 restore_failed + recovery，而不是裸异常。
+  model.failures.push({ method: "getStatus", remainingSkips: 0, code: "HOST_CALL_FAILED" });
+
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(stopped.ok, false);
+  assert.equal(stopped.status, "restore_failed");
+  assert.equal(stopped.error.code, "HOST_CALL_FAILED");
+  assert.deepEqual(stopped.data.recovery.mixerChanges, started.data.recovery.mixerChanges);
+  assert.equal(stopped.data.state, "restore_failed");
+  assert.equal(stopped.data.perception, "human_only");
+});
+
+test("explicit stop after restore_failed retries the restore instead of replaying the failure", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({
+    fromBlick: 0,
+    toBlick: Q,
+    soloTrackIndices: [0],
+    loop: false,
+  });
+  // 首次 stop：宿主静默忽略 setSolo → 读回确认 restore_failed（非抛错路径，可重试）。
+  model.ignoreSetSolo = true;
+  const failed = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(failed.status, "restore_failed");
+
+  model.ignoreSetSolo = false;
+  const retried = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(retried.status, "succeeded");
+  assert.deepEqual(model.solo, [false, true, false]);
+  await assert.rejects(
+    service.get({ auditionId: started.data.auditionId }),
+    (error) => error.code === "UNKNOWN_AUDITION"
+  );
+});
+
+test("sv_restore_audition transitions the tracked audition to restored and makes stop idempotent", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({
+    fromBlick: 0,
+    toBlick: 4 * Q,
+    soloTrackIndices: [0],
+    loop: false,
+  });
+
+  const restored = await service.restore({
+    recovery: JSON.parse(JSON.stringify(started.data.recovery)),
+  });
+  assert.equal(restored.ok, true);
+  assert.equal(restored.status, "succeeded");
+  assert.deepEqual(model.solo, [false, true, false]);
+
+  // 注册表状态跟随恢复：get 报告 restored 终态，而不是残留 playing。
+  const after = await service.get({ auditionId: started.data.auditionId });
+  assert.equal(after.data.state, "restored");
+  assert.equal(after.data.restoredVia, "sv_restore_audition");
+  assert.deepEqual(
+    after.data.transitionHistory.map((transition) => transition.state),
+    ["scheduled", "playing", "stopped", "restored"]
+  );
+
+  // 之后的 stop 幂等重放同一结果：不再触碰宿主，也不把服务自己的恢复当成用户修改。
+  const stopCallsBefore = model.playbackCalls.filter(([method]) => method === "stop").length;
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(stopped.status, "succeeded");
+  assert.equal(stopped.data.state, "restored");
+  assert.ok(!stopped.warnings.some((warning) => warning.code === "RESTORE_SKIPPED_USER_CHANGES"));
+  assert.equal(
+    model.playbackCalls.filter(([method]) => method === "stop").length,
+    stopCallsBefore
+  );
+});
+
+test("explicit stop honors restore:false and only stops playback", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({
+    fromBlick: 4 * Q,
+    toBlick: 8 * Q,
+    soloTrackIndices: [0],
+    loop: false,
+    restore: false,
+  });
+  const stopped = await service.stop({ auditionId: started.data.auditionId });
+
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.data.state, "stopped");
+  // restore:false 是 start 时声明的契约：只停播放，不回滚 solo/playhead。
+  assert.deepEqual(model.solo, [true, true, false]);
+  assert.equal(model.playhead, 2);
+  assert.equal(model.status, "stopped");
+});
+
+test("sv_get_audition returns a well-formed response when the record is released mid-read", async () => {
+  const model = createAuditionModel();
+  const service = createService(model);
+  const started = await service.start({ fromBlick: 0, toBlick: 2 * Q, autoStop: true });
+  // 用户手动停止 → get 会走 stopped 观察分支。
+  model.status = "stopped";
+
+  // 让 get 的第一个宿主读取挂起；期间跨 epoch 的显式 stop 走 stale 路径删除记录
+  // （stale 路径不转移状态），随后 get 的 _completeAutoStop 只能拿到 null。
+  let releaseRead;
+  const gate = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  const originalCall = model.host.call;
+  let gated = false;
+  model.host.call = async (request) => {
+    if (request.method === "getPlayhead" && !gated) {
+      gated = true;
+      await gate;
+    }
+    return originalCall(request);
+  };
+
+  const getPromise = service.get({ auditionId: started.data.auditionId });
+  await new Promise((resolve) => setImmediate(resolve));
+  model.epoch = 2;
+  const staleStop = await service.stop({ auditionId: started.data.auditionId });
+  assert.equal(staleStop.error.code, "STALE_AUDITION");
+  releaseRead();
+
+  const observed = await getPromise;
+  // 绝不允许 {...null} 摊开成缺 ok/status/data 的畸形响应。
+  assert.equal(observed.ok, true);
+  assert.equal(observed.status, "succeeded");
+  assert.ok(observed.data);
+  assert.equal(observed.data.playbackStatus, "stopped");
+  assert.ok(observed.warnings.some((warning) => warning.code === "AUDITION_RECORD_RELEASED"));
+});

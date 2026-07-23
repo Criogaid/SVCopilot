@@ -251,6 +251,22 @@ function normalizeRequest(request) {
   if (request.requireNonEmpty !== undefined && typeof request.requireNonEmpty !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "requireNonEmpty must be a boolean");
   }
+  // expectedNotes 直接决定 resultLength 数组分配；不做上限会允许 [1,1e6) 级别的无谓大分配。
+  if (
+    request.expectedNotes !== undefined &&
+    (!Number.isSafeInteger(request.expectedNotes) ||
+      request.expectedNotes < 0 ||
+      request.expectedNotes > 100_000)
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "expectedNotes must be an integer between 0 and 100000");
+  }
+  const minimumObservedFrames = clampInteger(request.minimumObservedFrames, 1, 1_000_000, 1);
+  if (kind === "computedPitch" && minimumObservedFrames > request.frames) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "minimumObservedFrames cannot exceed the requested frame count"
+    );
+  }
   return {
     contextId: request.contextId,
     occurrenceId: request.occurrenceId,
@@ -261,9 +277,7 @@ function normalizeRequest(request) {
     startBlick: request.startBlick,
     intervalBlick: request.intervalBlick,
     frames: request.frames,
-    minimumObservedFrames: Number.isSafeInteger(request.minimumObservedFrames)
-      ? request.minimumObservedFrames
-      : 1,
+    minimumObservedFrames,
     timeoutMs: clampInteger(request.timeoutMs, 0, 30_000, 10_000),
     pollIntervalMs: clampInteger(request.pollIntervalMs, 20, 2_000, 100),
     stablePolls: clampInteger(request.stablePolls, 1, 10, 1),

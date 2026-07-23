@@ -412,6 +412,7 @@ export class AuditionService {
         transitionHistory: audition.transitionHistory,
         endPolicy: "auto_stop",
         autoStop: timing,
+        perception: "human_only",
       },
       warnings,
     };
@@ -458,6 +459,7 @@ export class AuditionService {
             plannedStopAt: audition.plannedStopAt,
             elapsedMs: this.now() - audition.createdAt,
             staleEpoch: audition.epoch !== host.epoch(),
+            perception: "human_only",
           },
           warnings: [],
           timings: timer.finish(),
@@ -473,6 +475,21 @@ export class AuditionService {
     ) {
       if (audition.timer) this.clearTimeout(audition.timer);
       const completed = await this._completeAutoStop(auditionId, { stoppedByUser: true });
+      if (!completed) {
+        // 并发的 stop/restore 已释放该 audition 记录；observed 里的实时播放状态仍然真实，
+        // 不能把 null 展开成缺 ok/status/data 的畸形响应。
+        return {
+          ...observed,
+          warnings: [
+            ...observed.warnings,
+            {
+              code: "AUDITION_RECORD_RELEASED",
+              message:
+                "The audition record was released by a concurrent stop/restore; live playback state above is still accurate.",
+            },
+          ],
+        };
+      }
       return { ...completed, timings: timer.finish() };
     }
     return observed;
@@ -495,13 +512,34 @@ export class AuditionService {
       return { ...completed, timings: finishAuditionTiming(timer) };
     }
     timer.requestCoordinator();
+    // 显式 stop 与 autoStop/并发 stop 共享同一次完成记忆：completionPromise 在首个
+    // await 之前同步占位，并发的第二个 stop/get 等待同一结果，宿主的 stop/seek/setSolo
+    // 只执行一次，也不会把首次恢复的效果误判成 user_modified。
+    audition.completionPromise = this._performExplicitStop(audition, timer).catch((error) => {
+      // 恢复中途宿主抛错也必须返回结构化 restore_failed + recovery，
+      // 而不是退化成裸 INTERNAL_ERROR 丢掉逃生通道（对齐 autoStop 侧的 .catch）。
+      transitionAudition(audition, "restore_failed", this.now());
+      audition.terminalResult = explicitStopFailure(audition, error);
+      return audition.terminalResult;
+    });
+    const completed = await audition.completionPromise;
+    // 未记忆终态（读回确认的 restore_failed）保持可重试：释放共享 promise，
+    // 让下一次显式 stop 重新执行恢复，而不是永远重放同一失败。
+    if (!audition.terminalResult) audition.completionPromise = null;
+    return { ...completed, timings: finishAuditionTiming(timer) };
+  }
+
+  async _performExplicitStop(audition, timer) {
+    audition.stopRequestedAt = this.now();
+    transitionAudition(audition, "stop_requested", audition.stopRequestedAt);
     const result = await this._restore(audition.recovery, {
       expectedEpoch: audition.epoch,
+      restoreState: audition.restore,
       onAcquired: () => timer.acquiredCoordinator(),
     });
     if (result.status === "stale_epoch") {
       // 跨 epoch 自动恢复可能把旧工程的索引/solo/播放头写进新工程；拒绝并交还 payload。
-      this.auditions.delete(auditionId);
+      this.auditions.delete(audition.id);
       return {
         ok: false,
         status: "failed",
@@ -513,28 +551,59 @@ export class AuditionService {
           outcome: "unchanged",
           retryable: false,
         },
-        data: { auditionId, recovery: audition.recovery },
+        data: { auditionId: audition.id, recovery: audition.recovery },
         warnings: [],
-        timings: finishAuditionTiming(timer),
       };
     }
-    // 恢复未完全成功时保留 audition 记录，调用方可凭 recovery 重试。
-    if (result.status !== "restore_failed") this.auditions.delete(auditionId);
-    return {
+    audition.hostStoppedAt = result.data?.hostStoppedAt ?? this.now();
+    transitionAudition(audition, "stopped", audition.hostStoppedAt);
+    const terminalState =
+      result.status === "restore_failed"
+        ? "restore_failed"
+        : audition.restore
+          ? "restored"
+          : "stopped";
+    if (terminalState !== "stopped") transitionAudition(audition, terminalState, this.now());
+    const completed = {
       ...result,
-      data: { ...result.data, auditionId },
-      timings: finishAuditionTiming(timer),
+      data: {
+        ...result.data,
+        auditionId: audition.id,
+        state: audition.state,
+        transitionHistory: audition.transitionHistory,
+        endPolicy: audition.endPolicy,
+        perception: "human_only",
+      },
     };
+    // 恢复未完全成功时保留 audition 记录且不记忆终态，调用方可凭同一 auditionId 重试
+    // 或用 recovery 走 sv_restore_audition；成功则记忆并移除（既有契约：之后的
+    // get/stop 返回 UNKNOWN_AUDITION）。
+    if (result.status !== "restore_failed") {
+      audition.terminalResult = completed;
+      this.auditions.delete(audition.id);
+    }
+    return completed;
   }
 
   async restore(request) {
     const timer = new ServiceTiming({ now: this.now });
     const recovery = request?.recovery;
+    // 逃生通道接受客户端回传的 payload：逐项校验 mixerChanges 形状（E7），
+    // 越界 trackIndex 在恢复期由宿主报错并走结构化 restore_failed。
     if (
     !isRecord(recovery) ||
       recovery.version !== 1 ||
       !Array.isArray(recovery.mixerChanges) ||
-      !Number.isFinite(recovery.savedPlayheadSeconds)
+      !Number.isFinite(recovery.savedPlayheadSeconds) ||
+      !recovery.mixerChanges.every(
+        (change) =>
+          isRecord(change) &&
+          Number.isSafeInteger(change.trackIndex) &&
+          change.trackIndex >= 0 &&
+          change.field === "solo" &&
+          typeof change.previousValue === "boolean" &&
+          typeof change.setValue === "boolean"
+      )
     ) {
       throw codedError(
         "INVALID_ARGUMENTS",
@@ -542,10 +611,63 @@ export class AuditionService {
       );
     }
     timer.requestCoordinator();
-    const result = await this._restore(recovery, {
-      onAcquired: () => timer.acquiredCoordinator(),
-    });
-    return { ...result, timings: finishAuditionTiming(timer) };
+    let result;
+    try {
+      result = await this._restore(recovery, {
+        onAcquired: () => timer.acquiredCoordinator(),
+      });
+    } catch (error) {
+      // 逃生通道的恢复失败同样要结构化并交还 payload 供重试，不能裸抛 INTERNAL_ERROR。
+      return {
+        ok: false,
+        status: "restore_failed",
+        effects: "may_remain",
+        error: {
+          code: typeof error?.code === "string" ? error.code : "HOST_CALL_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+          outcome: "partial",
+          retryable: false,
+        },
+        data: { recovery, perception: "human_only" },
+        warnings: [],
+        timings: finishAuditionTiming(timer),
+      };
+    }
+    this._absorbExternalRestore(recovery, result);
+    return {
+      ...result,
+      data: { ...result.data, perception: "human_only" },
+      timings: finishAuditionTiming(timer),
+    };
+  }
+
+  // sv_restore_audition 成功后，若其 payload 对应内存中仍活跃的 audition，将其转入
+  // restored 终态并记忆结果：后续 sv_get_audition 如实报告 restored，sv_stop_audition
+  // 幂等重放同一结果，不再二次恢复宿主状态、也不会把服务自己的恢复误判成用户修改（F-01）。
+  _absorbExternalRestore(recovery, result) {
+    if (result.status !== "succeeded" && result.status !== "partially_restored") return;
+    for (const [auditionId, audition] of this.auditions) {
+      if (isTerminalAuditionState(audition.state)) continue;
+      if (!recoveryEquals(audition.recovery, recovery)) continue;
+      if (audition.timer) {
+        this.clearTimeout(audition.timer);
+        audition.timer = null;
+      }
+      transitionAudition(audition, "stopped", this.now());
+      transitionAudition(audition, "restored", this.now());
+      audition.terminalResult = {
+        ...result,
+        data: {
+          ...result.data,
+          auditionId,
+          state: audition.state,
+          transitionHistory: audition.transitionHistory,
+          endPolicy: audition.endPolicy,
+          restoredVia: "sv_restore_audition",
+          perception: "human_only",
+        },
+      };
+    }
   }
 
   async _restore(
@@ -825,9 +947,60 @@ function autoStopFailure(audition, cause) {
       transitionHistory: audition.transitionHistory,
       recovery: audition.recovery,
       autoStop: autoStopTiming(audition),
+      perception: "human_only",
     },
     warnings: [],
   };
+}
+
+// 显式 stop 的恢复中途抛错：与 autoStopFailure 同构的结构化终态（含 recovery 逃生通道），
+// 只是没有 autoStop 计时段。
+function explicitStopFailure(audition, cause) {
+  return {
+    ok: false,
+    status: "restore_failed",
+    effects: "may_remain",
+    error: {
+      code: typeof cause?.code === "string" ? cause.code : "HOST_CALL_FAILED",
+      message: cause instanceof Error ? cause.message : String(cause),
+      outcome: "partial",
+      retryable: false,
+    },
+    data: {
+      auditionId: audition.id,
+      state: "restore_failed",
+      transitionHistory: audition.transitionHistory,
+      recovery: audition.recovery,
+      endPolicy: audition.endPolicy,
+      perception: "human_only",
+    },
+    warnings: [],
+  };
+}
+
+// recovery payload 的结构化等值比较（不能用 JSON.stringify：客户端重放的 payload
+// 可能改变键序）。字段集合与 sv_start_audition 生成的 version 1 payload 一致。
+function recoveryEquals(left, right) {
+  if (!isRecord(left) || !isRecord(right)) return false;
+  if (left.version !== right.version) return false;
+  if (left.savedPlayheadSeconds !== right.savedPlayheadSeconds) return false;
+  if (left.savedStatus !== right.savedStatus) return false;
+  const leftChanges = Array.isArray(left.mixerChanges) ? left.mixerChanges : [];
+  const rightChanges = Array.isArray(right.mixerChanges) ? right.mixerChanges : [];
+  return (
+    leftChanges.length === rightChanges.length &&
+    leftChanges.every((change, index) => {
+      const other = rightChanges[index];
+      return (
+        isRecord(change) &&
+        isRecord(other) &&
+        change.trackIndex === other.trackIndex &&
+        change.field === other.field &&
+        change.previousValue === other.previousValue &&
+        change.setValue === other.setValue
+      );
+    })
+  );
 }
 
 function isTerminalAuditionState(state) {

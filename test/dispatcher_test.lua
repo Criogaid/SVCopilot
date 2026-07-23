@@ -52,6 +52,8 @@ local project = makeObj({
   getStruct    = function() return { bpm = 160, position = 0 } end,   -- plain data, must inline
   getEmpty     = function() return {} end,
   getSparse    = function() return { [2] = 62.5, [4] = 64 } end,
+  getCtl       = function() return "a\1b\31c\nd" end,                 -- 控制字符必须转义成合法 JSON
+  getNan       = function() return 0 / 0 end,                          -- legacy 路径 NaN 必须降级 null
 })
 
 SV = {
@@ -137,6 +139,24 @@ check("typed sparse array keeps length and indexes",
 r = step('{"id":14,"op":"index","field":"MISSING"}')
 check("unknown field -> ok:false + error",
   r:find('"ok":false', 1, true) and r:find("no such field", 1, true), r)
+
+-- 控制字符出站转义：<0x20（除具名转义）必须写成 \u00XX，帧才是合法 JSON。
+r = step('{"id":15,"op":"call","handle":' .. (projH or 0) .. ',"method":"getCtl"}')
+check("control characters escape to \\u00XX and named \\n survives",
+  r:find('\\u0001', 1, true) and r:find('\\u001f', 1, true) and r:find('a\\u0001b', 1, true)
+    and r:find('c\\nd', 1, true), r)
+
+-- 入站 \uXXXX 解码：Node 对 <0x20 只发 \u00XX；BMP 与代理对都要能还原。
+r = step('{"id":16,"op":"call","method":"boxSet","args":["A\\u0001\\u3042\\ud83c\\udfb5"]}')
+check("boxSet(\\u escapes) ok", r:find('"ok":true', 1, true) ~= nil, r)
+r = step('{"id":17,"op":"call","method":"boxGet"}')
+check("\\u escapes round-trip (control char re-escaped, UTF-8 preserved)",
+  r:find('A\\u0001\u{3042}\u{1F3B5}', 1, true) ~= nil, r)
+
+-- legacy 数字路径的 NaN 不再产出非法 JSON（typed-v2 有 $sv:number 无损承载）。
+r = step('{"id":18,"op":"call","handle":' .. (projH or 0) .. ',"method":"getNan"}')
+check("legacy NaN degrades to null instead of invalid JSON",
+  r:find('"result":null', 1, true) and not r:find('nan', 1, true), r)
 
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)
