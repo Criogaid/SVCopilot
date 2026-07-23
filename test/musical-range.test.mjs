@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RangeSnapshotService } from "../server/src/musical-range.js";
+import { ComputedPitchCompareService } from "../server/src/computed-pitch-compare.js";
+import { RangeSnapshotService, getStoredComputedPitch } from "../server/src/musical-range.js";
 import { blickToMusical, musicalToBlick, normalizeMusicalPoint } from "../server/src/musical-time.js";
 
 const Q = 705600000;
@@ -600,4 +601,40 @@ test("musicalToBlick reaches fractional positions inside the last beat of a meas
     () => musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: { numerator: 10, denominator: 2 } }), marks, Q),
     (error) => error.code === "INVALID_MUSICAL_POSITION"
   );
+});
+
+test("range snapshot stores computed pitch for sv_compare_computed_pitch", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const snap = await service.snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 12 } },
+    include: ["notes", "computedPitch"],
+    computedPitchSampling: { frames: 40 },
+  });
+  const stored = service.store.get(snap.contextId);
+  const occurrence = stored.context.occurrences[0];
+  // 供 compare 使用的上下文增量：pitchOffset、tempo map 与未分页 computed-pitch 序列。
+  assert.equal(occurrence.pitchOffsetSemitone, 0);
+  assert.ok(Array.isArray(stored.context.tempoMarks) && stored.context.tempoMarks.length > 0);
+  const series = getStoredComputedPitch(stored, occurrence.occurrenceId);
+  assert.equal(series.values.length, 40);
+  assert.equal(series.evidence.observedFrames, 40);
+  assert.equal(getStoredComputedPitch(stored, "ctx_x:t:9:r:9"), null);
+
+  // 端到端：真实 snapshot 存储 → compare 纯内存分析，全程零额外宿主访问。
+  const hostCallsBeforeCompare = model.hostCalls.length;
+  const compareService = new ComputedPitchCompareService({
+    store: service.store,
+    now: () => 2000,
+  });
+  const result = await compareService.compare({
+    mode: "compare_to_target",
+    contextId: snap.contextId,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.occurrence.occurrenceId, occurrence.occurrenceId);
+  assert.ok(result.summary.validFrameCount > 0);
+  assert.ok(Number.isFinite(result.summary.maeCent));
+  assert.equal(result.provenance.pitchSource, "computedPitch");
+  assert.equal(model.hostCalls.length, hostCallsBeforeCompare);
 });

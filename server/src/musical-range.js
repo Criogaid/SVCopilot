@@ -467,6 +467,8 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
       groupIndex: occurrence.groupIndex,
       targetGroupUuid: occurrence.targetGroupUuid,
       timeOffsetBlick: occurrence.timeOffsetBlick,
+      // sv_compare_computed_pitch 的 compare_to_target 目标 = note.pitch + detune/100 + pitchOffset。
+      pitchOffsetSemitone: occurrence.group?.pitchOffsetSemitone ?? 0,
       sharedTargetOccurrences,
       noteFingerprints,
     });
@@ -482,9 +484,25 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
       delete item.occurrenceKey;
     }
   }
+  // 为 sv_compare_computed_pitch 留存未分页的逐 occurrence computed-pitch 序列。
+  // values 保留 null（无音高帧），不做插值；引用 captured 中同一数组，仅增引用不复制。
+  const computedPitchByOccurrence = Object.create(null);
+  for (const item of captured.data.computedPitch ?? []) {
+    if (typeof item.occurrenceId !== "string") continue;
+    computedPitchByOccurrence[item.occurrenceId] = {
+      startBlick: item.startBlick,
+      intervalBlick: item.intervalBlick,
+      frames: item.frames,
+      values: item.values,
+      evidence: item.evidence,
+    };
+  }
+  stored.context.computedPitchByOccurrence = computedPitchByOccurrence;
   stored.context.range = captured.data.range;
   stored.context.quarterBlick = captured.quarterBlick;
   stored.context.meterMarks = captured.meterMarks;
+  // tempoMarks 供 sv_compare_computed_pitch 把 intervalBlick 换算成秒（颤音 rate 需要 Hz）。
+  stored.context.tempoMarks = captured.tempoMarks;
   stored.context.snapshotToken = snapshotToken;
   stored.snapshotToken = snapshotToken;
   stored.warnings = warnings;
@@ -495,6 +513,14 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
     return { initialPage: compactRangePage(captured.data, stored) };
   }
   return { initialPage: stored.rangePages[0] };
+}
+
+// sv_compare_computed_pitch 读取入口：返回某 occurrence 完整 computed-pitch 序列（含 null）。
+// 只读内存，不访问宿主；未捕获 computedPitch 或 occurrence 不存在时返回 null。
+export function getStoredComputedPitch(stored, occurrenceId) {
+  const map = stored?.context?.computedPitchByOccurrence;
+  if (!map || typeof occurrenceId !== "string") return null;
+  return Object.hasOwn(map, occurrenceId) ? map[occurrenceId] : null;
 }
 
 function formatStoredRangePage(stored, page, { changedSinceToken = false, timings } = {}) {

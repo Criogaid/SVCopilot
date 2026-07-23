@@ -125,6 +125,37 @@ export function numberToFraction(value, label = "number") {
   return decimalNumberToFraction(value, label);
 }
 
+// tempoMarks 由宿主提供 positionBlick/positionSeconds/bpm（升序），无需自行积分；
+// 取位置之前最近的标记外推。数据不可用时返回 null，由调用方降级而不是抛错。
+export function secondsAtBlick(tempoMarks, quarterBlick, blick) {
+  if (!Array.isArray(tempoMarks) || tempoMarks.length === 0) return null;
+  if (!Number.isFinite(quarterBlick) || quarterBlick <= 0) return null;
+  let mark = tempoMarks[0];
+  for (const candidate of tempoMarks) {
+    if (candidate.positionBlick <= blick) mark = candidate;
+    else break;
+  }
+  if (!Number.isFinite(mark.bpm) || mark.bpm <= 0 || !Number.isFinite(mark.positionSeconds)) {
+    return null;
+  }
+  return mark.positionSeconds + ((blick - mark.positionBlick) / quarterBlick) * (60 / mark.bpm);
+}
+
+export function blickAtSeconds(tempoMarks, quarterBlick, seconds) {
+  if (!Array.isArray(tempoMarks) || tempoMarks.length === 0) return null;
+  if (!Number.isFinite(quarterBlick) || quarterBlick <= 0) return null;
+  let mark = tempoMarks[0];
+  for (const candidate of tempoMarks) {
+    if (Number.isFinite(candidate.positionSeconds) && candidate.positionSeconds <= seconds) {
+      mark = candidate;
+    } else break;
+  }
+  if (!Number.isFinite(mark.bpm) || mark.bpm <= 0 || !Number.isFinite(mark.positionSeconds)) {
+    return null;
+  }
+  return mark.positionBlick + (seconds - mark.positionSeconds) * quarterBlick * (mark.bpm / 60);
+}
+
 function normalizeBeat(value, label) {
   if (isRecord(value)) {
     const { numerator, denominator } = value;

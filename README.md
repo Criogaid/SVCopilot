@@ -101,6 +101,8 @@ MCP 客户端配置示例：
 | `sv_patch_parameter_curve` | 用 BLICK、音乐位置、范围边界、note 或相邻音符 gap 锚点 replace/add/scale 参数控制点；参数白名单、宿主 typeName 复核、Undo、读回验证和已验证补偿 |
 | `sv_patch_parameter_curves` | 在同一 group 上预检并批量写入 1--16 条曲线：范围上下文/共享 target 前置条件、一次 Undo、逐曲线读回、跨曲线补偿、三档响应和统一 timings |
 | `sv_edit_phrase` | 在一个 Undo 中组合 note patch、歌词/语言、结构操作、多曲线和可观测 voice patch；音符/结构使用 detached clone，curve/voice-only 使用轻量 live preflight，失败时按 journal 恢复并读回验证 |
+| `sv_compare_computed_pitch` | 对 `sv_snapshot_range` 已存的 computed pitch 做客观演唱分析（纯内存只读，不访问宿主）：`compare_to_target` 报告逐音符稳态段 `centerErrorCent`、逐帧诊断、去趋势自相关颤音 rate/depth/regularity、转换 overshoot/arrival/settling 与异常区段；`compare_contexts` 在同一采样栅格上按乐谱位置逐帧对比调前/调后（after−before），并给出 §13.8 风格半音差值统计。null 帧保留不进统计；帧率对颤音的适配度分级 ok/borderline/too_coarse 而不是硬拒；全部阈值为未经真机校准的工程默认值，听感判断仍属人类 |
+| `sv_plan_expression` | dry-run 表情规划器（纯内存只读，不写宿主）：显式手势（scoop/fall/portamento/vibrato/hairpin，quarter 音乐时间参数）与小词表意图（jpop、controlled_belt/soft_airy/light_rasp、cool_anger/tender、段落）编译为单位显式（cents/dB/x/±1，writeSurface=automation）的可审阅计划，同参数重叠手势求和、基线守卫、约束 clamp 与点数预算；产出可直接提交 `sv_patch_parameter_curves` 的 applyRequests（同参数多簇时按序分成 K 次调用并如实报告 K 个 Undo）。replace 覆盖区间内既有点且规划器不读宿主（review 显式声明）；natural vibrato 不可观测；意图映射为启发式；是否更好听 human_only |
 
 MCP 资源还提供：
 

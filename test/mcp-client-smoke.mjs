@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.4.4");
+  assert.equal(client.getServerVersion()?.version, "0.5.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -93,10 +93,12 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 24);
+  assert.equal(listed.tools.length, 26);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_compare_computed_pitch"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_plan_expression"));
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -204,6 +206,16 @@ try {
       (resource) => resource.uri === "svcopilot://schemas/sv_patch_parameter_curves"
     )
   );
+  assert.ok(
+    resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/sv_compare_computed_pitch"
+    )
+  );
+  assert.ok(
+    resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/sv_plan_expression"
+    )
+  );
   const manifest = parseResource(await client.readResource({ uri: "svapi://manifest" }));
   assert.ok(manifest.summary.methodOverloadCount >= 200);
   const capabilities = parseResource(
@@ -224,13 +236,15 @@ try {
   );
   assert.equal(capabilities.knownLimits.audioRendering.status, "capability_blocked");
   assert.ok(capabilities.interfaces.music.includes("sv_edit_phrase"));
+  assert.ok(capabilities.interfaces.music.includes("sv_compare_computed_pitch"));
+  assert.ok(capabilities.interfaces.music.includes("sv_plan_expression"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.4.4");
+  assert.equal(capabilities.interfaceVersion, "0.5.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -247,7 +261,12 @@ try {
   );
   assert.deepEqual(
     workflowSchemaIndex.tools.map((tool) => tool.name),
-    ["sv_patch_parameter_curves", "sv_edit_phrase"]
+    [
+      "sv_patch_parameter_curves",
+      "sv_edit_phrase",
+      "sv_compare_computed_pitch",
+      "sv_plan_expression",
+    ]
   );
   const phraseResource = await client.readResource({
     uri: "svcopilot://schemas/sv_edit_phrase",
@@ -277,6 +296,59 @@ try {
     batchSchema.properties.curves.items.properties.points.items.properties.value.type,
     "number"
   );
+  const compareResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_compare_computed_pitch",
+  });
+  assert.ok(compareResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const compareSchema = parseResource(compareResource).inputSchema;
+  assert.deepEqual(compareSchema.properties.mode.enum, [
+    "compare_to_target",
+    "compare_contexts",
+  ]);
+  assert.equal(compareSchema.properties.analysis.properties.vibrato.properties.hzRange.maxItems, 2);
+  // compare 是纯内存服务：未知 context 直接结构化报错，不触碰宿主。
+  const compareUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_compare_computed_pitch",
+      arguments: { mode: "compare_to_target", contextId: "ctx_smoke_missing" },
+    })
+  );
+  assert.equal(compareUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const compareInvalidArguments = parseToolError(
+    await client.callTool({
+      name: "sv_compare_computed_pitch",
+      arguments: { mode: "compare_to_target", contextId: "ctx_smoke", bogus: true },
+    })
+  );
+  assert.equal(compareInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  const planResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_plan_expression",
+  });
+  assert.ok(planResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const planSchema = parseResource(planResource).inputSchema;
+  assert.deepEqual(
+    planSchema.properties.gestures.items.oneOf.map((schema) => schema.properties.type.const),
+    ["scoop", "fall", "portamento", "vibrato", "hairpin"]
+  );
+  assert.deepEqual(planSchema.properties.intent.properties.emotion.enum, [
+    "cool_anger",
+    "tender",
+  ]);
+  // planner 是纯内存服务：未知 context 直接结构化报错，不触碰宿主。
+  const planUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_plan_expression",
+      arguments: { contextId: "ctx_smoke_missing", intent: { genre: "jpop" } },
+    })
+  );
+  assert.equal(planUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const planInvalidArguments = parseToolError(
+    await client.callTool({
+      name: "sv_plan_expression",
+      arguments: { contextId: "ctx_smoke" },
+    })
+  );
+  assert.equal(planInvalidArguments.error.code, "INVALID_ARGUMENTS");
   assert.equal(
     batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
     "object"

@@ -21,6 +21,8 @@ import {
 } from "./api-catalog.js";
 import { HostSession } from "./host-session.js";
 import { AuditionService } from "./audition.js";
+import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
+import { ExpressionPlanService } from "./expression-plan.js";
 import { LyricsService } from "./lyrics.js";
 import {
   RANGE_CAPTURE_LIMITS,
@@ -54,6 +56,11 @@ const noteStructureService = new NoteStructureService(hostSession, snapshotServi
 const auditionService = new AuditionService(hostSession);
 const voiceProfileService = new VoiceProfileService(hostSession);
 const phraseEditService = new PhraseEditService(hostSession, snapshotService);
+// 纯内存分析服务：与 range snapshot 共享同一 SnapshotStore，不访问宿主。
+const computedPitchCompareService = new ComputedPitchCompareService({
+  store: snapshotService.store,
+});
+const expressionPlanService = new ExpressionPlanService({ store: snapshotService.store });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -106,6 +113,19 @@ const MUSICAL_BEAT_SCHEMA = {
       required: ["numerator", "denominator"],
     },
   ],
+};
+const COMPARE_SIDE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    contextId: { type: "string", minLength: 1 },
+    occurrenceId: {
+      type: "string",
+      minLength: 1,
+      description: "Optional when the context has exactly one occurrence with computed pitch.",
+    },
+  },
+  required: ["contextId"],
 };
 const CURVE_TARGET_SCHEMA = {
   type: "object",
@@ -723,6 +743,226 @@ const TOOLS = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
+    name: "sv_compare_computed_pitch",
+    description:
+      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        mode: { enum: ["compare_to_target", "compare_contexts"] },
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "compare_to_target only: range context from sv_snapshot_range.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "compare_to_target only; optional with exactly one computed-pitch occurrence.",
+        },
+        before: { ...COMPARE_SIDE_SCHEMA, description: "compare_contexts only: baseline snapshot." },
+        after: { ...COMPARE_SIDE_SCHEMA, description: "compare_contexts only: edited snapshot." },
+        metrics: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            perNote: { type: "boolean", default: true },
+            vibrato: { type: "boolean", default: true },
+            transitions: {
+              type: "boolean",
+              default: true,
+              description: "compare_to_target only; ignored by compare_contexts.",
+            },
+            anomalySegments: { type: "boolean", default: true },
+          },
+        },
+        analysis: {
+          type: "object",
+          additionalProperties: false,
+          description:
+            "Threshold overrides; defaults are engineering heuristics that require host calibration.",
+          properties: {
+            minValidFramesPerNote: { type: "integer", minimum: 1, maximum: 2000 },
+            edgeExclusionRatio: { type: "number", minimum: 0, maximum: 0.4 },
+            centerMinFrames: { type: "integer", minimum: 1, maximum: 2000 },
+            vibrato: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                minWindowFrames: { type: "integer", minimum: 4, maximum: 2000 },
+                hzRange: {
+                  type: "array",
+                  minItems: 2,
+                  maxItems: 2,
+                  items: { type: "number", minimum: 0.5, maximum: 20 },
+                  description: "Ascending [min, max] Hz search band for autocorrelation lags.",
+                },
+                minPeakCorrelation: { type: "number", minimum: 0, maximum: 1 },
+              },
+            },
+            transition: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                arrivalBandCent: { type: "number", minimum: 1, maximum: 1200 },
+                settleBandCent: { type: "number", minimum: 1, maximum: 1200 },
+                holdFrames: { type: "integer", minimum: 1, maximum: 50 },
+                windowMs: { type: "number", minimum: 20, maximum: 5000 },
+              },
+            },
+            anomalyThresholdCent: { type: "number", minimum: 1, maximum: 1200 },
+          },
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["mode"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_plan_expression",
+    description:
+      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into ready-to-submit applyRequests for sv_patch_parameter_curves (dryRun first, then commit through that hardened transaction kernel). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range captured with notes.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when noteIds imply it or the context has one occurrence with notes.",
+        },
+        gestures: {
+          type: "array",
+          maxItems: 32,
+          description: "Explicit gestures; deterministic assembly, user values win over intent.",
+          items: {
+            type: "object",
+            oneOf: [
+              {
+                additionalProperties: false,
+                properties: {
+                  type: { const: "scoop" },
+                  noteId: { type: "string", minLength: 1 },
+                  depthCents: { type: "number", minimum: 1, maximum: 600, default: 30 },
+                  lengthQuarter: { type: "number", minimum: 0.01, maximum: 16, default: 0.2 },
+                  shapePower: { type: "number", minimum: 0.5, maximum: 8, default: 2 },
+                },
+                required: ["type", "noteId"],
+              },
+              {
+                additionalProperties: false,
+                properties: {
+                  type: { const: "fall" },
+                  noteId: { type: "string", minLength: 1 },
+                  depthCents: { type: "number", minimum: 1, maximum: 600, default: 40 },
+                  lengthQuarter: { type: "number", minimum: 0.01, maximum: 16, default: 0.3 },
+                  shapePower: { type: "number", minimum: 0.5, maximum: 8, default: 2 },
+                },
+                required: ["type", "noteId"],
+              },
+              {
+                additionalProperties: false,
+                properties: {
+                  type: { const: "portamento" },
+                  fromNoteId: { type: "string", minLength: 1 },
+                  toNoteId: { type: "string", minLength: 1 },
+                  lengthQuarter: { type: "number", minimum: 0.01, maximum: 4, default: 0.15 },
+                  maxCents: { type: "number", minimum: 10, maximum: 1200 },
+                },
+                required: ["type", "fromNoteId", "toNoteId"],
+                description: "Symmetric glide between adjacent notes (no rest between).",
+              },
+              {
+                additionalProperties: false,
+                properties: {
+                  type: { const: "vibrato" },
+                  noteId: { type: "string", minLength: 1 },
+                  surface: {
+                    enum: ["pitchDelta", "vibratoEnv"],
+                    default: "pitchDelta",
+                    description:
+                      "pitchDelta renders an explicit sine (may stack with unobservable natural vibrato); vibratoEnv shapes the host envelope (effect depends on natural vibrato).",
+                  },
+                  depthCents: { type: "number", minimum: 1, maximum: 600, default: 30 },
+                  rateHz: { type: "number", minimum: 0.5, maximum: 12, default: 5.5 },
+                  onsetDelayQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.3 },
+                  rampQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.3 },
+                  fadeOutQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.2 },
+                  level: { type: "number", minimum: 0, maximum: 2, default: 1 },
+                },
+                required: ["type", "noteId"],
+              },
+              {
+                additionalProperties: false,
+                properties: {
+                  type: { const: "hairpin" },
+                  fromNoteId: { type: "string", minLength: 1 },
+                  toNoteId: { type: "string", minLength: 1 },
+                  parameter: { enum: ["loudness", "tension", "breathiness"], default: "loudness" },
+                  amount: {
+                    type: "number",
+                    minimum: -24,
+                    maximum: 24,
+                    description: "Peak delta in the parameter's own unit (dB for loudness, ±1 scale otherwise).",
+                  },
+                  peakPosition: { type: "number", minimum: 0.05, maximum: 0.95, default: 0.6 },
+                },
+                required: ["type", "fromNoteId", "toNoteId"],
+              },
+            ],
+          },
+        },
+        intent: {
+          type: "object",
+          additionalProperties: false,
+          description: "Small heuristic vocabulary; derived gestures carry heuristic confidence.",
+          properties: {
+            genre: { enum: ["jpop"] },
+            section: { enum: ["verse", "prechorus", "chorus", "bridge"] },
+            emotion: { enum: ["cool_anger", "tender"] },
+            technique: {
+              type: "array",
+              uniqueItems: true,
+              items: { enum: ["controlled_belt", "soft_airy", "light_rasp"] },
+            },
+          },
+        },
+        constraints: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            maxAbsPitchDeltaCents: { type: "number", minimum: 10, maximum: 1200, default: 200 },
+            maxAbsLoudnessDeltaDb: { type: "number", minimum: 0.5, maximum: 24, default: 6 },
+            maxAbsTensionDelta: { type: "number", minimum: 0.05, maximum: 1, default: 0.5 },
+            maxAbsBreathinessDelta: { type: "number", minimum: 0.05, maximum: 1, default: 0.5 },
+            maxTotalPoints: { type: "integer", minimum: 16, maximum: 2000, default: 400 },
+            avoidExcessiveVibrato: { type: "boolean", default: true },
+          },
+        },
+        sampling: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pointsPerQuarter: { type: "integer", minimum: 2, maximum: 32, default: 8 },
+            vibratoPointsPerCycle: { type: "integer", minimum: 4, maximum: 16, default: 8 },
+          },
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "sv_get_parameter_curve",
     description:
       "Read one Automation parameter curve of a note group within a required blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> is accepted only when <Name> exists in the target group's observable vocalModeParams. Names are case-insensitive and the response reports requestedParameter and resolvedParameter. Unknown names are rejected before NoteGroup.getParameter because SynthV may silently return a default curve. The host curve is read once with getAllPoints and filtered locally; only an oversized 64 KiB result falls back to density-based range bisection. Automation lives in group-local blicks; every point reports localBlick and absoluteBlick together with the official definition and interpolation method.",
@@ -1215,7 +1455,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.4.4" },
+  { name: "sv-copilot", version: "0.5.0" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1257,6 +1497,18 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://schemas/sv_edit_phrase",
       name: "sv_edit_phrase input schema",
       description: "Exact JSON input schema used to validate sv_edit_phrase.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_compare_computed_pitch",
+      name: "sv_compare_computed_pitch input schema",
+      description: "Exact JSON input schema used to validate sv_compare_computed_pitch.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_plan_expression",
+      name: "sv_plan_expression input schema",
+      description: "Exact JSON input schema used to validate sv_plan_expression.",
       mimeType: "application/json",
     },
   ],
@@ -1349,6 +1601,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_snapshot_range":
         result = await rangeSnapshotService.snapshot(args);
+        break;
+      case "sv_compare_computed_pitch":
+        result = await computedPitchCompareService.compare(args);
+        break;
+      case "sv_plan_expression":
+        result = await expressionPlanService.plan(args);
         break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
@@ -1525,7 +1783,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.4.4",
+    interfaceVersion: "0.5.0",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1555,6 +1813,8 @@ function capabilities() {
         "sv_patch_parameter_curve",
         "sv_patch_parameter_curves",
         "sv_edit_phrase",
+        "sv_compare_computed_pitch",
+        "sv_plan_expression",
       ],
       audition: [
         "sv_start_audition",
@@ -1584,6 +1844,8 @@ function capabilities() {
         sv_patch_parameter_curve: ["range", "direct_target"],
         sv_patch_parameter_curves: ["range", "direct_target"],
         sv_edit_phrase: ["range"],
+        sv_compare_computed_pitch: ["range"],
+        sv_plan_expression: ["range"],
       },
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
@@ -1618,9 +1880,14 @@ function capabilities() {
 }
 
 function musicWorkflowSchemaIndex() {
-  const names = ["sv_patch_parameter_curves", "sv_edit_phrase"];
+  const names = [
+    "sv_patch_parameter_curves",
+    "sv_edit_phrase",
+    "sv_compare_computed_pitch",
+    "sv_plan_expression",
+  ];
   return {
-    schemaVersion: "0.4.4",
+    schemaVersion: "0.5.0",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -1634,11 +1901,16 @@ function toolInputSchema(name) {
   const tool = TOOLS.find(
     (candidate) =>
       candidate.name === name &&
-      ["sv_patch_parameter_curves", "sv_edit_phrase"].includes(candidate.name)
+      [
+        "sv_patch_parameter_curves",
+        "sv_edit_phrase",
+        "sv_compare_computed_pitch",
+        "sv_plan_expression",
+      ].includes(candidate.name)
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.4.4",
+    schemaVersion: "0.5.0",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };
