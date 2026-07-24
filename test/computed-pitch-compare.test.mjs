@@ -454,6 +454,135 @@ test("compare_contexts warns when tempo maps differ but still pairs by score pos
   assert.ok(result.warnings.some((warning) => warning.code === "TEMPO_MAP_DIFFERS"));
 });
 
+test("compare_contexts measures vibrato Hz per side when tempo differs (before-side fs is its own)", async () => {
+  const store = createStore();
+  const interval = Q / 40; // fs = bpm*2/3 → after(60)=40 Hz, before(120)=80 Hz
+  const frames = 200;
+  // 同一帧域颤音（10 帧/周期）：物理 Hz 只由各侧帧率决定 → before 应≈2×after，而非共用 after 的 fs。
+  const vibrato = Array.from(
+    { length: frames },
+    (_, index) => 60 + 0.3 * Math.sin((2 * Math.PI * index) / 10)
+  );
+  const noteSpec = { onsetBlick: 0, durationBlick: frames * interval, pitch: 60 };
+  const { before, after } = createContextsPair(store, vibrato, vibrato, {
+    shared: { intervalBlick: interval, notes: [noteSpec] },
+    before: { bpm: 120 },
+    after: { bpm: 60 },
+  });
+  const result = await createService(store).compare({
+    mode: "compare_contexts",
+    before: { contextId: before.stored.contextId },
+    after: { contextId: after.stored.contextId },
+  });
+  const item = result.perNote.items[0];
+  assert.equal(item.after.vibrato.status, "ok");
+  assert.equal(item.before.vibrato.status, "ok");
+  approx(item.after.vibrato.rateHz, 4, 0.7); // 40/10
+  approx(item.before.vibrato.rateHz, 8, 1.0); // 80/10, 修复前会被误报成 4
+  assert.ok(item.before.vibrato.rateHz > item.after.vibrato.rateHz * 1.5);
+});
+
+test("compare_contexts flags inserted/shifted notes as unmatched instead of a cross-note delta", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const noteLen = 20 * interval;
+  const before = createStoredContext(store, {
+    values: new Array(60).fill(62),
+    intervalBlick: interval,
+    notes: [
+      { onsetBlick: 0, durationBlick: noteLen, pitch: 62, lyrics: "b" },
+      { onsetBlick: noteLen, durationBlick: noteLen, pitch: 64, lyrics: "c" },
+    ],
+  });
+  // after 在开头插入音符 a，其后 b、c 整体后移：不能把新 a 拿去和旧 b 报 delta。
+  const after = createStoredContext(store, {
+    values: new Array(60).fill(60),
+    intervalBlick: interval,
+    notes: [
+      { onsetBlick: 0, durationBlick: noteLen, pitch: 60, lyrics: "a" },
+      { onsetBlick: noteLen, durationBlick: noteLen, pitch: 62, lyrics: "b" },
+      { onsetBlick: 2 * noteLen, durationBlick: noteLen, pitch: 64, lyrics: "c" },
+    ],
+  });
+  const result = await createService(store).compare({
+    mode: "compare_contexts",
+    before: { contextId: before.stored.contextId },
+    after: { contextId: after.stored.contextId },
+  });
+  assert.equal(result.perNote.matched, 0);
+  assert.equal(result.perNote.unmatched, 3);
+  for (const item of result.perNote.items) {
+    assert.equal(item.unmatched, true);
+    assert.equal(item.centerDeltaCent, undefined);
+    assert.equal(item.before, undefined);
+  }
+  assert.ok(result.warnings.some((warning) => warning.code === "PER_NOTE_UNMATCHED"));
+  assert.ok(!result.warnings.some((warning) => warning.code === "NOTE_STRUCTURE_CHANGED"));
+});
+
+test("perNote matched/unmatched count the full population even when items are truncated", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const noteLen = 2 * interval;
+  const count = 201; // MAX_PER_NOTE_ITEMS=200：明细截断，但计数必须覆盖全量 201
+  const notes = Array.from({ length: count }, (_, index) => ({
+    onsetBlick: index * noteLen,
+    durationBlick: noteLen,
+    pitch: 60,
+    lyrics: `n${index}`,
+  }));
+  const values = new Array(count * 2).fill(60);
+  const { before, after } = createContextsPair(store, values, values, {
+    shared: { intervalBlick: interval, notes },
+  });
+  const result = await createService(store).compare({
+    mode: "compare_contexts",
+    before: { contextId: before.stored.contextId },
+    after: { contextId: after.stored.contextId },
+  });
+  assert.equal(result.perNote.count, 201);
+  assert.equal(result.perNote.matched, 201); // 修复前：200（只数已报告明细）
+  assert.equal(result.perNote.unmatched, 0);
+  assert.equal(result.perNote.truncated, true);
+  assert.equal(result.perNote.items.length, 200);
+  assert.ok(result.warnings.some((warning) => warning.code === "PER_NOTE_TRUNCATED"));
+});
+
+test("compare_contexts still reports deltas for unmoved notes when another note is deleted", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const noteLen = 20 * interval;
+  const before = createStoredContext(store, {
+    values: new Array(60).fill(60),
+    intervalBlick: interval,
+    notes: [
+      { onsetBlick: 0, durationBlick: noteLen, pitch: 60, lyrics: "a" },
+      { onsetBlick: noteLen, durationBlick: noteLen, pitch: 62, lyrics: "b" },
+      { onsetBlick: 2 * noteLen, durationBlick: noteLen, pitch: 64, lyrics: "c" },
+    ],
+  });
+  // 删除中间音符 b，a 与 c 位置/指纹不变：这两个不动的音符仍应给出 delta。
+  const after = createStoredContext(store, {
+    values: new Array(60).fill(60.1),
+    intervalBlick: interval,
+    notes: [
+      { onsetBlick: 0, durationBlick: noteLen, pitch: 60, lyrics: "a" },
+      { onsetBlick: 2 * noteLen, durationBlick: noteLen, pitch: 64, lyrics: "c" },
+    ],
+  });
+  const result = await createService(store).compare({
+    mode: "compare_contexts",
+    before: { contextId: before.stored.contextId },
+    after: { contextId: after.stored.contextId },
+  });
+  assert.equal(result.perNote.matched, 2);
+  assert.equal(result.perNote.unmatched, 0);
+  for (const item of result.perNote.items) {
+    assert.equal(item.unmatched, undefined);
+    assert.ok(Number.isFinite(item.centerDeltaCent));
+  }
+});
+
 // ---------- 错误路径与校验 ----------
 
 test("compare resolves occurrences honestly across error paths", async () => {

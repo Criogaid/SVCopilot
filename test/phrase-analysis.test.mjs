@@ -166,6 +166,90 @@ test("phrase segmentation finds the climax and the one-beat rest", async () => {
   assert.equal(result.phrases.phraseGapQuarter, 1);
 });
 
+test("responseMode governs scaleDegrees size: compact summarizes, standard caps, verbose is full", async () => {
+  const store = createStore();
+  const count = 130;
+  const scale = [59, 61, 63, 64, 66, 68, 70];
+  const notes = Array.from({ length: count }, (_, index) => ({
+    onsetBlick: index * Q,
+    durationBlick: Q,
+    pitch: scale[index % scale.length],
+    lyrics: `n${index}`,
+  }));
+  const { stored } = createStoredContext(store, { notes });
+  const service = createService(store);
+
+  const compact = await service.analyze({
+    contextId: stored.contextId,
+    include: ["scaleDegrees"],
+    responseMode: "compact",
+  });
+  assert.equal(compact.scaleDegrees.items, undefined);
+  assert.equal(compact.scaleDegrees.summary.noteCount, count);
+  assert.ok(compact.scaleDegrees.summary.degreeHistogram);
+
+  const standard = await service.analyze({
+    contextId: stored.contextId,
+    include: ["scaleDegrees"],
+  });
+  assert.equal(standard.scaleDegrees.items.length, 100);
+  assert.equal(standard.scaleDegrees.itemsTruncated, true);
+  assert.ok(standard.warnings.some((warning) => warning.code === "SCALE_DEGREES_TRUNCATED"));
+
+  const verbose = await service.analyze({
+    contextId: stored.contextId,
+    include: ["scaleDegrees"],
+    responseMode: "verbose",
+  });
+  assert.equal(verbose.scaleDegrees.items.length, count);
+  assert.equal(verbose.scaleDegrees.itemsTruncated, false);
+  assert.ok(!verbose.warnings.some((warning) => warning.code === "SCALE_DEGREES_TRUNCATED"));
+
+  // 修复前 compact 与 verbose 逐字节相同；现在 compact 明显更小。
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(verbose).length);
+});
+
+test("responseMode caps phrases.items with a truncation warning", async () => {
+  const store = createStore();
+  const count = 130;
+  const notes = Array.from({ length: count }, (_, index) => ({
+    onsetBlick: index * 2 * Q, // 每个音符后留 1 拍休止 → 每音符自成一乐句
+    durationBlick: Q,
+    pitch: [59, 61][index % 2],
+    lyrics: `n${index}`,
+  }));
+  const { stored } = createStoredContext(store, { notes });
+  const service = createService(store);
+
+  const standard = await service.analyze({ contextId: stored.contextId, include: ["phrases"] });
+  assert.equal(standard.phrases.count, count);
+  assert.equal(standard.phrases.items.length, 100);
+  assert.equal(standard.phrases.itemsTruncated, true);
+  assert.equal(standard.phrases.summary.totalNotes, count);
+  assert.ok(standard.warnings.some((warning) => warning.code === "PHRASES_TRUNCATED"));
+
+  // compact 契约（R3）：不展开逐乐句列表，只给 count + 聚合摘要，且 payload 必须真的更小。
+  const compact = await service.analyze({
+    contextId: stored.contextId,
+    include: ["phrases"],
+    responseMode: "compact",
+  });
+  assert.equal(compact.phrases.items, undefined);
+  assert.equal(compact.phrases.count, count);
+  assert.equal(compact.phrases.summary.totalNotes, count);
+  assert.equal(compact.phrases.summary.noteCount.max, 1);
+  assert.ok(!compact.warnings.some((warning) => warning.code === "PHRASES_TRUNCATED"));
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(standard).length);
+
+  const verbose = await service.analyze({
+    contextId: stored.contextId,
+    include: ["phrases"],
+    responseMode: "verbose",
+  });
+  assert.equal(verbose.phrases.items.length, count);
+  assert.equal(verbose.phrases.itemsTruncated, false);
+});
+
 test("statistics report register, intervals, rhythm, and rests", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, { notes: fixtureNotes() });

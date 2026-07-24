@@ -564,9 +564,12 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings) {
     });
     return null;
   }
-  const beforeByIndex = new Map(
+  // noteId 由 occurrence:index 派生，不是跨快照稳定身份，故不能按 indexInGroup 对齐 before/after：
+  // 开头插入一个音符会让其后所有 index 错位，把新音符拿去和旧音符比。改按乐谱绝对起点建立 before 索引。
+  const beforeOffset = before.occurrence.timeOffsetBlick ?? 0;
+  const beforeByOnset = new Map(
     (before.occurrence.noteFingerprints ?? []).map((fingerprint) => [
-      fingerprint.indexInGroup,
+      beforeOffset + fingerprint.onsetBlick,
       fingerprint,
     ])
   );
@@ -576,6 +579,13 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings) {
       fingerprint,
     ])
   );
+  // onset 集合一致 = 无插入/删除/移动，只可能就地编辑：位置窗口逐一可信，按 onset 对齐即可。
+  // onset 集合不同 = 结构变化：位置窗口与音符身份不再一一对应（插入会占用被后移音符的旧 onset），
+  // 只对"完全未变"（同 onset 且指纹一致）的音符给 delta，其余标 unmatched 并省略 before/delta，避免误导数值。
+  const afterOnsets = spans.map((span) => span.absOnsetBlick);
+  const structuralChange =
+    beforeByOnset.size !== afterOnsets.length ||
+    afterOnsets.some((onset) => !beforeByOnset.has(onset));
   const beforePitchOffset = before.occurrence.pitchOffsetSemitone ?? 0;
   const afterFrames = buildTargetFrameData(after.series, spans).perSpan;
   const beforeFrames = spans.map((span, index) =>
@@ -584,27 +594,55 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings) {
       value: before.series.values[frame.frameIndex],
     }))
   );
-  let structureChanged = 0;
-  const items = [];
-  for (let index = 0; index < spans.length && items.length < MAX_PER_NOTE_ITEMS; index += 1) {
-    const span = spans[index];
+  // 先对全量 span 做廉价的指纹分类：matched/unmatched/edited 与告警必须统计全量，
+  // MAX_PER_NOTE_ITEMS 截断只作用于昂贵的逐音符序列分析（items 明细）。
+  const classified = spans.map((span) => {
     const afterFingerprint = afterByIndex.get(span.indexInGroup) ?? null;
-    const beforeFingerprint = beforeByIndex.get(span.indexInGroup) ?? null;
-    const changedFields = diffFingerprints(beforeFingerprint, afterFingerprint);
-    if (changedFields.length > 0) structureChanged += 1;
-    const fs = frameRateAt(
+    const beforeFingerprint = beforeByOnset.get(span.absOnsetBlick) ?? null;
+    const changedFields = beforeFingerprint ? diffFingerprints(beforeFingerprint, afterFingerprint) : [];
+    // 结构变化下，只有 onset 处存在且指纹完全一致的音符（既没移动也没改动）位置窗口才可信。
+    const comparable = Boolean(beforeFingerprint) && (!structuralChange || changedFields.length === 0);
+    return { span, beforeFingerprint, changedFields, comparable };
+  });
+  const matchedTotal = classified.filter((entry) => entry.comparable).length;
+  const unmatchedTotal = classified.length - matchedTotal;
+  const editedTotal = classified.filter(
+    (entry) => entry.comparable && entry.changedFields.length > 0
+  ).length;
+  const items = [];
+  for (let index = 0; index < classified.length && items.length < MAX_PER_NOTE_ITEMS; index += 1) {
+    const { span, beforeFingerprint, changedFields, comparable } = classified[index];
+    const midBlick = Math.floor((span.absOnsetBlick + span.absEndBlick) / 2);
+    // Hz 类指标（颤音）需按各侧自己的 tempo 图换算帧率：tempo 不同则 before/after 采样率不同，不能共用一个 fs。
+    const fsAfter = frameRateAt(
       after.stored.context.tempoMarks,
       after.stored.context.quarterBlick,
-      Math.floor((span.absOnsetBlick + span.absEndBlick) / 2),
+      midBlick,
       after.series.intervalBlick
     );
-    const beforeTarget = beforeFingerprint
-      ? beforeFingerprint.pitch + (beforeFingerprint.detuneCents ?? 0) / 100 + beforePitchOffset
-      : null;
-    const beforeResult = analyzeNoteSeries(beforeFrames[index], beforeTarget, params, fs, {
+    const afterResult = analyzeNoteSeries(afterFrames[index], span.targetSemitone, params, fsAfter, {
       vibrato: wantVibrato,
     });
-    const afterResult = analyzeNoteSeries(afterFrames[index], span.targetSemitone, params, fs, {
+    if (!comparable) {
+      items.push({
+        noteId: span.noteId,
+        indexInGroup: span.indexInGroup,
+        lyrics: span.lyrics,
+        unmatched: true,
+        unmatchedReason: beforeFingerprint ? "structure_changed" : "no_before_note_at_position",
+        after: afterResult,
+      });
+      continue;
+    }
+    const fsBefore = frameRateAt(
+      before.stored.context.tempoMarks,
+      before.stored.context.quarterBlick,
+      midBlick,
+      before.series.intervalBlick
+    );
+    const beforeTarget =
+      beforeFingerprint.pitch + (beforeFingerprint.detuneCents ?? 0) / 100 + beforePitchOffset;
+    const beforeResult = analyzeNoteSeries(beforeFrames[index], beforeTarget, params, fsBefore, {
       vibrato: wantVibrato,
     });
     items.push({
@@ -622,20 +660,33 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings) {
         : {}),
     });
   }
-  if (structureChanged > 0) {
+  if (editedTotal > 0) {
     warnings.push({
       code: "NOTE_STRUCTURE_CHANGED",
-      message: `${structureChanged} note(s) changed between snapshots; their per-note comparison uses the after-side span and is flagged noteChanged.`,
+      message: `${editedTotal} matched note(s) had edited fields between snapshots; the per-note delta compares the same score position and is flagged noteChanged.`,
+    });
+  }
+  if (unmatchedTotal > 0) {
+    warnings.push({
+      code: "PER_NOTE_UNMATCHED",
+      message: `${unmatchedTotal} after-note(s) had no unchanged before-note at the same score position (inserted or moved by a structural edit); reported without a before/delta.`,
     });
   }
   const truncated = spans.length > items.length;
   if (truncated) {
     warnings.push({
       code: "PER_NOTE_TRUNCATED",
-      message: `perNote reports the first ${MAX_PER_NOTE_ITEMS} of ${spans.length} notes; narrow the snapshot range for full per-note detail.`,
+      message: `perNote reports the first ${MAX_PER_NOTE_ITEMS} of ${spans.length} notes; matched/unmatched still count all ${spans.length}. Narrow the snapshot range for full per-note detail.`,
     });
   }
-  return { count: spans.length, truncated, items };
+  // matched/unmatched 是全量计数（与 count 同口径），items 明细才受截断影响。
+  return {
+    count: spans.length,
+    matched: matchedTotal,
+    unmatched: unmatchedTotal,
+    truncated,
+    items,
+  };
 }
 
 function diffFingerprints(before, after) {

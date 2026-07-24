@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { ServiceTiming } from "./service-timing.js";
+import { MAX_PATCHES } from "./note-patch.js";
 
 // sv_align_lyrics：无副作用咬字/铺词规划器（HANDOFF §7 P2 定位）。
 //
@@ -36,12 +37,14 @@ const PROVENANCE = Object.freeze({
 const SMALL_KANA = new Set([..."ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ"]);
 // 独立成拍的特殊拍：促音、拨音、长音（唱歌中各占一个音符/拍）。
 const STANDALONE_KANA = new Set([..."っンんッー"]);
+const MAX_CONTINUATION_IDENTITIES = 256;
 
 export class LyricAlignService {
   constructor({ store, now = () => Date.now() } = {}) {
     if (!store) throw new Error("LyricAlignService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.continuationIdentities = new Map();
   }
 
   async align(request = {}) {
@@ -53,20 +56,31 @@ export class LyricAlignService {
     // 纯内存服务：不进入协调器；coordinatorQueueMs/operationMs 恒 0，如实报告。
     timer.requestCoordinator();
     const warnings = [];
-    const loaded = await timer.measure("loadMs", async () => resolveAlignSource(this.store, input));
+    pruneContinuationIdentities(this.continuationIdentities, this.now());
+    const loaded = await timer.measure("loadMs", async () =>
+      resolveAlignSource(this.store, input, warnings, this.continuationIdentities)
+    );
     const tokens = await timer.measure("tokenizeMs", async () =>
       tokenizeLyrics(input.lyrics, input.language, warnings)
     );
     const mapped = await timer.measure("mapMs", async () =>
       mapUnitsToNotes(tokens, loaded, input, warnings)
     );
-    return buildAlignResponse(loaded, input, tokens, mapped, warnings, timer.finish());
+    const response = buildAlignResponse(loaded, input, tokens, mapped, warnings, timer.finish());
+    if (response.continuation) {
+      rememberContinuationIdentity(this.continuationIdentities, loaded, input, this.now());
+    }
+    return response;
   }
 }
 
 // ---------- 上下文解析（纯数据，与 plan/compare 同模式） ----------
 
-function resolveAlignSource(store, input) {
+// occurrenceId = `${contextId}:t:${track}:r:${ref}`，noteId 再接 `:n:${index}`。
+// 位置后缀只负责寻找候选；必须再通过服务签发的短期记录校验 target UUID 与音符结构。
+const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
+
+function resolveAlignSource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
   if (!stored) {
     throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
@@ -81,14 +95,54 @@ function resolveAlignSource(store, input) {
   const candidates = occurrences.filter(
     (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
   );
-  let wantedId = input.occurrenceId;
-  if (wantedId === undefined && typeof input.startNoteId === "string") {
-    const cut = input.startNoteId.lastIndexOf(":n:");
-    if (cut > 0) wantedId = input.startNoteId.slice(0, cut);
-  }
+  const wantedId = selectorOccurrenceId(input);
   let occurrence = null;
+  let reanchoredIdentity = null;
   if (wantedId !== undefined) {
     occurrence = occurrences.find((item) => item.occurrenceId === wantedId) ?? null;
+    if (!occurrence) {
+      const identity = continuationIdentities.get(
+        continuationIdentityKey(wantedId, input.startNoteId)
+      );
+      const position = identity ? OCCURRENCE_POSITION_PATTERN.exec(wantedId) : null;
+      if (position) {
+        const matches = occurrences.filter((item) => {
+          const own = OCCURRENCE_POSITION_PATTERN.exec(item.occurrenceId);
+          return own !== null && own[1] === position[1] && own[2] === position[2];
+        });
+        if (matches.length === 1) {
+          const candidate = matches[0];
+          if (candidate.targetGroupUuid !== identity.targetGroupUuid) {
+            const error = codedError(
+              "STALE_CONTEXT",
+              `continuation selector target changed: expected group UUID ${identity.targetGroupUuid}, observed ${candidate.targetGroupUuid}; re-snapshot and re-plan`
+            );
+            error.expectedGroupUuid = identity.targetGroupUuid;
+            error.observedGroupUuid = candidate.targetGroupUuid;
+            throw error;
+          }
+          const observedStructureDigest = noteStructureDigest(
+            candidate.noteFingerprints,
+            identity.startNoteIndexInGroup
+          );
+          if (observedStructureDigest !== identity.noteStructureDigest) {
+            const error = codedError(
+              "STALE_CONTEXT",
+              "continuation start note or following note-structure fingerprint changed; re-snapshot and re-plan"
+            );
+            error.expectedStructureDigest = identity.noteStructureDigest;
+            error.observedStructureDigest = observedStructureDigest;
+            throw error;
+          }
+          occurrence = candidate;
+          reanchoredIdentity = identity;
+          warnings.push({
+            code: "STALE_SELECTOR_REANCHORED",
+            message: `occurrenceId/startNoteId reference a consumed context; verified target identity and note structure, then re-anchored by position (track ${position[1]}, reference ${position[2]}) onto ${occurrence.occurrenceId}.`,
+          });
+        }
+      }
+    }
     if (!occurrence) {
       throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
     }
@@ -126,14 +180,79 @@ function resolveAlignSource(store, input) {
   let startIndex = 0;
   if (input.startNoteId !== undefined) {
     startIndex = notes.findIndex((note) => note.noteId === input.startNoteId);
+    if (startIndex < 0 && reanchoredIdentity) {
+      startIndex = notes.findIndex(
+        (note) => note.indexInGroup === reanchoredIdentity.startNoteIndexInGroup
+      );
+    }
     if (startIndex < 0) {
       throw codedError(
         "UNKNOWN_NOTE_ID",
         `startNoteId is not part of the resolved occurrence: ${input.startNoteId}`
       );
     }
+  } else if (reanchoredIdentity) {
+    startIndex = notes.findIndex(
+      (note) => note.indexInGroup === reanchoredIdentity.startNoteIndexInGroup
+    );
+    if (startIndex < 0) {
+      throw codedError("STALE_CONTEXT", "continuation start note no longer exists; re-snapshot and re-plan");
+    }
   }
   return { stored, occurrence, notes, startIndex };
+}
+
+function selectorOccurrenceId(input) {
+  if (typeof input.occurrenceId === "string") return input.occurrenceId;
+  if (typeof input.startNoteId !== "string") return undefined;
+  const cut = input.startNoteId.lastIndexOf(":n:");
+  return cut > 0 ? input.startNoteId.slice(0, cut) : undefined;
+}
+
+function continuationIdentityKey(occurrenceId, startNoteId) {
+  return JSON.stringify([occurrenceId, startNoteId ?? null]);
+}
+
+function pruneContinuationIdentities(identities, now) {
+  for (const [key, identity] of identities) {
+    if (identity.expiresAt <= now) identities.delete(key);
+  }
+}
+
+function rememberContinuationIdentity(identities, loaded, input, now) {
+  const occurrenceId = selectorOccurrenceId(input);
+  if (!occurrenceId || typeof loaded.occurrence.targetGroupUuid !== "string") return;
+  const startNote = loaded.notes[loaded.startIndex];
+  const expiresAt = loaded.stored.expiresAt;
+  if (!startNote || !Number.isFinite(expiresAt) || expiresAt <= now) return;
+  const key = continuationIdentityKey(occurrenceId, input.startNoteId);
+  identities.delete(key);
+  identities.set(key, {
+    targetGroupUuid: loaded.occurrence.targetGroupUuid,
+    startNoteIndexInGroup: startNote.indexInGroup,
+    noteStructureDigest: noteStructureDigest(
+      loaded.occurrence.noteFingerprints,
+      startNote.indexInGroup
+    ),
+    expiresAt,
+  });
+  while (identities.size > MAX_CONTINUATION_IDENTITIES) {
+    identities.delete(identities.keys().next().value);
+  }
+}
+
+function noteStructureDigest(noteFingerprints, startNoteIndexInGroup) {
+  const structure = [...(noteFingerprints ?? [])]
+    .filter((note) => note.indexInGroup >= startNoteIndexInGroup)
+    .sort((left, right) => left.indexInGroup - right.indexInGroup)
+    .map((note) => ({
+      indexInGroup: note.indexInGroup,
+      onsetBlick: note.onsetBlick,
+      durationBlick: note.durationBlick,
+      pitch: note.pitch,
+      detuneCents: note.detuneCents,
+    }));
+  return createHash("sha256").update(stableStringify(structure)).digest("hex");
 }
 
 // ---------- 分词（按字符类别分段；确定性） ----------
@@ -379,18 +498,45 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
         : {}),
     },
   }));
+  // note-patch 硬上限 MAX_PATCHES。超限时不能预生成后续批次：sv_patch_notes 提交成功即删除
+  // contextId（成功写入使快照上下文失效），而 noteId 内嵌 contextId——预烤的第二批必然
+  // UNKNOWN_CONTEXT，还会留下"前 200 项已改、其余未改"的中间态。诚实契约是：只交出当前
+  // context 下可提交的第一批，其余通过 continuation 工作流收敛——提交后重拍快照、用完全相同
+  // 的参数重跑本工具，已应用的音符自动变为 no-change，下一轮恰好规划剩余部分。
+  const submittable = patches.slice(0, MAX_PATCHES);
+  const remainingChangedCount = patches.length - submittable.length;
   const patchRequest =
-    patches.length > 0
+    submittable.length > 0
       ? {
           tool: "sv_patch_notes",
           arguments: {
             contextId: loaded.stored.contextId,
-            patches,
+            patches: submittable,
             dryRun: true,
             atomic: true,
           },
         }
       : null;
+  const continuation =
+    remainingChangedCount > 0
+      ? {
+          reason: "PATCH_CAP",
+          patchCapPerCall: MAX_PATCHES,
+          remainingChangedCount,
+          workflow: [
+            "Commit the returned patchRequest (dryRun first, then dryRun:false).",
+            "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
+            "Re-run sv_align_lyrics with the same lyrics and options against the fresh contextId: already-applied notes come back unchanged, so the next round plans exactly the remaining patches. Explicit occurrenceId/startNoteId are re-anchored only when their short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); otherwise the replay is rejected.",
+            "Repeat until the response carries no continuation (or reports status no_change).",
+          ],
+        }
+      : null;
+  if (continuation) {
+    warnings.push({
+      code: "PLAN_EXCEEDS_PATCH_CAP",
+      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; patchRequest carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow-up batches cannot be pre-generated (a successful sv_patch_notes invalidates the contextId and noteIds embed it) — follow continuation.workflow: commit, re-snapshot, re-align, repeat. Each round is its own transaction and Undo record.`,
+    });
+  }
   const planId = `lyr_${createHash("sha256")
     .update(
       stableStringify({
@@ -410,6 +556,11 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
   if (needsReviewCount > 0) {
     checklist.push(
       `${needsReviewCount} note(s) are flagged needs_review (kanji or ambiguous-language tokens); confirm their reading/segmentation manually.`
+    );
+  }
+  if (continuation) {
+    checklist.push(
+      `${remainingChangedCount} change(s) do not fit this call (${MAX_PATCHES}-patch cap): after committing, re-snapshot the same range and re-run sv_align_lyrics with identical arguments — each round applies the next slice and the loop converges to no_change.`
     );
   }
   return {
@@ -454,6 +605,7 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
       unfilledNotes: mapped.unfilledNotes,
     },
     patchRequest,
+    ...(continuation ? { continuation } : {}),
     review: { requiresHumanReview: needsReviewCount > 0, checklist },
     provenance: PROVENANCE,
     warnings,

@@ -174,6 +174,207 @@ test("a single lyric change produces one guarded patch", async () => {
   assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
 });
 
+function mandarinLyrics(count) {
+  const pool = "我你他她们的一二三四五六七八九十日月山川风花雪";
+  return Array.from({ length: count }, (_, index) => pool[index % pool.length]).join("");
+}
+
+// 像 sv_patch_notes 成功提交那样把 patch 应用到音符数据（该行为由 note-patch 自己的测试覆盖），
+// 返回下一轮快照用的音符数组。提交成功即消费 contextId，续轮必须用新 context——这正是
+// continuation 工作流的形状：commit → re-snapshot → re-align。
+function applyPatchesToNotes(notes, occurrenceId, patches) {
+  const updated = notes.map((note) => ({ ...note }));
+  for (const patch of patches) {
+    const index = Number(patch.noteId.slice(patch.noteId.lastIndexOf(":n:") + 3));
+    assert.equal(patch.noteId, `${occurrenceId}:n:${index}`);
+    assert.equal(updated[index].lyrics ?? "", patch.expected.lyrics); // expected 前置条件成立
+    updated[index].lyrics = patch.set.lyrics;
+    if (patch.set.languageOverride !== undefined) {
+      updated[index].languageOverride = patch.set.languageOverride;
+    }
+  }
+  return updated;
+}
+
+test("oversized plans emit one submittable batch plus an honest continuation, never pre-baked dead batches", async () => {
+  const store = createStore();
+  const count = 201;
+  const { stored } = createStoredContext(store, {
+    notes: uniformNotes(new Array(count).fill("")),
+  });
+  const result = await createService(store).align({
+    contextId: stored.contextId,
+    lyrics: mandarinLyrics(count),
+    language: "mandarin",
+  });
+  assert.equal(result.status, "planned");
+  assert.equal(result.summary.changedCount, count);
+  // 唯一可提交批：当前 context 下的前 200 项。预烤第二批必然 UNKNOWN_CONTEXT（提交成功即删
+  // context，noteId 又内嵌 contextId），因此响应里不允许存在 patchRequests 数组。
+  assert.equal(result.patchRequest.arguments.patches.length, 200);
+  assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
+  assert.equal(result.patchRequests, undefined);
+  assert.equal(result.continuation.reason, "PATCH_CAP");
+  assert.equal(result.continuation.patchCapPerCall, 200);
+  assert.equal(result.continuation.remainingChangedCount, 1);
+  assert.ok(result.continuation.workflow.some((step) => /sv_snapshot_range/.test(step)));
+  assert.ok(result.continuation.workflow.some((step) => /sv_align_lyrics/.test(step)));
+  assert.ok(result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_PATCH_CAP"));
+});
+
+test("continuation rounds converge: commit, re-snapshot, re-align until no_change", async () => {
+  const store = createStore();
+  const count = 201;
+  const lyrics = mandarinLyrics(count);
+  let notes = uniformNotes(new Array(count).fill(""));
+  const service = createService(store);
+
+  // 第 1 轮：200 项可提交，1 项留给续轮。
+  const round1Context = createStoredContext(store, { notes });
+  const round1 = await service.align({ contextId: round1Context.stored.contextId, lyrics, language: "mandarin" });
+  assert.equal(round1.patchRequest.arguments.patches.length, 200);
+  assert.equal(round1.continuation.remainingChangedCount, 1);
+  notes = applyPatchesToNotes(notes, round1Context.occurrenceId, round1.patchRequest.arguments.patches);
+
+  // 第 2 轮：新快照新 contextId；已应用的 200 项自动 no-change，恰好只剩 1 个 patch。
+  const round2Context = createStoredContext(store, { notes });
+  assert.notEqual(round2Context.stored.contextId, round1Context.stored.contextId);
+  const round2 = await service.align({ contextId: round2Context.stored.contextId, lyrics, language: "mandarin" });
+  assert.equal(round2.status, "planned");
+  assert.equal(round2.patchRequest.arguments.patches.length, 1);
+  assert.equal(round2.continuation, undefined);
+  // 续轮 patch 引用的是新 occurrence 的 noteId——这正是预烤批次不可能提前知道的部分。
+  assert.equal(round2.patchRequest.arguments.patches[0].noteId, `${round2Context.occurrenceId}:n:200`);
+  notes = applyPatchesToNotes(notes, round2Context.occurrenceId, round2.patchRequest.arguments.patches);
+
+  // 第 3 轮：全部就位 → no_change，循环终止。
+  const round3Context = createStoredContext(store, { notes });
+  const round3 = await service.align({ contextId: round3Context.stored.contextId, lyrics, language: "mandarin" });
+  assert.equal(round3.status, "no_change");
+  assert.equal(round3.patchRequest, null);
+  assert.equal(round3.continuation, undefined);
+});
+
+test("PATCH_CAP continuation can replay explicit occurrenceId/startNoteId against a fresh context", async () => {
+  const store = createStore();
+  const lyrics = mandarinLyrics(201);
+  let notes = uniformNotes(new Array(202).fill(""));
+  const service = createService(store);
+  const round1Context = createStoredContext(store, {
+    notes,
+    extraOccurrenceWithNotes: true,
+  });
+  const originalOptions = {
+    occurrenceId: round1Context.occurrenceId,
+    startNoteId: noteId(round1Context.occurrenceId, 1),
+    lyrics,
+    language: "mandarin",
+  };
+  const round1 = await service.align({
+    contextId: round1Context.stored.contextId,
+    ...originalOptions,
+  });
+  assert.equal(round1.patchRequest.arguments.patches.length, 200);
+  assert.equal(round1.continuation.remainingChangedCount, 1);
+  notes = applyPatchesToNotes(
+    notes,
+    round1Context.occurrenceId,
+    round1.patchRequest.arguments.patches
+  );
+  // 模拟提交成功消费旧上下文；continuation 明确承诺新快照后可用同一组 options 重跑。
+  store.delete(round1Context.stored.contextId);
+  const round2Context = createStoredContext(store, {
+    notes,
+    extraOccurrenceWithNotes: true,
+  });
+  let round2;
+  await assert.doesNotReject(async () => {
+    round2 = await service.align({
+      contextId: round2Context.stored.contextId,
+      ...originalOptions,
+    });
+  });
+  assert.equal(round2.status, "planned");
+  assert.equal(round2.patchRequest.arguments.patches.length, 1);
+  assert.equal(
+    round2.patchRequest.arguments.patches[0].noteId,
+    noteId(round2Context.occurrenceId, 201)
+  );
+});
+
+test("PATCH_CAP continuation refuses positional re-anchor when target or start-note identity changed", async () => {
+  const store = createStore();
+  const lyrics = mandarinLyrics(201);
+  let notes = uniformNotes(new Array(202).fill(""));
+  const service = createService(store);
+  const round1Context = createStoredContext(store, {
+    notes,
+    extraOccurrenceWithNotes: true,
+  });
+  const originalOptions = {
+    occurrenceId: round1Context.occurrenceId,
+    startNoteId: noteId(round1Context.occurrenceId, 1),
+    lyrics,
+    language: "mandarin",
+  };
+  const round1 = await service.align({
+    contextId: round1Context.stored.contextId,
+    ...originalOptions,
+  });
+  notes = applyPatchesToNotes(
+    notes,
+    round1Context.occurrenceId,
+    round1.patchRequest.arguments.patches
+  );
+  store.delete(round1Context.stored.contextId);
+  const round2Context = createStoredContext(store, {
+    notes,
+    extraOccurrenceWithNotes: true,
+  });
+  // track/reference 位置可被另一个 group 占用；旧 selector 不能只凭位置后缀重锚。
+  round2Context.stored.context.occurrences[0].targetGroupUuid = "uuid-replaced-target";
+  await assert.rejects(
+    service.align({
+      contextId: round2Context.stored.contextId,
+      ...originalOptions,
+    }),
+    (error) => error.code === "STALE_CONTEXT" && /target|uuid/i.test(error.message)
+  );
+
+  const round3Context = createStoredContext(store, {
+    notes,
+    extraOccurrenceWithNotes: true,
+  });
+  const movedStart = round3Context.stored.context.occurrences[0].noteFingerprints.find(
+    (note) => note.indexInGroup === 1
+  );
+  movedStart.onsetBlick += Q;
+  await assert.rejects(
+    service.align({
+      contextId: round3Context.stored.contextId,
+      ...originalOptions,
+    }),
+    (error) => error.code === "STALE_CONTEXT" && /start note|fingerprint/i.test(error.message)
+  );
+});
+
+test("exactly the patch cap stays a single request with no continuation", async () => {
+  const store = createStore();
+  const count = 200;
+  const { stored } = createStoredContext(store, {
+    notes: uniformNotes(new Array(count).fill("")),
+  });
+  const result = await createService(store).align({
+    contextId: stored.contextId,
+    lyrics: mandarinLyrics(count),
+    language: "mandarin",
+  });
+  assert.equal(result.summary.changedCount, count);
+  assert.equal(result.patchRequest.arguments.patches.length, 200);
+  assert.equal(result.continuation, undefined);
+  assert.ok(!result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_PATCH_CAP"));
+});
+
 test("multi-syllable English words expand into '+' continuations", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, { notes: uniformNotes(["a", "b", "c", "d"]) });
@@ -280,6 +481,14 @@ test("align resolves contexts honestly across error paths", async () => {
     notes: uniformNotes(["a"]),
     extraOccurrenceWithNotes: true,
   });
+  await assert.rejects(
+    service.align({
+      contextId: ambiguous.stored.contextId,
+      occurrenceId: "forged:t:0:r:0",
+      lyrics: "あ",
+    }),
+    (error) => error.code === "UNKNOWN_OCCURRENCE"
+  );
   await assert.rejects(
     service.align({ contextId: ambiguous.stored.contextId, lyrics: "あ" }),
     (error) => error.code === "AMBIGUOUS_CONTEXT"

@@ -30,6 +30,9 @@ const PITCH_CLASS_NAMES = Object.freeze([
 const MAJOR_SCALE = Object.freeze([0, 2, 4, 5, 7, 9, 11]);
 const NATURAL_MINOR_SCALE = Object.freeze([0, 2, 3, 5, 7, 8, 10]);
 const TOP_CANDIDATES = 5;
+// 逐音符/逐乐句列表在长片段（数百音符）上会主导响应体积。standard 截断到此上限并给出警告，
+// verbose 完整返回，compact 只给汇总不逐项展开。
+const MAX_LIST_ITEMS = 100;
 
 const PROVENANCE = Object.freeze({
   keyMethod: "krumhansl_schmuckler_duration_weighted_pearson",
@@ -156,10 +159,12 @@ function runAnalysis(loaded, input, warnings) {
     if (input.include.has("key")) result.key = key;
   }
   if (input.include.has("scaleDegrees")) {
-    result.scaleDegrees = bestKey ? scaleDegreesFor(loaded.notes, bestKey) : null;
+    result.scaleDegrees = bestKey
+      ? scaleDegreesFor(loaded.notes, bestKey, input.responseMode, warnings)
+      : null;
   }
   if (input.include.has("phrases")) {
-    result.phrases = analyzePhrases(loaded, input.phraseGapQuarter);
+    result.phrases = analyzePhrases(loaded, input.phraseGapQuarter, input.responseMode, warnings);
   }
   if (input.include.has("statistics")) {
     result.statistics = analyzeStatistics(loaded);
@@ -216,7 +221,7 @@ function analyzeKey(notes, warnings) {
   };
 }
 
-function scaleDegreesFor(notes, key) {
+function scaleDegreesFor(notes, key, responseMode, warnings) {
   const scale = key.mode === "major" ? MAJOR_SCALE : NATURAL_MINOR_SCALE;
   const degreeByOffset = new Map(scale.map((offset, index) => [offset, index + 1]));
   const items = notes.map((note) => {
@@ -232,40 +237,95 @@ function scaleDegreesFor(notes, key) {
       inScale: degree !== null,
     };
   });
-  return {
+  const nonDiatonicNoteIds = items.filter((item) => !item.inScale).map((item) => item.noteId);
+  // 汇总各模式都返回：时值无关的音级直方图与非调内计数，便于不展开逐音符也能判断调性贴合度。
+  const degreeHistogram = Object.create(null);
+  for (const item of items) {
+    const bucket = item.degree === null ? "chromatic" : String(item.degree);
+    degreeHistogram[bucket] = (degreeHistogram[bucket] ?? 0) + 1;
+  }
+  const base = {
     relativeTo: { tonic: key.tonic, mode: key.mode },
-    items,
-    nonDiatonicNoteIds: items.filter((item) => !item.inScale).map((item) => item.noteId),
+    summary: {
+      noteCount: items.length,
+      inScaleCount: items.length - nonDiatonicNoteIds.length,
+      nonDiatonicCount: nonDiatonicNoteIds.length,
+      degreeHistogram,
+    },
+  };
+  if (responseMode === "compact") {
+    // compact：不逐音符展开，只给汇总与（截断的）非调内音符 id。
+    return {
+      ...base,
+      nonDiatonicNoteIds: nonDiatonicNoteIds.slice(0, MAX_LIST_ITEMS),
+      nonDiatonicTruncated: nonDiatonicNoteIds.length > MAX_LIST_ITEMS,
+    };
+  }
+  const cap = responseMode === "verbose" ? items.length : MAX_LIST_ITEMS;
+  if (items.length > cap) {
+    warnings.push({
+      code: "SCALE_DEGREES_TRUNCATED",
+      message: `scaleDegrees.items reports the first ${cap} of ${items.length} notes; use responseMode:"verbose" for the full per-note list or "compact" for the summary only.`,
+    });
+  }
+  return {
+    ...base,
+    items: items.slice(0, cap),
+    itemsTruncated: items.length > cap,
+    nonDiatonicNoteIds,
   };
 }
 
-function analyzePhrases(loaded, phraseGapQuarter) {
+function analyzePhrases(loaded, phraseGapQuarter, responseMode, warnings) {
   const gapBlick = Math.max(1, Math.round(phraseGapQuarter * loaded.quarterBlick));
   const phrases = segmentPhrases(loaded.notes, gapBlick);
+  const items = phrases.map((phrase, index) => {
+    const first = phrase.notes[0];
+    const last = phrase.notes[phrase.notes.length - 1];
+    const next = phrases[index + 1]?.notes[0] ?? null;
+    const pitches = phrase.notes.map((note) => note.pitch);
+    return {
+      index,
+      noteCount: phrase.notes.length,
+      firstNoteId: first.noteId,
+      lastNoteId: last.noteId,
+      startBlick: first.absOnsetBlick,
+      endBlick: last.absEndBlick,
+      durationQuarter: (last.absEndBlick - first.absOnsetBlick) / loaded.quarterBlick,
+      climax: {
+        noteId: phrase.climax.noteId,
+        lyrics: phrase.climax.lyrics,
+        pitch: phrase.climax.pitch,
+      },
+      ambitusSemitones: Math.max(...pitches) - Math.min(...pitches),
+      restAfterBlick: next ? Math.max(0, next.absOnsetBlick - last.absEndBlick) : null,
+    };
+  });
+  // 各模式共有的聚合摘要：compact 不展开逐乐句 items 时仍能判断切分结果的规模与形状。
+  const noteCounts = items.map((item) => item.noteCount);
+  const durations = items.map((item) => item.durationQuarter);
+  const summary = {
+    totalNotes: noteCounts.reduce((sum, value) => sum + value, 0),
+    noteCount: { min: Math.min(...noteCounts), max: Math.max(...noteCounts) },
+    durationQuarter: { min: Math.min(...durations), max: Math.max(...durations) },
+  };
+  if (responseMode === "compact") {
+    // compact 契约：只给汇总，不展开逐乐句列表。
+    return { phraseGapQuarter, count: items.length, summary };
+  }
+  const cap = responseMode === "verbose" ? items.length : MAX_LIST_ITEMS;
+  if (items.length > cap) {
+    warnings.push({
+      code: "PHRASES_TRUNCATED",
+      message: `phrases.items reports the first ${cap} of ${items.length} phrases; use responseMode:"verbose" for the full list.`,
+    });
+  }
   return {
     phraseGapQuarter,
-    items: phrases.map((phrase, index) => {
-      const first = phrase.notes[0];
-      const last = phrase.notes[phrase.notes.length - 1];
-      const next = phrases[index + 1]?.notes[0] ?? null;
-      const pitches = phrase.notes.map((note) => note.pitch);
-      return {
-        index,
-        noteCount: phrase.notes.length,
-        firstNoteId: first.noteId,
-        lastNoteId: last.noteId,
-        startBlick: first.absOnsetBlick,
-        endBlick: last.absEndBlick,
-        durationQuarter: (last.absEndBlick - first.absOnsetBlick) / loaded.quarterBlick,
-        climax: {
-          noteId: phrase.climax.noteId,
-          lyrics: phrase.climax.lyrics,
-          pitch: phrase.climax.pitch,
-        },
-        ambitusSemitones: Math.max(...pitches) - Math.min(...pitches),
-        restAfterBlick: next ? Math.max(0, next.absOnsetBlick - last.absEndBlick) : null,
-      };
-    }),
+    count: items.length,
+    summary,
+    items: items.slice(0, cap),
+    itemsTruncated: items.length > cap,
   };
 }
 

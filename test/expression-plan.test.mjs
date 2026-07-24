@@ -5,7 +5,7 @@ import {
   EXPRESSION_PLAN_DEFAULTS,
   ExpressionPlanService,
 } from "../server/src/expression-plan.js";
-import { normalizeCurveInput } from "../server/src/parameter-curve.js";
+import { normalizeCurveInput, normalizeTarget } from "../server/src/parameter-curve.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 
 const Q = 705600000;
@@ -101,6 +101,22 @@ function assertApplyRequestsWellFormed(result) {
     assert.ok(request.arguments.target.contextId);
     assert.ok(request.arguments.target.occurrenceId);
     assert.equal(request.arguments.target.expectedGroupUuid, "uuid-plan-test");
+    // F1/R2：target 必须携带锚点音符指纹与快照时 reference 偏移，并能通过 parameter-curve 的
+    // 真实 target 归一化（apply 前逐条核对；reference 被 setTimeOffset 移动即 STALE_CONTEXT）。
+    const normalizedTarget = normalizeTarget(request.arguments.target);
+    assert.ok(
+      Number.isSafeInteger(normalizedTarget.expectedTimeOffsetBlick),
+      "applyRequest target must pin the snapshot-time timeOffsetBlick"
+    );
+    assert.ok(
+      Array.isArray(normalizedTarget.expectedNotes) && normalizedTarget.expectedNotes.length >= 1,
+      "applyRequest target must carry expectedNotes fingerprints"
+    );
+    for (const expected of normalizedTarget.expectedNotes) {
+      assert.ok(Number.isInteger(expected.indexInGroup) && expected.indexInGroup >= 0);
+      assert.equal(typeof expected.onsetBlick, "number");
+      assert.equal(typeof expected.pitch, "number");
+    }
     const parameters = request.arguments.curves.map((curve) => curve.parameter);
     assert.equal(new Set(parameters).size, parameters.length, "parameters unique per call");
     for (const curve of request.arguments.curves) {
@@ -434,6 +450,81 @@ test("light_rasp warns about low-confidence approximation", async () => {
   assert.ok(result.warnings.some((warning) => warning.code === "LOW_CONFIDENCE_INTENT"));
   const gesture = result.gestures.find((item) => item.parameter === "tension");
   assert.equal(gesture.confidence.score, 0.3);
+});
+
+test("section-only intent seeds a baseline plan instead of EMPTY_PLAN", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, { notes: intentFixtureNotes() });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { section: "chorus" },
+  });
+  assert.equal(result.status, "planned");
+  assertApplyRequestsWellFormed(result);
+  assert.ok(result.summary.parameters.includes("loudness"));
+  assert.ok(result.gestures.length >= 1);
+  assert.ok(result.gestures.every((gesture) => gesture.source === "intent:section:chorus"));
+  assert.ok(result.gestures.some((gesture) => gesture.reasons.some((reason) => /chorus/.test(reason))));
+});
+
+test("emotion-only intent seeds a baseline plan instead of EMPTY_PLAN", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, { notes: intentFixtureNotes() });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { emotion: "tender" },
+  });
+  assert.equal(result.status, "planned");
+  assertApplyRequestsWellFormed(result);
+  assert.ok(result.summary.parameters.includes("breathiness"));
+  assert.ok(result.summary.parameters.includes("loudness")); // 无 section 时 tender 另补柔和 loudness
+  assert.ok(result.gestures.every((gesture) => gesture.source === "intent:emotion:tender"));
+});
+
+test("section + emotion together do not double-drive loudness", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, { notes: intentFixtureNotes() });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { section: "verse", emotion: "cool_anger" },
+  });
+  assert.equal(result.status, "planned");
+  assert.ok(result.summary.parameters.includes("loudness")); // section 驱动
+  assert.ok(result.summary.parameters.includes("tension")); // cool_anger 驱动
+  const loudnessGestures = result.gestures.filter((gesture) => gesture.parameter === "loudness");
+  assert.equal(loudnessGestures.length, 2); // 每乐句恰一条 loudness，cool_anger 不再另加
+});
+
+test("plan attaches referenced note fingerprints to each apply target (F1 drift guard)", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createStoredContext(store, {
+    notes: intentFixtureNotes(),
+    timeOffsetBlick: 2 * Q,
+  });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    gestures: [
+      {
+        type: "hairpin",
+        fromNoteId: noteId(occurrenceId, 0),
+        toNoteId: noteId(occurrenceId, 1),
+        parameter: "loudness",
+        amount: 3,
+      },
+    ],
+  });
+  const target = result.applyRequests[0].arguments.target;
+  // R2：快照时 reference 偏移被一并锁进 target，setTimeOffset 移动在 apply 预检即失败。
+  assert.equal(target.expectedTimeOffsetBlick, 2 * Q);
+  assert.ok(Array.isArray(target.expectedNotes));
+  const byIndex = new Map(target.expectedNotes.map((note) => [note.indexInGroup, note]));
+  // 手势锚定 n0、n1 → 指纹须与快照一致（apply 前 verifyAnchoredNote 会逐字段比对）。
+  assert.equal(byIndex.get(0).onsetBlick, 0);
+  assert.equal(byIndex.get(0).pitch, 60);
+  assert.equal(byIndex.get(1).onsetBlick, Q);
+  assert.equal(byIndex.get(1).durationBlick, 3 * Q);
+  assert.equal(byIndex.get(1).pitch, 66);
+  assert.ok(!byIndex.has(2)); // 未被引用的 n2 不携带
 });
 
 test("explicit gestures supersede overlapping intent candidates", async () => {

@@ -26,7 +26,7 @@ const FIELD_SPECS = [
 ];
 const FIELD_BY_NAME = new Map(FIELD_SPECS.map((spec) => [spec.field, spec]));
 const PROCESSING_FIELDS = new Set(["lyrics", "phonemesOverride", "languageOverride"]);
-const MAX_PATCHES = 200;
+export const MAX_PATCHES = 200;
 
 export class NotePatchService {
   constructor(session, snapshotService, { sleepFn, now = () => Date.now() } = {}) {

@@ -143,6 +143,43 @@ const CURVE_TARGET_SCHEMA = {
     occurrenceId: { type: "string", minLength: 1 },
     expectedGroupUuid: { type: "string", minLength: 1 },
     allowSharedTargetMutation: { type: "boolean", default: false },
+    expectedTimeOffsetBlick: {
+      type: "integer",
+      description:
+        "Optional drift guard for the whole reference: the occurrence timeOffsetBlick observed at snapshot time. Absolute-coordinate points are converted to group-local positions with the live getTimeOffset() at apply time, and note fingerprints are group-local, so moving the reference via setTimeOffset changes neither — this field fails such a move with STALE_CONTEXT instead of writing curves at wrong local positions. sv_plan_expression emits it automatically.",
+    },
+    expectedNotes: {
+      type: "array",
+      minItems: 1,
+      maxItems: 256,
+      description:
+        "Optional note-anchor drift guard: full snapshot fingerprints of the notes this curve edit is anchored to. Each entry is compared field-by-field against the live host before any read or write; a moved/edited note fails STALE_CONTEXT with effects none instead of writing curves at the note's old position. sv_plan_expression emits this automatically in its applyRequests.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          noteId: { type: "string", minLength: 1 },
+          indexInGroup: { type: "integer", minimum: 0 },
+          onsetBlick: { type: "integer", minimum: 0 },
+          durationBlick: { type: "integer", minimum: 0 },
+          pitch: { type: "integer" },
+          lyrics: { type: ["string", "null"] },
+          phonemesOverride: { type: ["string", "null"] },
+          languageOverride: { type: ["string", "null"] },
+          detuneCents: { type: "number" },
+        },
+        required: [
+          "indexInGroup",
+          "onsetBlick",
+          "durationBlick",
+          "pitch",
+          "lyrics",
+          "phonemesOverride",
+          "languageOverride",
+          "detuneCents",
+        ],
+      },
+    },
   },
 };
 const NOTE_ANCHOR_SCHEMA = {
@@ -749,7 +786,7 @@ const TOOLS = [
   {
     name: "sv_compare_computed_pitch",
     description:
-      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
+      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas; Hz-based metrics use each side\'s own tempo map. Per-note pairing matches notes by score position: after a structural edit (insert/delete/move), notes without an unchanged before-note at the same position are reported unmatched with no before/delta instead of a misleading cross-note comparison. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -828,7 +865,7 @@ const TOOLS = [
   {
     name: "sv_plan_expression",
     description:
-      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into ready-to-submit applyRequests for sv_patch_parameter_curves (dryRun first, then commit through that hardened transaction kernel). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
+      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into ready-to-submit applyRequests for sv_patch_parameter_curves (dryRun first, then commit through that hardened transaction kernel). Each applyRequest target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -969,7 +1006,7 @@ const TOOLS = [
   {
     name: "sv_align_lyrics",
     description:
-      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects the number of "+" continuation notes); Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review; "br" is an explicit breath note. Returns per-note planned lyrics/languageOverride with tiered confidence plus a ready-to-submit sv_patch_notes patchRequest whose expected.lyrics preconditions guard against post-snapshot drift. "+"/"-"/"br" are host conventions; G2P parity with the host is not guaranteed.',
+      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects the number of "+" continuation notes); Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review; "br" is an explicit breath note. Returns per-note planned lyrics/languageOverride with tiered confidence plus one ready-to-submit sv_patch_notes patchRequest whose expected.lyrics preconditions guard against post-snapshot drift. Plans above the 200-patch per-call cap return the first 200 plus a continuation block (warned as PLAN_EXCEEDS_PATCH_CAP): follow-up batches cannot be pre-generated because a successful sv_patch_notes invalidates the contextId (and noteIds embed it) — commit, re-run sv_snapshot_range, re-run this tool with identical arguments, and repeat. Applied notes come back unchanged so the rounds converge to status no_change. Explicit occurrenceId/startNoteId are re-anchored only while a short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); forged, expired, or drifted selectors are rejected. "+"/"-"/"br" are host conventions; G2P parity with the host is not guaranteed.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1045,7 +1082,12 @@ const TOOLS = [
           default: 1,
           description: "Rest length (in quarters) treated as a phrase boundary.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        responseMode: {
+          enum: ["compact", "standard", "verbose"],
+          default: "standard",
+          description:
+            "compact returns summaries without per-note item lists; standard caps scaleDegrees.items and phrases.items at 100 with a truncation warning; verbose returns full lists.",
+        },
       },
       required: ["contextId"],
     },
@@ -1114,7 +1156,7 @@ const TOOLS = [
   {
     name: "sv_patch_parameter_curves",
     description:
-      "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable. If a client collapses nested range/point types to unknown, read svcopilot://schemas/sv_patch_parameter_curves for the exact validated input schema.",
+      "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). target.expectedNotes and target.expectedTimeOffsetBlick (emitted by sv_plan_expression) are verified against the live host in preflight so curves are never written at positions the notes or the whole reference have drifted away from. compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable. If a client collapses nested range/point types to unknown, read svcopilot://schemas/sv_patch_parameter_curves for the exact validated input schema.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1545,7 +1587,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.6.0" },
+  { name: "sv-copilot", version: "0.6.1" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1891,7 +1933,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.6.0",
+    interfaceVersion: "0.6.1",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -2001,7 +2043,7 @@ function musicWorkflowSchemaIndex() {
     "sv_analyze_phrase",
   ];
   return {
-    schemaVersion: "0.6.0",
+    schemaVersion: "0.6.1",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -2026,7 +2068,7 @@ function toolInputSchema(name) {
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.6.0",
+    schemaVersion: "0.6.1",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };

@@ -15,6 +15,8 @@ const RANGE_RELATIVE_TOLERANCE = 1e-6;
 const MIN_READ_WINDOW_BLICK = 1024;
 const MAX_JOURNAL_POINTS = 4000;
 const MAX_SNAPSHOT_POINTS = 20_000;
+// target.expectedNotes 的上限：apply 前用快照指纹逐条核对锚点音符是否漂移，绑定合理规模。
+const MAX_EXPECTED_NOTES = 256;
 export const BUILTIN_AUTOMATION_PARAMETERS = Object.freeze([
   "pitchDelta",
   "vibratoEnv",
@@ -226,6 +228,26 @@ async function executeCurveTransaction(capture, input, clock) {
           "TARGET_CONFLICT",
           `expected group UUID ${input.target.expectedGroupUuid}, observed ${transaction.target.groupUuid}`
         );
+      }
+      // 音符锚点漂移守卫：group UUID 相同但音符被 UI/raw API 移动时（contextId 不失效），绝对 BLICK
+      // 曲线会落到旧位置，读回只能证明"错误位置写成功"。逐条核对快照指纹，漂移即以 STALE_CONTEXT 失败
+      // （发生在任何写入之前，effects 保持 none）。
+      // 注意指纹全部是组内本地坐标：整个 reference 被 setTimeOffset 移动时指纹不变，所以还需要
+      // expectedTimeOffsetBlick 把快照时的偏移一并锁住——绝对→本地换算用的是提交时的 live offset，
+      // 偏移变了，同一绝对坐标就会写到相对音符错误的本地位置。
+      if (
+        input.target.expectedTimeOffsetBlick !== undefined &&
+        input.target.expectedTimeOffsetBlick !== transaction.target.groupTimeOffsetBlick
+      ) {
+        throw codedError(
+          "STALE_CONTEXT",
+          `the group reference moved after snapshot: expected timeOffsetBlick ${input.target.expectedTimeOffsetBlick}, observed ${transaction.target.groupTimeOffsetBlick}; re-snapshot and re-plan`
+        );
+      }
+      if (input.target.expectedNotes) {
+        for (const expected of input.target.expectedNotes) {
+          await verifyAnchoredNote(capture, transaction.target, expected);
+        }
       }
       const resolvedCurves = [];
       for (let index = 0; index < input.curves.length; index += 1) {
@@ -738,25 +760,29 @@ async function ensureLiveMusicalContext(capture, target) {
 }
 
 async function verifyAnchoredNote(capture, target, expected) {
-  target.anchorFingerprintCache ??= new Map();
-  const cached = target.anchorFingerprintCache.get(expected.noteId);
-  if (cached) return cached;
-  const note = await capture.call(target.group, "getNote", [expected.indexInGroup + 1], {
-    inferredType: "Note",
-  });
-  if (!note?.__handle__) {
-    throw codedError("STALE_CONTEXT", `anchored note ${expected.noteId} no longer exists`);
+  // 缓存只省略对同一音符的重复宿主读取（按 indexInGroup 键），指纹比对每次调用都必须执行：
+  // 若命中缓存即返回，同一 noteId 的第二份不同指纹会搭首份验证的车绕过比对（复审 R-P2）。
+  target.anchorObservedByIndex ??= new Map();
+  let observed = target.anchorObservedByIndex.get(expected.indexInGroup);
+  if (!observed) {
+    const note = await capture.call(target.group, "getNote", [expected.indexInGroup + 1], {
+      inferredType: "Note",
+    });
+    if (!note?.__handle__) {
+      throw codedError("STALE_CONTEXT", `anchored note ${expected.noteId} no longer exists`);
+    }
+    observed = {
+      indexInGroup: (await capture.call(note, "getIndexInParent")) - 1,
+      onsetBlick: await capture.call(note, "getOnset"),
+      durationBlick: await capture.call(note, "getDuration"),
+      pitch: await capture.call(note, "getPitch"),
+      lyrics: await capture.call(note, "getLyrics"),
+      phonemesOverride: await capture.call(note, "getPhonemes"),
+      languageOverride: await capture.call(note, "getLanguageOverride"),
+      detuneCents: await capture.call(note, "getDetune"),
+    };
+    target.anchorObservedByIndex.set(expected.indexInGroup, observed);
   }
-  const observed = {
-    indexInGroup: (await capture.call(note, "getIndexInParent")) - 1,
-    onsetBlick: await capture.call(note, "getOnset"),
-    durationBlick: await capture.call(note, "getDuration"),
-    pitch: await capture.call(note, "getPitch"),
-    lyrics: await capture.call(note, "getLyrics"),
-    phonemesOverride: await capture.call(note, "getPhonemes"),
-    languageOverride: await capture.call(note, "getLanguageOverride"),
-    detuneCents: await capture.call(note, "getDetune"),
-  };
   const comparableExpected = {
     indexInGroup: expected.indexInGroup,
     onsetBlick: expected.onsetBlick,
@@ -773,7 +799,6 @@ async function verifyAnchoredNote(capture, target, expected) {
     error.observedFingerprint = observed;
     throw error;
   }
-  target.anchorFingerprintCache.set(expected.noteId, observed);
   return observed;
 }
 
@@ -883,6 +908,23 @@ async function resolveAutomation(capture, target, parameter, context = {}) {
       "TARGET_CONFLICT",
       `expected group UUID ${target.expectedGroupUuid}, observed ${resolvedTarget.groupUuid}`
     );
+  }
+  // expectedNotes/expectedTimeOffsetBlick 与 expectedGroupUuid 同为读写共用守卫：读取路径也校验
+  // 锚点音符与 reference 偏移未漂移，否则读端接受漂移、写端 STALE_CONTEXT，语义不一致。
+  // 写路径的同一校验在 executeCurveTransaction。
+  if (
+    target.expectedTimeOffsetBlick !== undefined &&
+    target.expectedTimeOffsetBlick !== resolvedTarget.groupTimeOffsetBlick
+  ) {
+    throw codedError(
+      "STALE_CONTEXT",
+      `the group reference moved after snapshot: expected timeOffsetBlick ${target.expectedTimeOffsetBlick}, observed ${resolvedTarget.groupTimeOffsetBlick}; re-snapshot and re-plan`
+    );
+  }
+  if (target.expectedNotes) {
+    for (const expected of target.expectedNotes) {
+      await verifyAnchoredNote(capture, resolvedTarget, expected);
+    }
   }
   const resolvedParameter = await resolveParameterName(capture, resolvedTarget, parameter);
   return {
@@ -2052,7 +2094,99 @@ function normalizeAnchorOffset(offset, label) {
   return { unit: offset.unit, value: offset.value };
 }
 
-function normalizeTarget(target) {
+// target.expectedNotes：可选的锚点音符指纹快照。apply 预检时对每条调用 verifyAnchoredNote，
+// 使音符被 UI/raw API 移动（UUID 不变、contextId 未失效）时以 STALE_CONTEXT 失败，而非在旧位置写曲线。
+// verifyAnchoredNote 对 8 个指纹字段做严格全等比对，因此这里必须要求完整指纹：
+// 缺字段会导致必然失败的假 STALE_CONTEXT，宁可在归一化阶段拒绝。
+function normalizeExpectedNotes(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "target.expectedNotes must be a non-empty array when provided"
+    );
+  }
+  if (value.length > MAX_EXPECTED_NOTES) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `target.expectedNotes must contain at most ${MAX_EXPECTED_NOTES} items`
+    );
+  }
+  return value.map((note, index) => {
+    const label = `target.expectedNotes[${index}]`;
+    if (!isRecord(note)) {
+      throw codedError("INVALID_ARGUMENTS", `${label} must be an object`);
+    }
+    if (!Number.isSafeInteger(note.indexInGroup) || note.indexInGroup < 0) {
+      throw codedError("INVALID_ARGUMENTS", `${label}.indexInGroup must be a non-negative integer`);
+    }
+    for (const field of ["onsetBlick", "durationBlick"]) {
+      if (!Number.isSafeInteger(note[field]) || note[field] < 0) {
+        throw codedError(
+          "INVALID_ARGUMENTS",
+          `${label}.${field} must be a non-negative safe integer (full snapshot fingerprint required)`
+        );
+      }
+    }
+    if (!Number.isSafeInteger(note.pitch)) {
+      throw codedError("INVALID_ARGUMENTS", `${label}.pitch must be an integer MIDI pitch`);
+    }
+    if (!Number.isFinite(note.detuneCents)) {
+      throw codedError("INVALID_ARGUMENTS", `${label}.detuneCents must be a finite number`);
+    }
+    for (const field of ["lyrics", "phonemesOverride", "languageOverride"]) {
+      if (typeof note[field] !== "string" && note[field] !== null) {
+        throw codedError(
+          "INVALID_ARGUMENTS",
+          `${label}.${field} must be a string or null (full snapshot fingerprint required)`
+        );
+      }
+    }
+    return {
+      noteId: typeof note.noteId === "string" ? note.noteId : `idx:${note.indexInGroup}`,
+      indexInGroup: note.indexInGroup,
+      onsetBlick: note.onsetBlick,
+      durationBlick: note.durationBlick,
+      pitch: note.pitch,
+      lyrics: note.lyrics,
+      phonemesOverride: note.phonemesOverride,
+      languageOverride: note.languageOverride,
+      detuneCents: note.detuneCents,
+    };
+  }).map((note, index, all) => {
+    // 同一 noteId/indexInGroup 出现两份指纹是自相矛盾的请求：两份不可能同时为真，
+    // 且重复项会依赖"逐条验证互不影响"的实现细节——在归一化边界直接拒绝。
+    for (let prior = 0; prior < index; prior += 1) {
+      if (all[prior].noteId === note.noteId) {
+        throw codedError(
+          "INVALID_ARGUMENTS",
+          `target.expectedNotes contains duplicate noteId ${note.noteId}; each anchored note may appear once`
+        );
+      }
+      if (all[prior].indexInGroup === note.indexInGroup) {
+        throw codedError(
+          "INVALID_ARGUMENTS",
+          `target.expectedNotes contains duplicate indexInGroup ${note.indexInGroup}; each anchored note may appear once`
+        );
+      }
+    }
+    return note;
+  });
+}
+
+export function normalizeTarget(target) {
+  const expectedNotes = isRecord(target) ? normalizeExpectedNotes(target.expectedNotes) : undefined;
+  if (
+    isRecord(target) &&
+    target.expectedTimeOffsetBlick !== undefined &&
+    !Number.isSafeInteger(target.expectedTimeOffsetBlick)
+  ) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "target.expectedTimeOffsetBlick must be a safe integer (the occurrence timeOffsetBlick observed at snapshot time)"
+    );
+  }
+  const expectedTimeOffsetBlick = isRecord(target) ? target.expectedTimeOffsetBlick : undefined;
   if (
     isRecord(target) &&
     (target.contextId !== undefined || target.occurrenceId !== undefined)
@@ -2087,6 +2221,8 @@ function normalizeTarget(target) {
       ...(target.expectedGroupUuid !== undefined
         ? { expectedGroupUuid: target.expectedGroupUuid }
         : {}),
+      ...(expectedTimeOffsetBlick !== undefined ? { expectedTimeOffsetBlick } : {}),
+      ...(expectedNotes ? { expectedNotes } : {}),
     };
   }
   if (
@@ -2120,6 +2256,8 @@ function normalizeTarget(target) {
     ...(target.expectedGroupUuid !== undefined
       ? { expectedGroupUuid: target.expectedGroupUuid }
       : {}),
+    ...(expectedTimeOffsetBlick !== undefined ? { expectedTimeOffsetBlick } : {}),
+    ...(expectedNotes ? { expectedNotes } : {}),
   };
 }
 

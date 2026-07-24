@@ -651,6 +651,11 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   }
 
   applyIntentModifiers(candidates, intent);
+  if (candidates.length === 0 && (intent.section || intent.emotion)) {
+    // genre/technique 未产出任何候选，但用户单独给了 section/emotion：直接播种基线手势兜底，
+    // 不再必然 EMPTY_PLAN。在 applyIntentModifiers 之后播种，故这些已成形的基线不会被二次修饰。
+    seedIntentBaselines(intent, phrases, push);
+  }
 
   const derived = [];
   for (const candidate of candidates) {
@@ -751,6 +756,70 @@ function applyIntentModifiers(candidates, intent) {
     if (intent.section === "verse" && spec.type === "hairpin" && spec.parameter === "loudness") {
       spec.amount -= 0.5;
       candidate.reasons.push("verse: reduced dynamic arc");
+    }
+  }
+}
+
+// section/emotion 单独出现（无 genre/technique 候选）时的基线手势。均为低置信启发式默认表情曲线：
+// section 负责逐乐句的动态弧（loudness），emotion 负责其特征色（cool_anger→tension，tender→breathiness）；
+// 仅当没有 section 提供 loudness 时，emotion 才另补一条柔和的 loudness 弧，避免同一乐句叠两条 loudness。
+function seedIntentBaselines(intent, phrases, push) {
+  const hairpin = (from, to, parameter, amount, peakPosition) => ({
+    type: "hairpin",
+    fromNoteId: from.noteId,
+    toNoteId: to.noteId,
+    parameter,
+    amount,
+    peakPosition,
+  });
+  const sectionLoudness = {
+    chorus: { amount: 3, peak: 0.65 },
+    prechorus: { amount: 2, peak: 0.7 },
+    verse: { amount: 0.8, peak: 0.5 },
+    bridge: { amount: 1.5, peak: 0.55 },
+  };
+  for (const phrase of phrases) {
+    const first = phrase.notes[0];
+    const last = phrase.notes[phrase.notes.length - 1];
+    const section = sectionLoudness[intent.section];
+    if (section) {
+      push(
+        `intent:section:${intent.section}`,
+        0.35,
+        [`${intent.section}: baseline dynamic arc over the phrase`],
+        hairpin(first, last, "loudness", section.amount, section.peak)
+      );
+    }
+    if (intent.emotion === "cool_anger") {
+      push(
+        "intent:emotion:cool_anger",
+        0.35,
+        ["cool_anger: controlled tension arc over the phrase"],
+        hairpin(first, last, "tension", 0.12, 0.6)
+      );
+      if (!section) {
+        push(
+          "intent:emotion:cool_anger",
+          0.3,
+          ["cool_anger: assertive dynamic push"],
+          hairpin(first, last, "loudness", 2, 0.6)
+        );
+      }
+    } else if (intent.emotion === "tender") {
+      push(
+        "intent:emotion:tender",
+        0.35,
+        ["tender: breath warmth over the phrase"],
+        hairpin(first, last, "breathiness", 0.08, 0.5)
+      );
+      if (!section) {
+        push(
+          "intent:emotion:tender",
+          0.3,
+          ["tender: gentle dynamic swell"],
+          hairpin(first, last, "loudness", 1, 0.5)
+        );
+      }
     }
   }
 }
@@ -978,6 +1047,45 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     ...(loaded.occurrence.targetGroupUuid
       ? { expectedGroupUuid: loaded.occurrence.targetGroupUuid }
       : {}),
+    // 计划以绝对 BLICK 表达，apply 用提交时的 live getTimeOffset() 换算回本地；音符指纹是组内
+    // 本地坐标，整个 reference 被 setTimeOffset 移动时指纹全部不变——必须把快照时的偏移一并交给
+    // 事务核锁住，reference 移动即 STALE_CONTEXT，而不是把曲线写到相对音符错误的本地位置。
+    expectedTimeOffsetBlick: loaded.timeOffsetBlick,
+  };
+  // 手势锚点音符的原始指纹：随 applyRequest 交给事务核，在写入前逐条 verifyAnchoredNote。
+  // 音符被 UI/raw API 移动（UUID 不变、contextId 未失效）时，apply 以 STALE_CONTEXT 失败，
+  // 而不是把绝对 BLICK 曲线写到音符早已离开的旧位置。
+  const fingerprintById = new Map(
+    (loaded.occurrence.noteFingerprints ?? []).map((fingerprint) => [fingerprint.noteId, fingerprint])
+  );
+  const gestureById = new Map(gestures.map((gesture) => [gesture.gestureId, gesture]));
+  const expectedNotesFor = (operations) => {
+    const noteIds = new Set();
+    for (const operation of operations) {
+      for (const gestureId of operation.fromGestures) {
+        for (const noteId of gestureById.get(gestureId)?.noteIds ?? []) noteIds.add(noteId);
+      }
+    }
+    const notes = [];
+    for (const noteId of noteIds) {
+      const fingerprint = fingerprintById.get(noteId);
+      if (fingerprint) {
+        notes.push({
+          noteId: fingerprint.noteId,
+          indexInGroup: fingerprint.indexInGroup,
+          onsetBlick: fingerprint.onsetBlick,
+          durationBlick: fingerprint.durationBlick,
+          pitch: fingerprint.pitch,
+          lyrics: fingerprint.lyrics,
+          phonemesOverride: fingerprint.phonemesOverride,
+          languageOverride: fingerprint.languageOverride,
+          detuneCents: fingerprint.detuneCents,
+        });
+      }
+    }
+    // 按 indexInGroup 升序固定顺序，保持请求确定性。
+    notes.sort((left, right) => left.indexInGroup - right.indexInGroup);
+    return notes;
   };
   const curveOf = (operation) => ({
     parameter: operation.parameter,
@@ -1004,10 +1112,11 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     const callOperations = compiled.operations.filter(
       (operation) => operation.applyCallIndex === callIndex
     );
+    const expectedNotes = expectedNotesFor(callOperations);
     applyRequests.push({
       tool: "sv_patch_parameter_curves",
       arguments: {
-        target,
+        target: { ...target, ...(expectedNotes.length > 0 ? { expectedNotes } : {}) },
         curves: callOperations.map(curveOf),
         dryRun: true,
         atomic: true,

@@ -1429,6 +1429,177 @@ test("note anchors reject stale fingerprints", async () => {
   assert.equal(model.undoCount, 0);
 });
 
+function expectedNoteN0(occurrenceId) {
+  return {
+    noteId: `${occurrenceId}:n:0`,
+    indexInGroup: 0,
+    onsetBlick: 0,
+    durationBlick: 2 * Q,
+    pitch: 60,
+    lyrics: "do",
+    phonemesOverride: "d ow",
+    languageOverride: "english",
+    detuneCents: 0,
+  };
+}
+
+test("target.expectedNotes passes preflight when the anchor note is unchanged", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const result = await service.patchCurves({
+    target: {
+      contextId,
+      occurrenceId,
+      expectedTimeOffsetBlick: model.groupOnset,
+      expectedNotes: [expectedNoteN0(occurrenceId)],
+    },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          { blick: 0, value: 1 },
+          { blick: Q, value: 2 },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "dry_run");
+  assert.equal(model.undoCount, 0);
+});
+
+test("partial expectedNotes fingerprints fail INVALID_ARGUMENTS, not a false STALE_CONTEXT", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  // verifyAnchoredNote 做 8 字段严格全等：缺字段若放行会与宿主观测必然不等，
+  // 把"调用方少给字段"误报成"音符漂移"。归一化阶段必须直接拒绝。
+  const result = await service.patchCurves({
+    target: {
+      contextId,
+      occurrenceId,
+      expectedNotes: [{ indexInGroup: 0, onsetBlick: 0 }],
+    },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          { blick: 0, value: 1 },
+          { blick: Q, value: 2 },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INVALID_ARGUMENTS");
+  assert.match(result.error.message, /full snapshot fingerprint/);
+  assert.equal(model.undoCount, 0);
+});
+
+test("target.expectedNotes rejects duplicate noteId entries before the fingerprint cache can hide a conflict", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId, noteStates } = createRangeContextService(model);
+  const duplicateIdentity = {
+    ...noteStates[1],
+    noteId: `${occurrenceId}:n:0`,
+  };
+  const result = await service.patchCurves({
+    target: {
+      contextId,
+      occurrenceId,
+      expectedNotes: [expectedNoteN0(occurrenceId), duplicateIdentity],
+    },
+    dryRun: true,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          { blick: 0, value: 1 },
+          { blick: Q, value: 2 },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INVALID_ARGUMENTS");
+  assert.match(result.error.message, /duplicate.*noteId/i);
+  assert.equal(model.undoCount, 0);
+});
+
+test("expectedTimeOffsetBlick catches a reference move that note fingerprints cannot see", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const capturedOffset = model.groupOnset;
+  // setTimeOffset 移动整个 reference：UUID 与组内本地音符指纹全部不变，仅 live getTimeOffset 变化。
+  model.groupOnset = capturedOffset + Q;
+  const absoluteCurves = [
+    {
+      parameter: "loudness",
+      mode: "replace",
+      range: { coordinate: "absolute", fromBlick: capturedOffset, toBlick: capturedOffset + 2 * Q },
+      points: [
+        { blick: capturedOffset, value: 1 },
+        { blick: capturedOffset + Q, value: 2 },
+      ],
+    },
+  ];
+  // 只带 expectedNotes（本地指纹）：守卫看不到移动，提交"成功"——这正是被审计指出的漏洞形态。
+  const fingerprintsOnly = await service.patchCurves({
+    target: { contextId, occurrenceId, expectedNotes: [expectedNoteN0(occurrenceId)] },
+    dryRun: false,
+    curves: absoluteCurves,
+  });
+  assert.equal(fingerprintsOnly.ok, true);
+  // 加上 expectedTimeOffsetBlick：移动被判定为 STALE_CONTEXT，effects none、零 Undo。
+  const guarded = await service.patchCurves({
+    target: {
+      contextId,
+      occurrenceId,
+      expectedTimeOffsetBlick: capturedOffset,
+      expectedNotes: [expectedNoteN0(occurrenceId)],
+    },
+    dryRun: false,
+    curves: absoluteCurves,
+  });
+  assert.equal(guarded.ok, false);
+  assert.equal(guarded.error.code, "STALE_CONTEXT");
+  assert.match(guarded.error.message, /timeOffsetBlick/);
+  assert.equal(guarded.effects, "none");
+});
+
+test("target.expectedNotes fails STALE_CONTEXT and writes nothing when the anchor note drifts", async () => {
+  const model = createCurveModel();
+  const { service, contextId, occurrenceId, noteState } = createRangeContextService(model);
+  // group UUID 不变、contextId 未失效，仅音符被 UI/raw API 从 onset 0 挪到 Q（绝对 BLICK 曲线会落到旧位置）。
+  noteState.onsetBlick = Q;
+  const result = await service.patchCurves({
+    target: { contextId, occurrenceId, expectedNotes: [expectedNoteN0(occurrenceId)] },
+    dryRun: false,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
+        points: [
+          { blick: 0, value: 1 },
+          { blick: Q, value: 2 },
+        ],
+      },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "STALE_CONTEXT");
+  assert.equal(result.effects, "none");
+  assert.equal(model.undoCount, 0);
+});
+
 test("shared target occurrences require explicit mutation confirmation", async () => {
   const model = createCurveModel();
   const { service, contextId, occurrenceId } = createRangeContextService(model, { shared: true });
