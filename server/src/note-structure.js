@@ -8,7 +8,8 @@ import {
 import { waitForProcessing } from "./processing.js";
 
 // 结构操作按调用方顺序逐个执行；每步都在执行时读取活动 index，避免删除导致的漂移。
-const MAX_OPERATIONS = 64;
+// MAX_OPERATIONS 导出供 harmony 规划器对齐单次可提交批量上限。
+export const MAX_OPERATIONS = 64;
 
 export class NoteStructureService {
   constructor(session, snapshotService, { sleepFn, now = () => Date.now() } = {}) {

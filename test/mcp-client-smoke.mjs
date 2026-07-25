@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.7.1");
+  assert.equal(client.getServerVersion()?.version, "0.8.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 31);
+  assert.equal(listed.tools.length, 32);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -104,6 +104,7 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_style_profile"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_validate_lyrics_prosody"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_generate_harmony"));
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -248,13 +249,14 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_style_profile"));
   assert.ok(capabilities.interfaces.music.includes("sv_validate_lyrics_prosody"));
   assert.ok(capabilities.interfaces.music.includes("sv_quantize_notes"));
+  assert.ok(capabilities.interfaces.music.includes("sv_generate_harmony"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.7.1");
+  assert.equal(capabilities.interfaceVersion, "0.8.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -281,6 +283,7 @@ try {
       "sv_style_profile",
       "sv_validate_lyrics_prosody",
       "sv_quantize_notes",
+      "sv_generate_harmony",
     ]
   );
   const phraseResource = await client.readResource({
@@ -479,6 +482,41 @@ try {
     })
   );
   assert.equal(quantizeInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  // v0.8.0：调内和声规划器（纯内存服务，未知 context 结构化报错）。
+  const harmonyResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_generate_harmony",
+  });
+  assert.ok(harmonyResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const harmonySchema = parseResource(harmonyResource).inputSchema;
+  assert.deepEqual(harmonySchema.properties.harmony.properties.interval.enum, [
+    "third_below",
+    "third_above",
+    "sixth_below",
+    "sixth_above",
+  ]);
+  assert.deepEqual(harmonySchema.properties.lyricsMode.enum, ["copy", "sustain"]);
+  const harmonyUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_generate_harmony",
+      arguments: {
+        contextId: "ctx_smoke_missing",
+        targetOccurrenceId: "ctx_smoke_missing:t:1:r:0",
+        harmony: { interval: "third_below" },
+      },
+    })
+  );
+  assert.equal(harmonyUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const harmonyInvalidArguments = parseToolError(
+    await client.callTool({
+      name: "sv_generate_harmony",
+      arguments: {
+        contextId: "ctx_smoke",
+        targetOccurrenceId: "ctx_smoke:t:1:r:0",
+        harmony: { interval: "fifth_below" },
+      },
+    })
+  );
+  assert.equal(harmonyInvalidArguments.error.code, "INVALID_ARGUMENTS");
   assert.equal(
     batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
     "object"

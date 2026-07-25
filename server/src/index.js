@@ -23,6 +23,7 @@ import { HostSession } from "./host-session.js";
 import { AuditionService } from "./audition.js";
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
 import { ExpressionPlanService } from "./expression-plan.js";
+import { HarmonyPlanService } from "./harmony-plan.js";
 import { LyricAlignService } from "./lyric-align.js";
 import { LyricProsodyService } from "./lyric-prosody.js";
 import { LyricsService } from "./lyrics.js";
@@ -71,6 +72,7 @@ const phraseAnalysisService = new PhraseAnalysisService({ store: snapshotService
 const styleProfileService = new StyleProfileService({ store: snapshotService.store });
 const lyricProsodyService = new LyricProsodyService({ store: snapshotService.store });
 const quantizePlanService = new QuantizePlanService({ store: snapshotService.store });
+const harmonyPlanService = new HarmonyPlanService({ store: snapshotService.store });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -1305,6 +1307,75 @@ const TOOLS = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
+    name: "sv_generate_harmony",
+    description:
+      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) a diatonic third or sixth below/above using an explicit key or Krumhansl-Schmuckler detection (a thin margin warns KEY_AMBIGUOUS with the runner-up; pass harmony.key to lock the mapping). Non-diatonic source notes get a nearest-scale-tone semitone-offset approximation flagged needsReview. Register bounds trigger one octave shift, then skip; a shift that would cross the source voice is skipped as VOICE_CROSSING_AVOIDED. lyricsMode "copy" copies source lyrics, "sustain" uses the first melodic lyric then "-" melisma. Existing target notes that match a planned note exactly are skipped as already_applied (convergence basis); overlapping-but-different target notes become TARGET_NOTE_CONFLICT and are NEVER overwritten. Returns one ready-to-submit sv_restructure_notes insert request in the target\'s local coordinates; plans above the 64-operation cap return the first 64 plus a continuation block (commit → re-snapshot → re-run with identical options; already-inserted notes skip as already_applied so the loop converges to no_change). Whether the harmony sounds good is human-only.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range capturing BOTH source and target occurrences with notes.",
+        },
+        sourceOccurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when exactly one non-target occurrence has notes.",
+        },
+        targetOccurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Destination occurrence for the harmony inserts; must differ from the source.",
+        },
+        harmony: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            interval: { enum: ["third_below", "third_above", "sixth_below", "sixth_above"] },
+            key: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                tonic: {
+                  enum: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"],
+                },
+                mode: { enum: ["major", "minor"] },
+              },
+              required: ["tonic", "mode"],
+              description: "Optional explicit key (sharps-only spelling); omitted keys use K-S detection.",
+            },
+          },
+          required: ["interval"],
+        },
+        register: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            minPitch: { type: "integer", minimum: 0, maximum: 127 },
+            maxPitch: { type: "integer", minimum: 0, maximum: 127 },
+          },
+          required: ["minPitch", "maxPitch"],
+          description: "Optional harmony register; out-of-range pitches octave-shift once, then skip.",
+        },
+        lyricsMode: { enum: ["copy", "sustain"], default: "copy" },
+        noteIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: 2000,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description: "Optional source-note subset; all noteIds must belong to the source occurrence.",
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId", "targetOccurrenceId", "harmony"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "sv_get_parameter_curve",
     description:
       "Read one Automation parameter curve of a note group within a required blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> is accepted only when <Name> exists in the target group's observable vocalModeParams. Names are case-insensitive and the response reports requestedParameter and resolvedParameter. Unknown names are rejected before NoteGroup.getParameter because SynthV may silently return a default curve. The host curve is read once with getAllPoints and filtered locally; only an oversized 64 KiB result falls back to density-based range bisection. Automation lives in group-local blicks; every point reports localBlick and absoluteBlick together with the official definition and interpolation method.",
@@ -1797,7 +1868,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.7.1" },
+  { name: "sv-copilot", version: "0.8.0" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1881,6 +1952,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://schemas/sv_quantize_notes",
       name: "sv_quantize_notes input schema",
       description: "Exact JSON input schema used to validate sv_quantize_notes.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_generate_harmony",
+      name: "sv_generate_harmony input schema",
+      description: "Exact JSON input schema used to validate sv_generate_harmony.",
       mimeType: "application/json",
     },
   ],
@@ -1994,6 +2071,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_quantize_notes":
         result = await quantizePlanService.plan(args);
+        break;
+      case "sv_generate_harmony":
+        result = await harmonyPlanService.plan(args);
         break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
@@ -2170,7 +2250,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.7.1",
+    interfaceVersion: "0.8.0",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -2207,6 +2287,7 @@ function capabilities() {
         "sv_style_profile",
         "sv_validate_lyrics_prosody",
         "sv_quantize_notes",
+        "sv_generate_harmony",
       ],
       audition: [
         "sv_start_audition",
@@ -2243,6 +2324,7 @@ function capabilities() {
         sv_style_profile: ["range"],
         sv_validate_lyrics_prosody: ["range"],
         sv_quantize_notes: ["range"],
+        sv_generate_harmony: ["range"],
       },
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
@@ -2287,9 +2369,10 @@ function musicWorkflowSchemaIndex() {
     "sv_style_profile",
     "sv_validate_lyrics_prosody",
     "sv_quantize_notes",
+    "sv_generate_harmony",
   ];
   return {
-    schemaVersion: "0.7.1",
+    schemaVersion: "0.8.0",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -2313,11 +2396,12 @@ function toolInputSchema(name) {
         "sv_style_profile",
         "sv_validate_lyrics_prosody",
         "sv_quantize_notes",
+        "sv_generate_harmony",
       ].includes(candidate.name)
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.7.1",
+    schemaVersion: "0.8.0",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };
