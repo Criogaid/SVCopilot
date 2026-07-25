@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.7.0");
+  assert.equal(client.getServerVersion()?.version, "0.7.1");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 30);
+  assert.equal(listed.tools.length, 31);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -103,6 +103,7 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_phrase"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_style_profile"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_validate_lyrics_prosody"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -246,13 +247,14 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_phrase"));
   assert.ok(capabilities.interfaces.music.includes("sv_style_profile"));
   assert.ok(capabilities.interfaces.music.includes("sv_validate_lyrics_prosody"));
+  assert.ok(capabilities.interfaces.music.includes("sv_quantize_notes"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.7.0");
+  assert.equal(capabilities.interfaceVersion, "0.7.1");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -278,6 +280,7 @@ try {
       "sv_analyze_phrase",
       "sv_style_profile",
       "sv_validate_lyrics_prosody",
+      "sv_quantize_notes",
     ]
   );
   const phraseResource = await client.readResource({
@@ -441,6 +444,41 @@ try {
     })
   );
   assert.equal(prosodyUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  // v0.7.1：量化规划器与 sv_plan_expression 的 section-aware presets。
+  assert.deepEqual(planSchema.properties.intent.properties.preset.enum, [
+    "jpop_cool",
+    "jpop_belt",
+    "controlled_anger",
+    "intimate_whisper",
+    "spoken_rap_transition",
+  ]);
+  const quantizeResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_quantize_notes",
+  });
+  assert.ok(quantizeResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const quantizeSchema = parseResource(quantizeResource).inputSchema;
+  assert.deepEqual(quantizeSchema.properties.grid.properties.division.enum, [
+    "1/4",
+    "1/8",
+    "1/16",
+    "1/32",
+    "1/8T",
+    "1/16T",
+  ]);
+  const quantizeUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_quantize_notes",
+      arguments: { contextId: "ctx_smoke_missing", grid: { division: "1/8" } },
+    })
+  );
+  assert.equal(quantizeUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const quantizeInvalidArguments = parseToolError(
+    await client.callTool({
+      name: "sv_quantize_notes",
+      arguments: { contextId: "ctx_smoke", grid: { division: "1/8T" }, swing: 0.3 },
+    })
+  );
+  assert.equal(quantizeInvalidArguments.error.code, "INVALID_ARGUMENTS");
   assert.equal(
     batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
     "object"

@@ -41,6 +41,7 @@ import {
 import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
 import { PhraseEditService } from "./phrase-edit.js";
 import { PhraseAnalysisService } from "./phrase-analysis.js";
+import { QuantizePlanService } from "./quantize-plan.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { StyleProfileService } from "./style-profile.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
@@ -69,6 +70,7 @@ const lyricAlignService = new LyricAlignService({ store: snapshotService.store }
 const phraseAnalysisService = new PhraseAnalysisService({ store: snapshotService.store });
 const styleProfileService = new StyleProfileService({ store: snapshotService.store });
 const lyricProsodyService = new LyricProsodyService({ store: snapshotService.store });
+const quantizePlanService = new QuantizePlanService({ store: snapshotService.store });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -982,8 +984,18 @@ const TOOLS = [
         intent: {
           type: "object",
           additionalProperties: false,
-          description: "Small heuristic vocabulary; derived gestures carry heuristic confidence.",
+          description:
+            "Small heuristic vocabulary; derived gestures carry heuristic confidence. preset expands to constant intent-field and constraint defaults (reviewable via presetExpansion in the response, never an opaque button); explicit intent fields override the preset's values with a PRESET_FIELD_OVERRIDDEN warning, and explicit constraints always win over preset constraint defaults.",
           properties: {
+            preset: {
+              enum: [
+                "jpop_cool",
+                "jpop_belt",
+                "controlled_anger",
+                "intimate_whisper",
+                "spoken_rap_transition",
+              ],
+            },
             genre: { enum: ["jpop"] },
             section: { enum: ["verse", "prechorus", "chorus", "bridge"] },
             emotion: { enum: ["cool_anger", "tender"] },
@@ -1228,6 +1240,66 @@ const TOOLS = [
         },
       },
       required: ["contextId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_quantize_notes",
+    description:
+      'Side-effect-free quantize planner over a range context (include ["notes"]; in-memory only, never touches the host). Snaps note onsets to a bar-anchored grid ("1/4"|"1/8"|"1/16"|"1/32"|"1/8T"|"1/16T"; the grid re-anchors at every meter change), with strength (0-1 linear interpolation toward the grid), swing (odd grid slots shifted by swing×half-step; straight divisions only — triplet grids reject swing), and optional duration quantization. Deterministic and order-preserving: notes that collide onto one grid slot keep their original onset (QUANTIZE_COLLISION) and onset changes that would introduce overlaps are reverted (OVERLAP_AFTER_QUANTIZE) unless quantizeDurations trims the earlier note — no half-step guessing, and NO humanize (random micro-timing conflicts with the deterministic-planner contract). Breath notes ("br") are quantized like any timed note. Returns one ready-to-submit sv_patch_notes patchRequest with expected onset/duration preconditions; plans above the 200-patch cap return the first 200 plus a continuation block (commit → re-snapshot → re-run with identical options; already-quantized notes come back unchanged so the loop converges to no_change; an explicit occurrenceId is re-anchored only while a short-lived continuation identity proves the same target group UUID).',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range captured with notes.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when noteIds imply it or the context has one occurrence with notes.",
+        },
+        noteIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: 200,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description: "Optional subset; all noteIds must belong to one occurrence.",
+        },
+        grid: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            division: { enum: ["1/4", "1/8", "1/16", "1/32", "1/8T", "1/16T"] },
+          },
+          required: ["division"],
+        },
+        strength: {
+          type: "number",
+          exclusiveMinimum: 0,
+          maximum: 1,
+          default: 1,
+          description: "1 snaps fully onto the grid; smaller values interpolate toward it.",
+        },
+        swing: {
+          type: "number",
+          minimum: 0,
+          maximum: 1,
+          default: 0,
+          description: "Shifts odd grid slots late by swing×half-step; straight divisions only.",
+        },
+        quantizeDurations: {
+          type: "boolean",
+          default: false,
+          description: "Also snap durations to whole grid steps and trim overlaps.",
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId", "grid"],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
@@ -1725,7 +1797,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.7.0" },
+  { name: "sv-copilot", version: "0.7.1" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1803,6 +1875,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://schemas/sv_validate_lyrics_prosody",
       name: "sv_validate_lyrics_prosody input schema",
       description: "Exact JSON input schema used to validate sv_validate_lyrics_prosody.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_quantize_notes",
+      name: "sv_quantize_notes input schema",
+      description: "Exact JSON input schema used to validate sv_quantize_notes.",
       mimeType: "application/json",
     },
   ],
@@ -1913,6 +1991,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_validate_lyrics_prosody":
         result = await lyricProsodyService.validate(args);
+        break;
+      case "sv_quantize_notes":
+        result = await quantizePlanService.plan(args);
         break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
@@ -2089,7 +2170,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.7.0",
+    interfaceVersion: "0.7.1",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -2125,6 +2206,7 @@ function capabilities() {
         "sv_analyze_phrase",
         "sv_style_profile",
         "sv_validate_lyrics_prosody",
+        "sv_quantize_notes",
       ],
       audition: [
         "sv_start_audition",
@@ -2160,6 +2242,7 @@ function capabilities() {
         sv_analyze_phrase: ["range"],
         sv_style_profile: ["range"],
         sv_validate_lyrics_prosody: ["range"],
+        sv_quantize_notes: ["range"],
       },
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
@@ -2203,9 +2286,10 @@ function musicWorkflowSchemaIndex() {
     "sv_analyze_phrase",
     "sv_style_profile",
     "sv_validate_lyrics_prosody",
+    "sv_quantize_notes",
   ];
   return {
-    schemaVersion: "0.7.0",
+    schemaVersion: "0.7.1",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -2228,11 +2312,12 @@ function toolInputSchema(name) {
         "sv_analyze_phrase",
         "sv_style_profile",
         "sv_validate_lyrics_prosody",
+        "sv_quantize_notes",
       ].includes(candidate.name)
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.7.0",
+    schemaVersion: "0.7.1",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };

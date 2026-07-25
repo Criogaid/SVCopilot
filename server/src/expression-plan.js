@@ -52,6 +52,39 @@ const INTENT_GENRES = Object.freeze(["jpop"]);
 const INTENT_SECTIONS = Object.freeze(["verse", "prechorus", "chorus", "bridge"]);
 const INTENT_EMOTIONS = Object.freeze(["cool_anger", "tender"]);
 const INTENT_TECHNIQUES = Object.freeze(["controlled_belt", "soft_airy", "light_rasp"]);
+// section-aware presets（M-04）：可审阅的常量展开，不是黑箱按钮。每个 preset 只是现有
+// intent 词表字段 + 约束默认值的组合（spoken_rap_transition 额外播种 vibratoEnv 压平
+// 手势）；展开结果逐字段回显在 presetExpansion 中，用户显式传的同名 intent 字段覆盖
+// preset 值并发警告，用户 constraints 永远优先于 preset 约束默认值。
+export const INTENT_PRESETS = Object.freeze({
+  jpop_cool: Object.freeze({
+    intent: Object.freeze({ genre: "jpop", emotion: "cool_anger" }),
+    constraintDefaults: Object.freeze({}),
+    notes: "jpop onset scoops with the cool_anger color modifiers",
+  }),
+  jpop_belt: Object.freeze({
+    intent: Object.freeze({ genre: "jpop", technique: Object.freeze(["controlled_belt"]) }),
+    constraintDefaults: Object.freeze({}),
+    notes: "jpop onset scoops plus controlled-belt dynamic/tension arcs and sustained vibrato",
+  }),
+  controlled_anger: Object.freeze({
+    intent: Object.freeze({ emotion: "cool_anger", technique: Object.freeze(["controlled_belt"]) }),
+    constraintDefaults: Object.freeze({ maxAbsTensionDelta: 0.3 }),
+    notes: "belt arcs under the cool_anger modifiers with a tighter tension budget",
+  }),
+  intimate_whisper: Object.freeze({
+    intent: Object.freeze({ emotion: "tender", technique: Object.freeze(["soft_airy"]) }),
+    constraintDefaults: Object.freeze({ maxAbsLoudnessDeltaDb: 3 }),
+    notes: "airy breathiness arcs with tender modifiers and a soft dynamic budget",
+  }),
+  spoken_rap_transition: Object.freeze({
+    intent: Object.freeze({}),
+    constraintDefaults: Object.freeze({ maxAbsPitchDeltaCents: 40 }),
+    seeds: "flatten_vibrato",
+    notes:
+      "flattens the host's natural vibrato on sustains via vibratoEnv 0.2 (its presence is unobservable) and narrows the pitchDelta budget for a speech-like delivery; combine with explicit gestures for the transition itself",
+  }),
+});
 const MAX_GESTURES = 32;
 const MAX_POINTS_PER_CURVE = 2000;
 
@@ -205,6 +238,14 @@ function buildGestures(loaded, input, warnings) {
       reasons: [],
     })
   );
+  if ((input.presetExpansion?.overriddenFields?.length ?? 0) > 0) {
+    appendOnce(warnings, {
+      code: "PRESET_FIELD_OVERRIDDEN",
+      message: `explicit intent field(s) ${input.presetExpansion.overriddenFields
+        .map((item) => item.field)
+        .join(", ")} override the ${input.presetExpansion.preset} preset's values; see presetExpansion.overriddenFields.`,
+    });
+  }
   const derived = input.intent
     ? deriveIntentGestures(loaded, input, explicit, warnings)
     : [];
@@ -662,6 +703,27 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   }
 
   applyIntentModifiers(candidates, intent);
+  if (intent.presetSeeds === "flatten_vibrato") {
+    // spoken_rap_transition：对每个长音播种 vibratoEnv 压平包络（绝对值 0.2 ≈ 关掉颤音）。
+    // natural vibrato 是否存在不可观测——包络只在其存在时生效，低置信如实声明。
+    for (const phrase of phrases) {
+      for (const sustain of phrase.notes.filter((note) => note.durationBlick >= sustainBlick)) {
+        push(
+          `intent:preset:${intent.presetName}`,
+          0.4,
+          [`flatten host vibrato on sustained "${sustain.lyrics}" for a speech-like delivery`],
+          {
+            type: "vibrato",
+            noteId: sustain.noteId,
+            surface: "vibratoEnv",
+            level: 0.2,
+            onsetDelayQuarter: 0,
+            rampQuarter: 0.1,
+          }
+        );
+      }
+    }
+  }
   if (candidates.length === 0 && (intent.section || intent.emotion)) {
     // genre/technique 未产出任何候选，但用户单独给了 section/emotion：直接播种基线手势兜底，
     // 不再必然 EMPTY_PLAN。在 applyIntentModifiers 之后播种，故这些已成形的基线不会被二次修饰。
@@ -1217,6 +1279,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     ...(input.responseMode === "compact"
       ? {}
       : { gestures: publicGestures, operations: operationsMeta }),
+    ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
     applyRequests,
     review: {
       requiresHumanAudition: true,
@@ -1254,11 +1317,14 @@ function normalizePlanRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
   }
   const gestures = normalizeGestureList(request.gestures);
-  const intent = normalizeIntent(request.intent);
+  const { intent, presetExpansion } = normalizeIntent(request.intent);
   if (gestures.length === 0 && !intent) {
     throw codedError("INVALID_ARGUMENTS", "provide gestures, intent, or both");
   }
-  const constraints = normalizeConstraints(request.constraints);
+  const constraints = normalizeConstraints(
+    request.constraints,
+    presetExpansion?.constraintDefaults ?? null
+  );
   const sampling = normalizeSampling(request.sampling);
   const referencedNoteIds = [];
   for (const gesture of gestures) {
@@ -1271,6 +1337,7 @@ function normalizePlanRequest(request) {
     occurrenceId: request.occurrenceId,
     gestures,
     intent,
+    presetExpansion,
     constraints,
     sampling,
     intentDefaults: EXPRESSION_PLAN_DEFAULTS.intent,
@@ -1371,9 +1438,21 @@ function normalizeGesture(value, index) {
 }
 
 function normalizeIntent(value) {
-  if (value === undefined) return null;
+  if (value === undefined) return { intent: null, presetExpansion: null };
   if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "intent must be an object");
-  assertKnownKeys(value, ["genre", "section", "emotion", "technique"], "intent");
+  assertKnownKeys(value, ["preset", "genre", "section", "emotion", "technique"], "intent");
+  // preset 展开为普通 intent 字段的常量默认值：用户显式传的同名字段覆盖 preset 值
+  //（覆盖情况在 presetExpansion.overriddenFields 中回显，deriveIntentGestures 发警告）。
+  let preset = null;
+  if (value.preset !== undefined) {
+    if (!Object.hasOwn(INTENT_PRESETS, value.preset)) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `intent.preset must be one of ${Object.keys(INTENT_PRESETS).join(", ")}`
+      );
+    }
+    preset = INTENT_PRESETS[value.preset];
+  }
   checkEnum(value.genre, INTENT_GENRES, "intent.genre");
   checkEnum(value.section, INTENT_SECTIONS, "intent.section");
   checkEnum(value.emotion, INTENT_EMOTIONS, "intent.emotion");
@@ -1393,6 +1472,7 @@ function normalizeIntent(value) {
     technique = [...value.technique];
   }
   if (
+    preset === null &&
     value.genre === undefined &&
     value.section === undefined &&
     value.emotion === undefined &&
@@ -1400,16 +1480,39 @@ function normalizeIntent(value) {
   ) {
     throw codedError("INVALID_ARGUMENTS", "intent must contain at least one field");
   }
+  if (preset === null) {
+    return {
+      intent: { genre: value.genre, section: value.section, emotion: value.emotion, technique },
+      presetExpansion: null,
+    };
+  }
+  const expandedFields = {};
+  const overriddenFields = [];
+  const merged = { genre: value.genre, section: value.section, emotion: value.emotion, technique };
+  for (const [field, presetValue] of Object.entries(preset.intent)) {
+    if (merged[field] === undefined) {
+      merged[field] = Array.isArray(presetValue) ? [...presetValue] : presetValue;
+      expandedFields[field] = presetValue;
+    } else {
+      overriddenFields.push({ field, presetValue, userValue: merged[field] });
+    }
+  }
   return {
-    genre: value.genre,
-    section: value.section,
-    emotion: value.emotion,
-    technique,
+    intent: { ...merged, presetSeeds: preset.seeds ?? null, presetName: value.preset },
+    presetExpansion: {
+      preset: value.preset,
+      expandedFields,
+      overriddenFields,
+      constraintDefaults: preset.constraintDefaults,
+      ...(preset.seeds ? { seeds: preset.seeds } : {}),
+      notes: preset.notes,
+    },
   };
 }
 
-function normalizeConstraints(value) {
-  const defaults = EXPRESSION_PLAN_DEFAULTS.constraints;
+function normalizeConstraints(value, presetDefaults = null) {
+  // preset 只调低默认值；用户显式传的 constraints 永远优先。
+  const defaults = { ...EXPRESSION_PLAN_DEFAULTS.constraints, ...(presetDefaults ?? {}) };
   if (value === undefined) return { ...defaults };
   if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "constraints must be an object");
   assertKnownKeys(

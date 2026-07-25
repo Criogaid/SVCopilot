@@ -715,3 +715,118 @@ test("shared targets surface in review and default constraints are exposed", asy
   assert.ok(result.review.checklist.some((item) => /allowSharedTargetMutation/.test(item)));
   assert.equal(EXPRESSION_PLAN_DEFAULTS.constraints.maxAbsPitchDeltaCents, 200);
 });
+
+// ---------- v0.7.1 section-aware presets（M-04：可审阅常量展开，非黑箱） ----------
+
+function presetFixtureNotes() {
+  return [
+    { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
+    { onsetBlick: Q, durationBlick: 3 * Q, pitch: 64, lyrics: "hold" }, // 长音（≥2 拍）
+    { onsetBlick: 5 * Q, durationBlick: Q, pitch: 62, lyrics: "b" }, // 1 拍休止 → 第二乐句
+  ];
+}
+
+test("jpop_belt preset expands to genre+technique with a reviewable presetExpansion block", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, { notes: presetFixtureNotes() });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { preset: "jpop_belt" },
+  });
+  assert.equal(result.presetExpansion.preset, "jpop_belt");
+  assert.deepEqual(result.presetExpansion.expandedFields, {
+    genre: "jpop",
+    technique: ["controlled_belt"],
+  });
+  assert.deepEqual(result.presetExpansion.overriddenFields, []);
+  assert.ok(result.presetExpansion.notes.length > 0);
+  // 展开后的意图确实驱动了手势：jpop scoop + belt 弧线。
+  assert.ok(result.gestures.some((gesture) => gesture.source === "intent:genre:jpop"));
+  assert.ok(
+    result.gestures.some((gesture) => gesture.source === "intent:technique:controlled_belt")
+  );
+  assert.ok(!result.warnings.some((warning) => warning.code === "PRESET_FIELD_OVERRIDDEN"));
+});
+
+test("explicit intent fields override the preset's values with a warning", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, { notes: presetFixtureNotes() });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    // intimate_whisper 预设 emotion=tender；用户显式 cool_anger 覆盖。
+    intent: { preset: "intimate_whisper", emotion: "cool_anger" },
+  });
+  assert.deepEqual(result.presetExpansion.expandedFields, { technique: ["soft_airy"] });
+  assert.deepEqual(result.presetExpansion.overriddenFields, [
+    { field: "emotion", presetValue: "tender", userValue: "cool_anger" },
+  ]);
+  assert.ok(result.warnings.some((warning) => warning.code === "PRESET_FIELD_OVERRIDDEN"));
+});
+
+test("preset constraint defaults apply but explicit constraints always win", async () => {
+  const store = createStore();
+  const first = createStoredContext(store, { notes: presetFixtureNotes() });
+  // intimate_whisper 预设默认 maxAbsLoudnessDeltaDb=3。
+  const defaulted = await createService(store).plan({
+    contextId: first.stored.contextId,
+    intent: { preset: "intimate_whisper" },
+  });
+  assert.equal(defaulted.presetExpansion.constraintDefaults.maxAbsLoudnessDeltaDb, 3);
+  const second = createStoredContext(store, { notes: presetFixtureNotes() });
+  // 用户显式 constraints 优先于 preset 默认值：8 dB 上限下 soft_airy 的 -1.5 弧线不再被 3 dB 束缚
+  //（本例值域内两者等价，行为差异用 planId 不同来证明约束确实参与编译）。
+  const overridden = await createService(store).plan({
+    contextId: second.stored.contextId,
+    intent: { preset: "intimate_whisper" },
+    constraints: { maxAbsLoudnessDeltaDb: 0.5 },
+  });
+  // 0.5 dB 上限截断了 loudness 弧线的值，计划内容必然不同。
+  const defaultedLoudness = defaulted.operations.find((op) => op.parameter === "loudness");
+  const overriddenLoudness = overridden.operations.find((op) => op.parameter === "loudness");
+  assert.ok(Math.abs(defaultedLoudness.stats.min) > 0.5);
+  assert.ok(Math.abs(overriddenLoudness.stats.min) <= 0.5);
+  assert.ok(overridden.warnings.some((warning) => warning.code === "CONSTRAINT_CLAMPED"));
+});
+
+test("spoken_rap_transition seeds vibratoEnv flattening on sustains", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createStoredContext(store, { notes: presetFixtureNotes() });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { preset: "spoken_rap_transition" },
+  });
+  const flattened = result.gestures.filter(
+    (gesture) => gesture.source === "intent:preset:spoken_rap_transition"
+  );
+  assert.equal(flattened.length, 1);
+  assert.equal(flattened[0].parameter, "vibratoEnv");
+  assert.deepEqual(flattened[0].noteIds, [noteId(occurrenceId, 1)]);
+  assert.equal(flattened[0].params.level, 0.2);
+  // preset 收窄 pitchDelta 预算进入 constraintDefaults 回显。
+  assert.equal(result.presetExpansion.constraintDefaults.maxAbsPitchDeltaCents, 40);
+  assert.ok(result.warnings.some((warning) => warning.code === "NATURAL_VIBRATO_UNOBSERVABLE"));
+  assertApplyRequestsWellFormed(result);
+});
+
+test("identical preset requests keep planId deterministic", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, { notes: presetFixtureNotes() });
+  const service = createService(store);
+  const request = { contextId: stored.contextId, intent: { preset: "jpop_cool" } };
+  const first = await service.plan(request);
+  const second = await service.plan(request);
+  assert.equal(first.planId, second.planId);
+  assert.equal(first.presetExpansion.preset, "jpop_cool");
+  // jpop_cool = genre:jpop + emotion:cool_anger：scoop 深度带 cool_anger 的 +5 修饰。
+  const scoop = first.gestures.find((gesture) => gesture.type === "scoop");
+  assert.equal(scoop.params.depthCents, 35);
+});
+
+test("unknown presets are rejected before touching the store", async () => {
+  const store = createStore();
+  const service = createService(store);
+  await assert.rejects(
+    service.plan({ contextId: "ctx_x", intent: { preset: "magic_button" } }),
+    (error) => error.code === "INVALID_ARGUMENTS"
+  );
+});
