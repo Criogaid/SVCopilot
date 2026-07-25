@@ -422,6 +422,40 @@ test("jpop intent derives deterministic per-phrase scoops with heuristic confide
   assert.deepEqual(first.applyRequests, second.applyRequests);
 });
 
+test("intent-derived gestures skip breath notes and anchor on the melodic entrance", async () => {
+  const store = createStore();
+  // br 打头 + 乐句间 br：呼吸没有可唱音高，jpop 入口 scoop 必须锚在旋律音符上。
+  const { stored, occurrenceId } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "br" },
+      { onsetBlick: Q, durationBlick: Q, pitch: 60, lyrics: "when" },
+      { onsetBlick: 2 * Q, durationBlick: 3 * Q, pitch: 66, lyrics: "see" },
+      { onsetBlick: 7 * Q, durationBlick: Q, pitch: 64, lyrics: "br" },
+      { onsetBlick: 8 * Q, durationBlick: Q, pitch: 62, lyrics: "あ" },
+    ],
+  });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { genre: "jpop" },
+  });
+  // 修复前第一乐句 scoop 锚在 n:0(br)、第二乐句锚在 n:3(br)；现在锚在 when 与 あ。
+  const scoops = result.gestures.filter((gesture) => gesture.type === "scoop");
+  assert.equal(scoops.length, 2);
+  assert.deepEqual(
+    scoops.map((gesture) => gesture.noteIds[0]),
+    [noteId(occurrenceId, 1), noteId(occurrenceId, 4)]
+  );
+  assert.ok(
+    result.warnings.some((warning) => warning.code === "BREATH_NOTES_SKIPPED_BY_INTENT")
+  );
+  // 显式手势不受过滤：用户点名 br 音符仍可规划（用户的话优先）。
+  const explicit = await createService(store).plan({
+    contextId: stored.contextId,
+    gestures: [{ type: "fall", noteId: noteId(occurrenceId, 0) }],
+  });
+  assert.equal(explicit.gestures[0].noteIds[0], noteId(occurrenceId, 0));
+});
+
 test("controlled_belt derives phrase arcs and sustain vibrato; cool_anger modifies them", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, { notes: intentFixtureNotes() });

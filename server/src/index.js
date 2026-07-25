@@ -24,6 +24,7 @@ import { AuditionService } from "./audition.js";
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
 import { ExpressionPlanService } from "./expression-plan.js";
 import { LyricAlignService } from "./lyric-align.js";
+import { LyricProsodyService } from "./lyric-prosody.js";
 import { LyricsService } from "./lyrics.js";
 import {
   RANGE_CAPTURE_LIMITS,
@@ -41,6 +42,7 @@ import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.j
 import { PhraseEditService } from "./phrase-edit.js";
 import { PhraseAnalysisService } from "./phrase-analysis.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
+import { StyleProfileService } from "./style-profile.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
 import { VoiceProfileService } from "./voice-profile.js";
 import { WorkflowExecutor } from "./workflow.js";
@@ -65,6 +67,8 @@ const computedPitchCompareService = new ComputedPitchCompareService({
 const expressionPlanService = new ExpressionPlanService({ store: snapshotService.store });
 const lyricAlignService = new LyricAlignService({ store: snapshotService.store });
 const phraseAnalysisService = new PhraseAnalysisService({ store: snapshotService.store });
+const styleProfileService = new StyleProfileService({ store: snapshotService.store });
+const lyricProsodyService = new LyricProsodyService({ store: snapshotService.store });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -786,7 +790,7 @@ const TOOLS = [
   {
     name: "sv_compare_computed_pitch",
     description:
-      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas; Hz-based metrics use each side\'s own tempo map. Per-note pairing matches notes by score position: after a structural edit (insert/delete/move), notes without an unchanged before-note at the same position are reported unmatched with no before/delta instead of a misleading cross-note comparison. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
+      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas; Hz-based metrics use each side\'s own tempo map. Per-note pairing matches notes by score position: after a structural edit (insert/delete/move), notes without an unchanged before-note at the same position are reported unmatched with no before/delta instead of a misleading cross-note comparison. anomalySegments.items are sorted by startBlick (score order) by default — anomalySortBy:"severity" sorts by peak error instead; the response declares sortBy, and top always carries the most severe segment regardless of sorting or truncation. Coverage below analysis.lowCoverageWarnRatio (default 0.5) raises LOW_COMPUTED_PITCH_COVERAGE so small-sample summaries are never mistaken for reliable conclusions. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -827,6 +831,14 @@ const TOOLS = [
             minValidFramesPerNote: { type: "integer", minimum: 1, maximum: 2000 },
             edgeExclusionRatio: { type: "number", minimum: 0, maximum: 0.4 },
             centerMinFrames: { type: "integer", minimum: 1, maximum: 2000 },
+            lowCoverageWarnRatio: {
+              type: "number",
+              minimum: 0,
+              maximum: 1,
+              default: 0.5,
+              description:
+                "Coverage below this ratio raises LOW_COMPUTED_PITCH_COVERAGE; 0 disables the warning.",
+            },
             vibrato: {
               type: "object",
               additionalProperties: false,
@@ -855,6 +867,12 @@ const TOOLS = [
             anomalyThresholdCent: { type: "number", minimum: 1, maximum: 1200 },
           },
         },
+        anomalySortBy: {
+          enum: ["startBlick", "severity"],
+          default: "startBlick",
+          description:
+            "Ordering of anomalySegments.items: startBlick = score order (default), severity = peak error descending. top is always the most severe segment.",
+        },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["mode"],
@@ -865,7 +883,7 @@ const TOOLS = [
   {
     name: "sv_plan_expression",
     description:
-      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into ready-to-submit applyRequests for sv_patch_parameter_curves (dryRun first, then commit through that hardened transaction kernel). Each applyRequest target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
+      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into ready-to-submit applyRequests for sv_patch_parameter_curves (dryRun first, then commit through that hardened transaction kernel). Each applyRequest target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. Intent-derived gestures never anchor on breath notes (lyrics "br", no singable pitch — their duration still separates phrases; explicit gestures may still target them deliberately). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1053,7 +1071,7 @@ const TOOLS = [
   {
     name: "sv_analyze_phrase",
     description:
-      'Read-only music-theory analysis over a range context (include ["notes"]): duration-weighted pitch-class histogram correlated against all 24 Krumhansl-Kessler key profiles returns RANKED key candidates with Pearson correlations and the margin to the runner-up (relative major/minor ambiguity on short melodies is expected and exposed, not hidden); per-note scale degrees with non-diatonic flags (sharps-only spelling, natural-minor degrees); rest-threshold phrase segmentation with climax/ambitus/rests; register, interval, and rhythm statistics. Everything is derived/heuristic, never claimed as host fact; musical judgment stays human-only.',
+      'Read-only music-theory analysis over a range context (include ["notes"]): duration-weighted pitch-class histogram correlated against all 24 Krumhansl-Kessler key profiles returns RANKED key candidates with Pearson correlations and the margin to the runner-up (relative major/minor ambiguity on short melodies is expected and exposed, not hidden); per-note scale degrees with non-diatonic flags (sharps-only spelling, natural-minor degrees); rest-threshold phrase segmentation with climax/ambitus/rests; register, interval, and rhythm statistics. Breath notes (lyrics "br", a host convention) carry a nominal pitch but no singable pitch: they are excluded from key/scale-degree/phrase/statistics entirely and reported separately as breathEvents with nominalPitch (noteCount counts melodic notes only; a range that is all breaths fails with NO_MELODIC_NOTES). Everything is derived/heuristic, never claimed as host fact; musical judgment stays human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1086,7 +1104,127 @@ const TOOLS = [
           enum: ["compact", "standard", "verbose"],
           default: "standard",
           description:
-            "compact returns summaries without per-note item lists; standard caps scaleDegrees.items and phrases.items at 100 with a truncation warning; verbose returns full lists.",
+            "compact returns summaries without per-note item lists; standard caps scaleDegrees.items, phrases.items, and breathEvents.items at 100 with a truncation warning; verbose returns full lists.",
+        },
+      },
+      required: ["contextId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_style_profile",
+    description:
+      'Read-only style statistics aggregated over 1-8 range contexts (in-memory only, never touches the host). Per target: register/interval/rhythm/rest statistics and phrase-length distribution over MELODIC notes (breath notes "br" are counted separately per the v0.6.2 contract), languageOverride distribution, Automation control-point statistics per parameter (point counts, min/max/mean, non-default ratio, per-phrase min/max — these describe CONTROL POINTS, not the host-interpolated audible curve), and observable vocalModeParams key names (singer identity stays unobservable). Section labels are CALLER-PROVIDED via targets[].label and never inferred — the aggregate reports overall plus per-label groups so verse/chorus comparisons rest on the caller\'s own labeling evidence. Targets whose context was captured without include ["automation"]/["voiceParameters"] report status:"not_captured" for those sections instead of fake zeros. Everything is derived/heuristic; musical judgment stays human-only.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        targets: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              contextId: {
+                type: "string",
+                minLength: 1,
+                description: "Range context from sv_snapshot_range captured with notes.",
+              },
+              occurrenceId: {
+                type: "string",
+                minLength: 1,
+                description: "Optional when the context has exactly one occurrence with notes.",
+              },
+              label: {
+                type: "string",
+                minLength: 1,
+                maxLength: 64,
+                description:
+                  "Caller-provided section label (e.g. verse/chorus) used for aggregate grouping; never inferred by the service.",
+              },
+            },
+            required: ["contextId"],
+          },
+          description: "Duplicate contextId+occurrenceId pairs are rejected (they would double-count aggregates).",
+        },
+        include: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: {
+            enum: [
+              "register",
+              "intervals",
+              "rhythm",
+              "phrases",
+              "parameters",
+              "vocalModes",
+              "languages",
+              "breaths",
+            ],
+          },
+          description: "Defaults to all sections.",
+        },
+        phraseGapQuarter: {
+          type: "number",
+          minimum: 0.25,
+          maximum: 8,
+          default: 1,
+          description: "Rest length (in quarters) treated as a phrase boundary.",
+        },
+        responseMode: {
+          enum: ["compact", "standard", "verbose"],
+          default: "standard",
+          description: "compact returns per-target counts and the aggregate without per-target sections.",
+        },
+      },
+      required: ["targets"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_validate_lyrics_prosody",
+    description:
+      'Read-only lyric/prosody validator over a range context (include ["notes"]; in-memory only, never touches the host, never generates patches — fixes go through sv_patch_notes / sv_align_lyrics / sv_restructure_notes). Checks: breath (br notes carrying language/phonemes overrides, unusually long breaths), japaneseMora (multiple morae on one note via deterministic mora rules, isolated small kana), englishSyllables (heuristic vowel-group syllable count ~85-90% accurate vs. following "+" continuation notes), languageConsistency (script class vs. languageOverride conflicts), stressAlignment (first-syllable-stress heuristic with NO dictionary vs. meter strong beats — info-level and confidence:"low" only, never an error), and phonemeCoverage (melodic notes with empty phonemes at snapshot time; empty phonemes on br/"-"/"+" are legitimate per the processing-state contract, and the check reports not_captured when the context lacks include ["processing"]). Issues carry kind/severity/confidence/suggestion and are sorted by severity then score-time order. All findings are derived/heuristic, not host facts.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range captured with notes.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when the context has exactly one occurrence with notes.",
+        },
+        checks: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: {
+            enum: [
+              "breath",
+              "japaneseMora",
+              "englishSyllables",
+              "languageConsistency",
+              "stressAlignment",
+              "phonemeCoverage",
+            ],
+          },
+          description: "Defaults to all checks.",
+        },
+        responseMode: {
+          enum: ["compact", "standard", "verbose"],
+          default: "standard",
+          description:
+            "compact returns the summary without the issue list; standard caps issues at 100 with a truncation warning; verbose returns all issues.",
         },
       },
       required: ["contextId"],
@@ -1587,7 +1725,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.6.1" },
+  { name: "sv-copilot", version: "0.7.0" },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1653,6 +1791,18 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://schemas/sv_analyze_phrase",
       name: "sv_analyze_phrase input schema",
       description: "Exact JSON input schema used to validate sv_analyze_phrase.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_style_profile",
+      name: "sv_style_profile input schema",
+      description: "Exact JSON input schema used to validate sv_style_profile.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_validate_lyrics_prosody",
+      name: "sv_validate_lyrics_prosody input schema",
+      description: "Exact JSON input schema used to validate sv_validate_lyrics_prosody.",
       mimeType: "application/json",
     },
   ],
@@ -1757,6 +1907,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_analyze_phrase":
         result = await phraseAnalysisService.analyze(args);
+        break;
+      case "sv_style_profile":
+        result = await styleProfileService.profile(args);
+        break;
+      case "sv_validate_lyrics_prosody":
+        result = await lyricProsodyService.validate(args);
         break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
@@ -1933,7 +2089,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.6.1",
+    interfaceVersion: "0.7.0",
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -1967,6 +2123,8 @@ function capabilities() {
         "sv_plan_expression",
         "sv_align_lyrics",
         "sv_analyze_phrase",
+        "sv_style_profile",
+        "sv_validate_lyrics_prosody",
       ],
       audition: [
         "sv_start_audition",
@@ -2000,6 +2158,8 @@ function capabilities() {
         sv_plan_expression: ["range"],
         sv_align_lyrics: ["range"],
         sv_analyze_phrase: ["range"],
+        sv_style_profile: ["range"],
+        sv_validate_lyrics_prosody: ["range"],
       },
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
@@ -2041,9 +2201,11 @@ function musicWorkflowSchemaIndex() {
     "sv_plan_expression",
     "sv_align_lyrics",
     "sv_analyze_phrase",
+    "sv_style_profile",
+    "sv_validate_lyrics_prosody",
   ];
   return {
-    schemaVersion: "0.6.1",
+    schemaVersion: "0.7.0",
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -2064,11 +2226,13 @@ function toolInputSchema(name) {
         "sv_plan_expression",
         "sv_align_lyrics",
         "sv_analyze_phrase",
+        "sv_style_profile",
+        "sv_validate_lyrics_prosody",
       ].includes(candidate.name)
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.6.1",
+    schemaVersion: "0.7.0",
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };

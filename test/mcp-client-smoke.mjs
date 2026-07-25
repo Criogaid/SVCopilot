@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.6.1");
+  assert.equal(client.getServerVersion()?.version, "0.7.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 28);
+  assert.equal(listed.tools.length, 30);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -101,6 +101,8 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_plan_expression"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_align_lyrics"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_phrase"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_style_profile"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_validate_lyrics_prosody"));
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -242,13 +244,15 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_plan_expression"));
   assert.ok(capabilities.interfaces.music.includes("sv_align_lyrics"));
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_phrase"));
+  assert.ok(capabilities.interfaces.music.includes("sv_style_profile"));
+  assert.ok(capabilities.interfaces.music.includes("sv_validate_lyrics_prosody"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
-  assert.equal(capabilities.interfaceVersion, "0.6.1");
+  assert.equal(capabilities.interfaceVersion, "0.7.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -272,6 +276,8 @@ try {
       "sv_plan_expression",
       "sv_align_lyrics",
       "sv_analyze_phrase",
+      "sv_style_profile",
+      "sv_validate_lyrics_prosody",
     ]
   );
   const phraseResource = await client.readResource({
@@ -393,6 +399,48 @@ try {
     })
   );
   assert.equal(analyzeUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  // v0.7.0：风格聚合与咬字/韵律校验（均为纯内存服务，未知 context 结构化报错）。
+  const styleResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_style_profile",
+  });
+  assert.ok(styleResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const styleSchema = parseResource(styleResource).inputSchema;
+  assert.equal(styleSchema.properties.targets.maxItems, 8);
+  assert.ok(styleSchema.properties.targets.items.properties.label);
+  const styleUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_style_profile",
+      arguments: { targets: [{ contextId: "ctx_smoke_missing" }] },
+    })
+  );
+  assert.equal(styleUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const styleInvalidArguments = parseToolError(
+    await client.callTool({
+      name: "sv_style_profile",
+      arguments: { targets: [] },
+    })
+  );
+  assert.equal(styleInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  const prosodyResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_validate_lyrics_prosody",
+  });
+  assert.ok(prosodyResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const prosodySchema = parseResource(prosodyResource).inputSchema;
+  assert.deepEqual(prosodySchema.properties.checks.items.enum, [
+    "breath",
+    "japaneseMora",
+    "englishSyllables",
+    "languageConsistency",
+    "stressAlignment",
+    "phonemeCoverage",
+  ]);
+  const prosodyUnknownContext = parseToolError(
+    await client.callTool({
+      name: "sv_validate_lyrics_prosody",
+      arguments: { contextId: "ctx_smoke_missing" },
+    })
+  );
+  assert.equal(prosodyUnknownContext.error.code, "UNKNOWN_CONTEXT");
   assert.equal(
     batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
     "object"

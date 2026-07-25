@@ -319,6 +319,78 @@ test("anomaly segments locate contiguous high-error regions", async () => {
   approx(segment.peakAbsCent, 120, 1e-6);
 });
 
+test("anomaly segments default to score order, declare sortBy, and keep top as the most severe", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  // 三段异常按时间：早(80c) → 中(300c 最严重) → 晚(150c)。
+  const values = new Array(40).fill(60);
+  values[5] = 60.8;
+  values[20] = 63;
+  values[21] = 62.5;
+  values[33] = 61.5;
+  const { stored } = createStoredContext(store, {
+    values,
+    intervalBlick: interval,
+    notes: [{ onsetBlick: 0, durationBlick: 40 * interval, pitch: 60 }],
+  });
+  const service = createService(store);
+  const byTime = await service.compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+  });
+  assert.equal(byTime.anomalySegments.total, 3);
+  // 修复前按严重程度排序且不声明；现在默认 startBlick 时间序并显式声明 sortBy。
+  assert.equal(byTime.anomalySegments.sortBy, "startBlick");
+  assert.deepEqual(
+    byTime.anomalySegments.items.map((segment) => segment.startFrameIndex),
+    [5, 20, 33]
+  );
+  const starts = byTime.anomalySegments.items.map((segment) => segment.startBlick);
+  assert.deepEqual(starts, [...starts].sort((left, right) => left - right));
+  // top 恒为最严重段，与排序方式无关。
+  approx(byTime.anomalySegments.top.peakAbsCent, 300, 1e-6);
+  assert.equal(byTime.anomalySegments.top.startFrameIndex, 20);
+
+  const bySeverity = await service.compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+    anomalySortBy: "severity",
+  });
+  assert.equal(bySeverity.anomalySegments.sortBy, "severity");
+  assert.deepEqual(
+    bySeverity.anomalySegments.items.map((segment) => segment.startFrameIndex),
+    [20, 33, 5]
+  );
+  approx(bySeverity.anomalySegments.top.peakAbsCent, 300, 1e-6);
+});
+
+test("time-ordered truncation still surfaces a late most-severe segment via top", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  // 11 段异常（超出 MAX_ANOMALY_SEGMENTS=10），最严重的一段放在最后：
+  // 时间序截断会砍掉它，top 必须仍指向它。
+  const frames = 23 * 2 + 1;
+  const values = new Array(frames).fill(60);
+  for (let index = 0; index < 10; index += 1) values[1 + index * 2] = 61; // 100c × 10 段（隔帧）
+  values[frames - 1] = 64; // 400c 最严重段在最后
+  const { stored } = createStoredContext(store, {
+    values,
+    intervalBlick: interval,
+    notes: [{ onsetBlick: 0, durationBlick: frames * interval, pitch: 60 }],
+  });
+  const result = await createService(store).compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+  });
+  assert.equal(result.anomalySegments.total, 11);
+  assert.equal(result.anomalySegments.truncated, true);
+  assert.equal(result.anomalySegments.items.length, 10);
+  // 时间序前 10 段不含最后的 400c 段……
+  assert.ok(result.anomalySegments.items.every((segment) => segment.peakAbsCent < 400));
+  // ……但 top 如实指向它，截断不吞掉最严重证据。
+  approx(result.anomalySegments.top.peakAbsCent, 400, 1e-6);
+});
+
 test("compact responses keep summary and top anomaly only", async () => {
   const store = createStore();
   const interval = Q / 10;
@@ -339,7 +411,79 @@ test("compact responses keep summary and top anomaly only", async () => {
   assert.equal(result.analysis, undefined);
   assert.ok(result.summary);
   assert.equal(result.anomalySegments.total, 1);
+  assert.equal(result.anomalySegments.sortBy, "startBlick");
   approx(result.anomalySegments.top.peakAbsCent, 100, 1e-6);
+});
+
+test("low valid-frame coverage raises an explicit warning in compare_to_target", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  // 40 帧里只有 10 帧有限（26% 那类实测场景的合成版：25% < 默认阈值 0.5）。
+  const values = new Array(40).fill(null);
+  for (let index = 0; index < 10; index += 1) values[index] = 60;
+  const { stored } = createStoredContext(store, {
+    values,
+    intervalBlick: interval,
+    notes: [{ onsetBlick: 0, durationBlick: 40 * interval, pitch: 60 }],
+  });
+  const result = await createService(store).compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+  });
+  assert.equal(result.summary.coverage, 0.25);
+  const warning = result.warnings.find(
+    (item) => item.code === "LOW_COMPUTED_PITCH_COVERAGE"
+  );
+  assert.ok(warning, "expected LOW_COMPUTED_PITCH_COVERAGE warning at 25% coverage");
+  assert.match(warning.message, /25\.0%/);
+  assert.match(warning.message, /small sample/);
+});
+
+test("coverage at or above the threshold stays silent; the threshold is adjustable", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const values = new Array(40).fill(60);
+  for (let index = 20; index < 40; index += 1) values[index] = null; // 覆盖率恰 0.5
+  const { stored } = createStoredContext(store, {
+    values,
+    intervalBlick: interval,
+    notes: [{ onsetBlick: 0, durationBlick: 40 * interval, pitch: 60 }],
+  });
+  const service = createService(store);
+  const silent = await service.compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+  });
+  assert.equal(silent.summary.coverage, 0.5);
+  assert.ok(
+    !silent.warnings.some((item) => item.code === "LOW_COMPUTED_PITCH_COVERAGE"),
+    "coverage equal to the threshold must not warn"
+  );
+  // 阈值可调：调到 0.8 后同一数据必须警告；报告的 analysis 参数如实回显新阈值。
+  const strict = await service.compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+    analysis: { lowCoverageWarnRatio: 0.8 },
+  });
+  assert.ok(strict.warnings.some((item) => item.code === "LOW_COMPUTED_PITCH_COVERAGE"));
+  assert.equal(strict.analysis.lowCoverageWarnRatio, 0.8);
+});
+
+test("low pairwise coverage raises the same warning in compare_contexts", async () => {
+  const store = createStore();
+  // 4 帧只有 1 对两侧同时有限 → 覆盖率 0.25 < 0.5。
+  const { before, after } = createContextsPair(
+    store,
+    [60, null, 60, null],
+    [60.1, 60.1, null, null]
+  );
+  const result = await createService(store).compare({
+    mode: "compare_contexts",
+    before: { contextId: before.stored.contextId },
+    after: { contextId: after.stored.contextId },
+  });
+  assert.equal(result.summary.coverage, 0.25);
+  assert.ok(result.warnings.some((item) => item.code === "LOW_COMPUTED_PITCH_COVERAGE"));
 });
 
 // ---------- compare_contexts ----------
@@ -651,6 +795,8 @@ test("compare validates request shape before touching the store", async () => {
     { mode: "compare_to_target", contextId: "ctx_x", bogusField: true },
     { mode: "compare_to_target", contextId: "ctx_x", analysis: { vibrato: { hzRange: [9, 3] } } },
     { mode: "compare_to_target", contextId: "ctx_x", metrics: { perNote: "yes" } },
+    { mode: "compare_to_target", contextId: "ctx_x", anomalySortBy: "peak" },
+    { mode: "compare_to_target", contextId: "ctx_x", analysis: { lowCoverageWarnRatio: 1.5 } },
     { mode: "nonsense" },
   ]) {
     await assert.rejects(service.compare(request), (error) => error.code === "INVALID_ARGUMENTS");

@@ -369,7 +369,8 @@ function splitRuns(text) {
   return runs;
 }
 
-function classifyCharacter(character) {
+// 字符分类（kana/cjk/latin/separator/other）：lyric-prosody 复用（导出），两侧语言判定同源。
+export function classifyCharacter(character) {
   const code = character.codePointAt(0);
   if (/\s/.test(character)) return "separator";
   if ((code >= 0x3040 && code <= 0x309f) || (code >= 0x30a0 && code <= 0x30ff)) return "kana";

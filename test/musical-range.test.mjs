@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { ComputedPitchCompareService } from "../server/src/computed-pitch-compare.js";
 import { RangeSnapshotService, getStoredComputedPitch } from "../server/src/musical-range.js";
+import { StyleProfileService } from "../server/src/style-profile.js";
 import { blickToMusical, musicalToBlick, normalizeMusicalPoint } from "../server/src/musical-time.js";
 
 const Q = 705600000;
@@ -637,4 +638,38 @@ test("range snapshot stores computed pitch for sv_compare_computed_pitch", async
   assert.ok(Number.isFinite(result.summary.maeCent));
   assert.equal(result.provenance.pitchSource, "computedPitch");
   assert.equal(model.hostCalls.length, hostCallsBeforeCompare);
+});
+
+test("range snapshot stores automation/voice/processing profiles for sv_style_profile", async () => {
+  const model = createRangeModel();
+  const service = createService(model);
+  const snap = await service.snapshot({
+    scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 12 } },
+    include: ["notes", "automation", "voiceParameters", "processing"],
+    automationParameters: ["tension"],
+  });
+  const stored = service.store.get(snap.contextId);
+  const occurrence = stored.context.occurrences[0];
+  // v0.7.0 基础层增补：occurrence 级 voice/processing 纯数据剖面 + 未分页 automation 曲线。
+  assert.equal(occurrence.voiceParameters.paramTension, 0.2);
+  assert.equal(occurrence.processing.state, "ready");
+  assert.ok(occurrence.processing.phonemeCoverage);
+  assert.equal(stored.context.automationCaptured, true);
+  const curves = stored.context.automationByOccurrence[occurrence.occurrenceId];
+  assert.equal(curves.length, 1);
+  assert.equal(curves[0].resolvedParameter, "tension");
+  assert.equal(curves[0].points.length, 2);
+
+  // 端到端：真实 snapshot 存储 → style profile 纯内存聚合，零额外宿主访问。
+  const hostCallsBefore = model.hostCalls.length;
+  const profileService = new StyleProfileService({ store: service.store, now: () => 2000 });
+  const result = await profileService.profile({
+    targets: [{ contextId: snap.contextId, label: "verse" }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.targets[0].sections.parameters.status, "captured");
+  assert.equal(result.targets[0].sections.parameters.curves[0].parameter, "tension");
+  assert.equal(result.targets[0].sections.vocalModes.status, "captured");
+  assert.equal(result.aggregate.byLabel.verse.noteCount, result.targets[0].noteCount);
+  assert.equal(model.hostCalls.length, hostCallsBefore);
 });

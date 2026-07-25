@@ -532,7 +532,18 @@ function instantiateHairpin(gesture, loaded, input, meta) {
 function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   const intent = input.intent;
   const quarter = loaded.quarterBlick;
-  const phrases = segmentPhrases(loaded.notes, quartersToBlick(input.intentDefaults.phraseGapQuarter, quarter));
+  // 意图手势只锚定旋律音符："br" 呼吸音符没有可唱音高，在换气上规划 scoop/颤音/
+  // 弧线毫无意义。显式手势不受此过滤（用户的话优先）。br 时值天然成为乐句间隙，
+  // 让呼吸位置照常参与 rest 阈值切分。
+  const melodicNotes = loaded.notes.filter((note) => !isBreathLyrics(note.lyrics));
+  if (melodicNotes.length < loaded.notes.length) {
+    appendOnce(warnings, {
+      code: "BREATH_NOTES_SKIPPED_BY_INTENT",
+      message:
+        "breath notes (lyrics 'br') were excluded from intent-derived gesture anchoring; their duration still separates phrases.",
+    });
+  }
+  const phrases = segmentPhrases(melodicNotes, quartersToBlick(input.intentDefaults.phraseGapQuarter, quarter));
   const sustainBlick = quartersToBlick(input.intentDefaults.sustainQuarter, quarter);
   const candidates = [];
   let sequence = 0;
@@ -835,6 +846,12 @@ function candidateSpanBounds(spec, loaded) {
     from: Math.min(...notes.map((note) => note.absOnsetBlick)),
     to: Math.max(...notes.map((note) => note.absEndBlick)),
   };
+}
+
+// "br" 是宿主/社区约定的换气音符（与 lyric-align 的分词规则同源）：它带有名义 pitch 字段，
+// 但没有可唱音高。调性/音级/乐句/统计与意图手势都必须把它当呼吸事件而不是旋律音符。
+export function isBreathLyrics(lyrics) {
+  return typeof lyrics === "string" && lyrics.trim().toLowerCase() === "br";
 }
 
 // 乐句切分：休止 >= phraseGapBlick 即边界；climax 为最高目标音（并列取更长者）。

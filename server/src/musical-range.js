@@ -471,6 +471,15 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
       pitchOffsetSemitone: occurrence.group?.pitchOffsetSemitone ?? 0,
       sharedTargetOccurrences,
       noteFingerprints,
+      // 为 sv_style_profile / sv_validate_lyrics_prosody 留存的纯数据剖面（引用不复制）。
+      // include 未捕获时保持 undefined——纯内存消费方必须区分"未捕获"与"确实为空"，
+      // 不得把缺数据报成 0 冒充实测。
+      ...(occurrence.group?.voice?.parameters !== undefined
+        ? { voiceParameters: occurrence.group.voice.parameters }
+        : {}),
+      ...(occurrence.group?.processing !== undefined
+        ? { processing: occurrence.group.processing }
+        : {}),
     });
   }
   for (const collectionName of ["notes", "attributes", "automation", "computedPitch"]) {
@@ -498,6 +507,23 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
     };
   }
   stored.context.computedPitchByOccurrence = computedPitchByOccurrence;
+  // 为 sv_style_profile 留存未分页的逐 occurrence Automation 曲线（引用不复制）。
+  // include 未含 automation 时保持空 map；消费方以 Object.hasOwn 区分"未捕获该 occurrence"。
+  const automationByOccurrence = Object.create(null);
+  for (const item of captured.data.automation ?? []) {
+    if (typeof item.occurrenceId !== "string") continue;
+    const list = automationByOccurrence[item.occurrenceId] ?? [];
+    list.push({
+      requestedParameter: item.requestedParameter,
+      resolvedParameter: item.resolvedParameter,
+      definition: item.definition,
+      interpolationMethod: item.interpolationMethod,
+      points: item.points,
+    });
+    automationByOccurrence[item.occurrenceId] = list;
+  }
+  stored.context.automationByOccurrence = automationByOccurrence;
+  stored.context.automationCaptured = input.include.has("automation");
   stored.context.range = captured.data.range;
   stored.context.quarterBlick = captured.quarterBlick;
   stored.context.meterMarks = captured.meterMarks;

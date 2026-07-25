@@ -1,4 +1,4 @@
-import { segmentPhrases } from "./expression-plan.js";
+import { isBreathLyrics, segmentPhrases } from "./expression-plan.js";
 import { ServiceTiming } from "./service-timing.js";
 
 // sv_analyze_phrase：只读乐理分析（调性候选 / 音级 / 乐句 / 统计）。
@@ -8,6 +8,9 @@ import { ServiceTiming } from "./service-timing.js";
 // - 调性检测是"排序器"不是"分类器"：时值加权音级直方图与 24 个 Krumhansl-Kessler
 //   profile 旋转做皮尔逊相关，返回排序候选 + 与次名的差距（margin）。旋律（尤其
 //   单声部短句）在关系大小调间天然歧义，把歧义如实暴露正是正确行为。
+// - "br" 是呼吸事件不是旋律音符：宿主给它名义 pitch，但没有可唱音高。它被排除在
+//   调性、音级、乐句、音域/音程/节奏统计之外，单独在 breathEvents 中如实返回
+//   （名义音高标 nominalPitch，绝不混入 scale degree）。
 // - 全部结论标 derived/heuristic：乐句、climax、调性都是推断，不是宿主事实；
 //   拼写只用升号（不做同音异名判定）；小调音级按自然小调解释。
 export const PHRASE_ANALYSIS_INCLUDES = Object.freeze([
@@ -40,6 +43,8 @@ const PROVENANCE = Object.freeze({
   enharmonicSpelling: "sharps_only",
   minorScaleDegrees: "natural_minor",
   phraseSegmentation: "rest_threshold_heuristic",
+  breathNotes: "excluded_from_all_musical_statistics_reported_as_breathEvents",
+  breathDetection: "lyrics_br_host_convention_not_official_api_fact",
   basis: "derived_not_host_fact",
   perception: "human_only",
 });
@@ -73,8 +78,11 @@ export class PhraseAnalysisService {
         groupIndex: loaded.occurrence.groupIndex,
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
       },
+      // noteCount 只数旋律音符；呼吸音符单独计数并在 breathEvents 中逐项返回。
       noteCount: loaded.notes.length,
+      breathCount: loaded.breathNotes.length,
       ...analysis,
+      breathEvents: buildBreathEvents(loaded, input.responseMode, warnings),
       provenance: PROVENANCE,
       warnings,
       timings: timer.finish(),
@@ -126,7 +134,7 @@ function resolveAnalysisSource(store, input) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
   }
   const timeOffset = occurrence.timeOffsetBlick ?? 0;
-  const notes = [...(occurrence.noteFingerprints ?? [])]
+  const allNotes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
       noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
@@ -139,13 +147,50 @@ function resolveAnalysisSource(store, input) {
       durationBlick: fingerprint.durationBlick,
     }))
     .sort((left, right) => left.absOnsetBlick - right.absOnsetBlick);
-  if (notes.length === 0) {
+  if (allNotes.length === 0) {
     throw codedError(
       "NOTES_NOT_CAPTURED",
       'the selected occurrence has no note fingerprints; re-run sv_snapshot_range with include ["notes"]'
     );
   }
-  return { stored, occurrence, notes, quarterBlick };
+  // "br" 呼吸音符没有可唱音高：从全部音乐统计中剥离，单独如实返回。
+  const notes = allNotes.filter((note) => !isBreathLyrics(note.lyrics));
+  const breathNotes = allNotes.filter((note) => isBreathLyrics(note.lyrics));
+  if (notes.length === 0) {
+    throw codedError(
+      "NO_MELODIC_NOTES",
+      "every captured note is a breath event (lyrics 'br'); there is no melodic material to analyze"
+    );
+  }
+  return { stored, occurrence, notes, breathNotes, quarterBlick };
+}
+
+// 呼吸事件逐项返回：音高字段标 nominalPitch——宿主要求换气音符也有 pitch，
+// 但它不是可唱音高，绝不进入调性/音级/统计。三档响应与其他逐项列表共享同一预算。
+function buildBreathEvents(loaded, responseMode, warnings) {
+  if (responseMode === "compact") {
+    return { count: loaded.breathNotes.length };
+  }
+  const count = loaded.breathNotes.length;
+  const cap = responseMode === "verbose" ? count : MAX_LIST_ITEMS;
+  if (count > cap) {
+    warnings.push({
+      code: "BREATH_EVENTS_TRUNCATED",
+      message: `breathEvents.items reports the first ${cap} of ${count} breath events; use responseMode:"verbose" for the full list.`,
+    });
+  }
+  return {
+    count,
+    items: loaded.breathNotes.slice(0, cap).map((note) => ({
+      noteId: note.noteId,
+      lyrics: note.lyrics,
+      nominalPitch: note.pitch,
+      startBlick: note.absOnsetBlick,
+      endBlick: note.absEndBlick,
+      durationQuarter: note.durationBlick / loaded.quarterBlick,
+    })),
+    itemsTruncated: count > cap,
+  };
 }
 
 // ---------- 分析 ----------
@@ -172,7 +217,8 @@ function runAnalysis(loaded, input, warnings) {
   return result;
 }
 
-function analyzeKey(notes, warnings) {
+// K-K 调性排序器：style-profile 复用（导出）。输入音符需带 pitch/durationBlick。
+export function analyzeKey(notes, warnings) {
   // 时值加权音级直方图：每个音级累计 blick 时长。
   const histogram = new Array(12).fill(0);
   for (const note of notes) {
@@ -329,7 +375,9 @@ function analyzePhrases(loaded, phraseGapQuarter, responseMode, warnings) {
   };
 }
 
-function analyzeStatistics(loaded) {
+// 音域/音程/节奏/休止统计：style-profile 复用（导出）。输入需带 pitch/durationBlick/
+// absOnsetBlick/absEndBlick 与 quarterBlick。
+export function analyzeStatistics(loaded) {
   const pitches = loaded.notes.map((note) => note.pitch).sort((left, right) => left - right);
   const durationsQuarter = loaded.notes
     .map((note) => note.durationBlick / loaded.quarterBlick)

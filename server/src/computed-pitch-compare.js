@@ -12,6 +12,10 @@ import { ServiceTiming } from "./service-timing.js";
 //   返回空数组（上游归一化为全 null）。null 不进数值统计，只计入 coverage 证据。
 // - 音准与颤音是两个指标族：带颤音的长音以稳态段均值（centerErrorCent）为准；
 //   逐帧误差只作诊断，绝不把健康颤音误报成跑调。
+// - anomalySegments 默认按 startBlick 时间顺序返回并显式声明 sortBy；
+//   sortBy:"severity" 才按峰值降序。无论排序方式，top 恒为最严重段，截断不吞掉它。
+// - 低覆盖率必须显式警告：有效帧占比低于 lowCoverageWarnRatio（默认 0.5）时发
+//   LOW_COMPUTED_PITCH_COVERAGE，避免把低样本统计误当成可靠结论。
 // - 颤音只能从 computed pitch 测量：Note 属性里的 dF0Vbr/fF0Vbr 等是官方标注的
 //   version-1-only 字段，v2 工程不可移植，本服务不读取。
 // - 所有阈值默认值是工程启发，未经真实宿主校准（HANDOFF §8.10）；响应里如实标注。
@@ -19,6 +23,7 @@ export const COMPARE_ANALYSIS_DEFAULTS = Object.freeze({
   minValidFramesPerNote: 8,
   edgeExclusionRatio: 0.15,
   centerMinFrames: 4,
+  lowCoverageWarnRatio: 0.5,
   vibrato: Object.freeze({
     minWindowFrames: 24,
     hzRange: Object.freeze([3.5, 8.5]),
@@ -35,6 +40,7 @@ export const COMPARE_ANALYSIS_DEFAULTS = Object.freeze({
 const MAX_ANOMALY_SEGMENTS = 10;
 const MAX_PER_NOTE_ITEMS = 200;
 const SEMITONE_DELTA_THRESHOLDS = Object.freeze(["0.01", "0.05", "0.10"]);
+const ANOMALY_SORT_MODES = Object.freeze(["startBlick", "severity"]);
 
 const PROVENANCE = Object.freeze({
   pitchSource: "computedPitch",
@@ -209,6 +215,7 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
     }
     return { frameData, summary: buildTargetSummary(series, frameData, cents) };
   });
+  warnLowCoverage(base.summary.coverage, params, warnings);
 
   const detail = await timer.measure("detectMs", async () => {
     const anomalies = input.metrics.anomalySegments
@@ -243,7 +250,7 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
           analysis: publicAnalysisParams(params),
         }),
     ...(detail.anomalies
-      ? { anomalySegments: emitAnomalies(detail.anomalies, input.responseMode) }
+      ? { anomalySegments: emitAnomalies(detail.anomalies, input.responseMode, input.anomalySortBy) }
       : {}),
   };
 }
@@ -506,6 +513,8 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     return { anomalies, perNote };
   });
 
+  const coverage = series.frames > 0 ? base.deltasSemitone.length / series.frames : 0;
+  warnLowCoverage(coverage, params, warnings);
   return {
     ok: true,
     status: "succeeded",
@@ -516,7 +525,7 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     summary: {
       frameCount: series.frames,
       validFrameCount: base.deltasSemitone.length,
-      coverage: series.frames > 0 ? base.deltasSemitone.length / series.frames : 0,
+      coverage,
       orientation: "after_minus_before",
       ...summarizeCents(base.deltasSemitone.map((delta) => delta * 100)),
     },
@@ -528,7 +537,7 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
           analysis: publicAnalysisParams(params),
         }),
     ...(detail.anomalies
-      ? { anomalySegments: emitAnomalies(detail.anomalies, input.responseMode) }
+      ? { anomalySegments: emitAnomalies(detail.anomalies, input.responseMode, input.anomalySortBy) }
       : {}),
   };
 }
@@ -874,18 +883,32 @@ function collectAnomalySegments(frameCents, thresholdCent) {
     }
   }
   if (current) segments.push(current);
-  segments.sort((left, right) => right.peakAbsCent - left.peakAbsCent);
+  // 扫描天然按时间顺序产出；排序交给 emitAnomalies 按请求的 sortBy 决定。
   return segments;
 }
 
-function emitAnomalies(segments, responseMode) {
+function emitAnomalies(segments, responseMode, sortBy) {
+  // top 恒为最严重段：无论 sortBy 与截断如何，最严重段绝不被时间序截断吞掉。
+  const top = segments.reduce(
+    (best, segment) => (best === null || segment.peakAbsCent > best.peakAbsCent ? segment : best),
+    null
+  );
   if (responseMode === "compact") {
-    return { total: segments.length, top: segments[0] ?? null };
+    return { total: segments.length, sortBy, top };
   }
+  const sorted =
+    sortBy === "severity"
+      ? [...segments].sort(
+          (left, right) =>
+            right.peakAbsCent - left.peakAbsCent || left.startBlick - right.startBlick
+        )
+      : [...segments].sort((left, right) => left.startBlick - right.startBlick);
   return {
     total: segments.length,
+    sortBy,
     truncated: segments.length > MAX_ANOMALY_SEGMENTS,
-    items: segments.slice(0, MAX_ANOMALY_SEGMENTS),
+    top,
+    items: sorted.slice(0, MAX_ANOMALY_SEGMENTS),
   };
 }
 
@@ -943,6 +966,17 @@ function buildSamplingBlock(series, context, params, warnings) {
   };
 }
 
+// 低覆盖率显式警告：有效帧太少时汇总统计基于小样本，绝不能默默当成可靠结论。
+// 覆盖率语义按模式不同（to_target=对齐到音符的有效帧占比；contexts=两侧同帧有限的占比），
+// 阈值同一个：低于 lowCoverageWarnRatio 即警告。
+function warnLowCoverage(coverage, params, warnings) {
+  if (coverage >= params.lowCoverageWarnRatio) return;
+  warnings.push({
+    code: "LOW_COMPUTED_PITCH_COVERAGE",
+    message: `Only ${(coverage * 100).toFixed(1)}% of frames carry usable pitch (threshold ${(params.lowCoverageWarnRatio * 100).toFixed(0)}%); summary statistics rest on a small sample and may not represent the range. Check sv_wait_for_processing, the range bounds, or unvoiced content before trusting them.`,
+  });
+}
+
 function insufficientComputedPitch(series, frameData) {
   const observed = series.evidence?.observedFrames ?? frameData.finiteFrames;
   const error = codedError(
@@ -996,7 +1030,17 @@ function normalizeCompareRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["mode", "contextId", "occurrenceId", "before", "after", "metrics", "analysis", "responseMode"],
+    [
+      "mode",
+      "contextId",
+      "occurrenceId",
+      "before",
+      "after",
+      "metrics",
+      "analysis",
+      "anomalySortBy",
+      "responseMode",
+    ],
     "request"
   );
   const mode = request.mode;
@@ -1009,6 +1053,13 @@ function normalizeCompareRequest(request) {
   const responseMode = request.responseMode ?? "standard";
   if (!["compact", "standard", "verbose"].includes(responseMode)) {
     throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
+  }
+  const anomalySortBy = request.anomalySortBy ?? "startBlick";
+  if (!ANOMALY_SORT_MODES.includes(anomalySortBy)) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `anomalySortBy must be one of ${ANOMALY_SORT_MODES.join(", ")}`
+    );
   }
   const metrics = normalizeMetrics(request.metrics);
   const analysis = normalizeAnalysisParams(request.analysis);
@@ -1024,6 +1075,7 @@ function normalizeCompareRequest(request) {
       occurrenceId: request.occurrenceId,
       metrics,
       analysis,
+      anomalySortBy,
       responseMode,
     };
   }
@@ -1035,7 +1087,7 @@ function normalizeCompareRequest(request) {
   }
   const before = normalizeSide(request.before, "before");
   const after = normalizeSide(request.after, "after");
-  return { mode, before, after, metrics, analysis, responseMode };
+  return { mode, before, after, metrics, analysis, anomalySortBy, responseMode };
 }
 
 function normalizeSide(value, label) {
@@ -1072,6 +1124,7 @@ function normalizeAnalysisParams(value) {
       "minValidFramesPerNote",
       "edgeExclusionRatio",
       "centerMinFrames",
+      "lowCoverageWarnRatio",
       "vibrato",
       "transition",
       "anomalyThresholdCent",
@@ -1099,6 +1152,13 @@ function normalizeAnalysisParams(value) {
     2000,
     defaults.centerMinFrames,
     "analysis.centerMinFrames"
+  );
+  merged.lowCoverageWarnRatio = checkedNumber(
+    value.lowCoverageWarnRatio,
+    0,
+    1,
+    defaults.lowCoverageWarnRatio,
+    "analysis.lowCoverageWarnRatio"
   );
   merged.anomalyThresholdCent = checkedNumber(
     value.anomalyThresholdCent,
@@ -1193,6 +1253,7 @@ function cloneAnalysisDefaults() {
     minValidFramesPerNote: defaults.minValidFramesPerNote,
     edgeExclusionRatio: defaults.edgeExclusionRatio,
     centerMinFrames: defaults.centerMinFrames,
+    lowCoverageWarnRatio: defaults.lowCoverageWarnRatio,
     vibrato: { ...defaults.vibrato, hzRange: [...defaults.vibrato.hzRange] },
     transition: { ...defaults.transition },
     anomalyThresholdCent: defaults.anomalyThresholdCent,
