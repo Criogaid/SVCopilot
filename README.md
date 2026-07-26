@@ -115,6 +115,8 @@ MCP 资源还提供：
 - `svapi://manifest`：完整官方 API 清单。
 - `svapi://class/{class}`：按精确类名读取，例如 `svapi://class/Note`。
 - `svcopilot://capabilities`：当前连接 epoch、接口版本、限制和已知能力缺口。
+- `svcopilot://guide/music-workflows`：面向 LLM 的工作流指南目录——全局规则（身份、context 生命周期、写入安全、证据分级、人类门、能力阻塞、错误分类）加 8 个 recipe 摘要。
+- `svcopilot://guide/music-workflows/{recipe}`：单个 recipe 全文，含每步工具、最小请求模板、必要 `include` 字段、可接受与不可重试状态、共享 target 与 Undo 影响、人类门和 capability-blocked 分支。可用 recipe：`inspect_project`、`analyze_vocal_phrase`、`align_and_commit_lyrics`、`plan_and_commit_expression`、`quantize_notes`、`generate_harmony`、`verify_after_edit`、`audition_for_human`。
 - `svcopilot://schemas/music-workflow`：组合音乐工具的轻量 schema 索引。
 - `svcopilot://schemas/{tool}`：单个组合工具实际使用的紧凑输入 schema，例如 `svcopilot://schemas/sv_edit_phrase`；按工具拆分以避开客户端的大 resource 截断。
 

@@ -40,6 +40,11 @@ import {
   ParameterCurveService,
 } from "./parameter-curve.js";
 import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
+import {
+  musicWorkflowGuideIndex,
+  musicWorkflowGuideRecipe,
+  musicWorkflowGuideRecipeIds,
+} from "./workflow-guide.js";
 import { PhraseEditService } from "./phrase-edit.js";
 import { PhraseAnalysisService } from "./phrase-analysis.js";
 import { QuantizePlanService } from "./quantize-plan.js";
@@ -48,6 +53,10 @@ import { StyleProfileService } from "./style-profile.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
 import { VoiceProfileService } from "./voice-profile.js";
 import { WorkflowExecutor } from "./workflow.js";
+
+// 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
+// 避免升级时漏改其中一处（维护规则见 docs/MCP_MUSIC_WORKFLOW_MASTER_PLAN.md §10）。
+const INTERFACE_VERSION = "0.8.0";
 
 const bridge = new PipeRelay();
 const hostSession = new HostSession(bridge);
@@ -1880,7 +1889,7 @@ const TOOLS = [
 ];
 
 const server = new Server(
-  { name: "sv-copilot", version: "0.8.0" },
+  { name: "sv-copilot", version: INTERFACE_VERSION },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -1903,6 +1912,13 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://capabilities",
       name: "SV Copilot runtime capabilities",
       description: "Connection state, limits, workflow features, and explicit host capability gaps.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://guide/music-workflows",
+      name: "SV Copilot music workflow guide",
+      description:
+        "Recipe index for combining the tools into safe musical workflows: what to capture, which planner to call, how to commit, which errors are retryable, and where a human must judge. Read svcopilot://guide/music-workflows/{recipe} for full steps.",
       mimeType: "application/json",
     },
     {
@@ -1981,6 +1997,13 @@ server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
       uriTemplate: "svapi://class/{class}",
       name: "Synthesizer V API class",
       description: "One API class and all documented methods, indexed by exact official class name.",
+      mimeType: "application/json",
+    },
+    {
+      uriTemplate: "svcopilot://guide/music-workflows/{recipe}",
+      name: "SV Copilot music workflow recipe",
+      description:
+        "One workflow recipe with full steps, minimal request templates, acceptable and non-retryable states, human gates, and capability-blocked branches.",
       mimeType: "application/json",
     },
     {
@@ -2229,6 +2252,22 @@ function readResource(uri) {
   if (parsed.protocol === "svcopilot:" && parsed.hostname === "capabilities") {
     return capabilities();
   }
+  // 指南：目录页与单 recipe 页共用一个 hostname，用 pathname 区分。
+  if (parsed.protocol === "svcopilot:" && parsed.hostname === "guide") {
+    const segments = parsed.pathname.replace(/^\//, "").split("/");
+    if (segments[0] !== "music-workflows" || segments.length > 2) {
+      throw new Error(`Unsupported resource URI: ${uri}`);
+    }
+    if (segments.length === 1) return musicWorkflowGuideIndex(INTERFACE_VERSION);
+    const recipeId = decodeURIComponent(segments[1]);
+    const recipe = musicWorkflowGuideRecipe(recipeId, INTERFACE_VERSION);
+    if (!recipe) {
+      throw new Error(
+        `Unknown workflow recipe: ${recipeId}; available: ${musicWorkflowGuideRecipeIds().join(", ")}`
+      );
+    }
+    return recipe;
+  }
   if (
     parsed.protocol === "svcopilot:" &&
     parsed.hostname === "schemas" &&
@@ -2262,7 +2301,7 @@ function readResource(uri) {
 
 function capabilities() {
   return {
-    interfaceVersion: "0.8.0",
+    interfaceVersion: INTERFACE_VERSION,
     connection: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -2309,6 +2348,11 @@ function capabilities() {
       ],
       voice: ["sv_get_voice_profile", "sv_clone_track_from_template"],
       typedResultFormat: "typed-v2",
+      guide: {
+        musicWorkflows: "svcopilot://guide/music-workflows",
+        recipeTemplate: "svcopilot://guide/music-workflows/{recipe}",
+        recipes: musicWorkflowGuideRecipeIds(),
+      },
       schemas: {
         musicWorkflowIndex: "svcopilot://schemas/music-workflow",
         toolTemplate: "svcopilot://schemas/{tool}",
@@ -2384,7 +2428,7 @@ function musicWorkflowSchemaIndex() {
     "sv_generate_harmony",
   ];
   return {
-    schemaVersion: "0.8.0",
+    schemaVersion: INTERFACE_VERSION,
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
     tools: names.map((name) => ({
@@ -2413,15 +2457,15 @@ function toolInputSchema(name) {
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
-    schemaVersion: "0.8.0",
+    schemaVersion: INTERFACE_VERSION,
     tool: tool.name,
     inputSchema: tool.inputSchema,
   };
 }
 
 function serializeResource(uri, payload) {
-  // 部分 MCP 客户端会截断较大的 resource 文本；schema 使用紧凑 JSON 降低上下文成本。
-  return uri.startsWith("svcopilot://schemas/")
+  // 部分 MCP 客户端会截断较大的 resource 文本；schema 与指南使用紧凑 JSON 降低上下文成本。
+  return uri.startsWith("svcopilot://schemas/") || uri.startsWith("svcopilot://guide/")
     ? JSON.stringify(payload)
     : JSON.stringify(payload, null, 2);
 }

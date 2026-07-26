@@ -222,6 +222,11 @@ try {
       (resource) => resource.uri === "svcopilot://schemas/sv_plan_expression"
     )
   );
+  assert.ok(
+    resources.resources.some(
+      (resource) => resource.uri === "svcopilot://guide/music-workflows"
+    )
+  );
   const manifest = parseResource(await client.readResource({ uri: "svapi://manifest" }));
   assert.ok(manifest.summary.methodOverloadCount >= 200);
   const capabilities = parseResource(
@@ -256,6 +261,14 @@ try {
     "svcopilot://schemas/music-workflow"
   );
   assert.equal(capabilities.interfaces.schemas.toolTemplate, "svcopilot://schemas/{tool}");
+  assert.equal(
+    capabilities.interfaces.guide.musicWorkflows,
+    "svcopilot://guide/music-workflows"
+  );
+  assert.equal(
+    capabilities.interfaces.guide.recipeTemplate,
+    "svcopilot://guide/music-workflows/{recipe}"
+  );
   assert.equal(capabilities.interfaceVersion, "0.8.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
@@ -532,6 +545,28 @@ try {
       (template) => template.uriTemplate === "svcopilot://schemas/{tool}"
     )
   );
+  assert.ok(
+    resourceTemplates.resourceTemplates.some(
+      (template) => template.uriTemplate === "svcopilot://guide/music-workflows/{recipe}"
+    )
+  );
+  // 工作流指南：目录页 + 逐 recipe 读取，并确认每个 recipe 的工具名都真实存在。
+  const guideResource = await client.readResource({
+    uri: "svcopilot://guide/music-workflows",
+  });
+  const guide = parseResource(guideResource);
+  console.log("[client] workflow guide index chars", guideResource.contents[0].text.length);
+  assert.ok(guideResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  assert.equal(guide.interfaceVersion, "0.8.0");
+  assert.ok(guide.recipes.length >= 8);
+  const toolNames = new Set(listed.tools.map((tool) => tool.name));
+  for (const summary of guide.recipes) {
+    const recipe = parseResource(await client.readResource({ uri: summary.uri }));
+    assert.equal(recipe.recipe.id, summary.id);
+    for (const step of recipe.recipe.steps) {
+      assert.ok(toolNames.has(step.tool), `guide recipe ${summary.id} names unknown ${step.tool}`);
+    }
+  }
   const apiClass = parseResource(await client.readResource({ uri: "svapi://class/Note" }));
   assert.equal(apiClass.class.name, "Note");
 
