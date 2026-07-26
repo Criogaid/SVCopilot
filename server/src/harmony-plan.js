@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { isBreathLyrics } from "./expression-plan.js";
 import { MAX_OPERATIONS } from "./note-structure.js";
 import { analyzeKey } from "./phrase-analysis.js";
+import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 
 // sv_generate_harmony：调内和声规划器（HANDOFF §8.16 "仍未实现"清单最后一个规划项）。
@@ -631,6 +632,10 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
           perNoteTruncated: planned.items.length > cap,
           conflicts: planned.conflicts.slice(0, cap),
         }),
+    apply: buildApplyEnvelope(restructureRequest ? [restructureRequest] : null, {
+      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+    }),
+    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
     restructureRequest,
     ...(continuation ? { continuation } : {}),
     review: {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { ServiceTiming } from "./service-timing.js";
 import { MAX_PATCHES } from "./note-patch.js";
+import { buildApplyEnvelope } from "./plan-envelope.js";
 
 // sv_align_lyrics：无副作用咬字/铺词规划器（HANDOFF §7 P2 定位）。
 //
@@ -549,6 +550,9 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
     .digest("hex")
     .slice(0, 16)}`;
   const needsReviewCount = mapped.perNote.filter((item) => item.needsReview).length;
+  // 共享 target 的写入会同时改变所有 occurrence；规划阶段就如实声明，不留给提交时才发现。
+  const requiresSharedTargetConfirmation =
+    (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1;
   const checklist = [
     "Review plannedLyrics per note; heuristic English syllable counts only affect the number of '+' continuation notes.",
     "Apply through the returned patchRequest (sv_patch_notes) with dryRun:true first, then commit; expected.lyrics guards against post-snapshot drift.",
@@ -557,6 +561,11 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
   if (needsReviewCount > 0) {
     checklist.push(
       `${needsReviewCount} note(s) are flagged needs_review (kanji or ambiguous-language tokens); confirm their reading/segmentation manually.`
+    );
+  }
+  if (requiresSharedTargetConfirmation) {
+    checklist.push(
+      "The target NoteGroup is shared by multiple occurrences: committing changes every one of them and requires allowSharedTargetMutation:true."
     );
   }
   if (continuation) {
@@ -605,9 +614,13 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
       unassignedUnits: mapped.unassignedUnits,
       unfilledNotes: mapped.unfilledNotes,
     },
+    apply: buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
+      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+    }),
+    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
     patchRequest,
     ...(continuation ? { continuation } : {}),
-    review: { requiresHumanReview: needsReviewCount > 0, checklist },
+    review: { requiresHumanReview: needsReviewCount > 0, requiresSharedTargetConfirmation, checklist },
     provenance: PROVENANCE,
     warnings,
     timings,

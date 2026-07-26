@@ -45,6 +45,15 @@ const GLOBAL_RULES = {
     "Contexts also expire on their own TTL (see limits.snapshotContextTtlMs in svcopilot://capabilities) and on host reconnection (epoch change).",
     "On STALE_CONTEXT or UNKNOWN_CONTEXT: re-run sv_snapshot_range and re-run the planner with the same options. Never retry the old request and never reuse old noteIds.",
   ],
+  planHandoff: [
+    "Every planner (sv_plan_expression, sv_align_lyrics, sv_quantize_notes, sv_generate_harmony) returns the SAME apply envelope. Read apply.tool, submit apply.arguments verbatim to that tool. You never need to parse planner-specific field names.",
+    "apply is null when there is nothing to do (status no_change). That is success, not an error.",
+    "Add dryRun:true to apply.arguments for the review pass, then submit the identical arguments to commit.",
+    "apply.atomicity is always \"verified_compensation\" — read-back compensation, never ACID.",
+    "apply.expectedUserUndoSteps says how many Undo records the human will see. When apply.callCount > 1, submit apply.arguments first and then each apply.additionalCalls entry in callIndex order; they are separate transactions, so a later failure does NOT roll back earlier commits.",
+    "apply.preconditions describes what the plan assumed. The target tool re-validates against the live host anyway — a plan is never a token for skipping preflight, because SynthV exposes no project revision.",
+    "The older applyRequests / patchRequest / restructureRequest fields still carry the identical payload but are deprecated; prefer apply.",
+  ],
   writeSafety: [
     "Always dry-run a write first and read its plannedDiff; then commit the identical arguments with dryRun removed or false.",
     "SHARED_TARGET_REQUIRES_CONFIRMATION means the target NoteGroup is referenced more than once in the project, so the edit changes every occurrence. Report that to the human and only set allowSharedTargetMutation:true on explicit instruction.",
@@ -288,7 +297,7 @@ const RECIPES = [
         n: 2,
         tool: "sv_align_lyrics",
         purpose:
-          "Plan per-note lyrics and languageOverride. Pure in-memory: returns a ready-to-submit patchRequest, writes nothing.",
+          "Plan per-note lyrics and languageOverride. Pure in-memory: returns an apply envelope, writes nothing.",
         arguments: {
           contextId: EXAMPLE.contextId,
           lyrics: "ひかり の なか で",
@@ -297,7 +306,7 @@ const RECIPES = [
         acceptable: ["ok"],
         readingRules: [
           "Read perNote confidence. needs_review entries (kanji, ambiguous scripts) are the human gate.",
-          "The response carries patchRequest.tool and patchRequest.arguments — submit those arguments verbatim.",
+          "The response carries apply.tool and apply.arguments — submit those arguments verbatim. apply is null when nothing needs changing.",
           "PLAN_EXCEEDS_PATCH_CAP means only the first 200 patches are in this batch. Follow the continuation loop, do not hand-build batch 2.",
         ],
       },
@@ -312,7 +321,7 @@ const RECIPES = [
           ],
           dryRun: true,
         },
-        note: "In practice pass patchRequest.arguments from step 2 and add dryRun:true.",
+        note: "In practice pass apply.arguments from step 2 and add dryRun:true.",
         acceptable: ["status dry_run"],
       },
       {
@@ -382,7 +391,7 @@ const RECIPES = [
         n: 2,
         tool: "sv_plan_expression",
         purpose:
-          "Compile explicit gestures and/or a heuristic intent into applyRequests. Pure in-memory; writes nothing.",
+          "Compile explicit gestures and/or a heuristic intent into an apply envelope. Pure in-memory; writes nothing.",
         arguments: {
           contextId: EXAMPLE.contextId,
           gestures: [
@@ -400,7 +409,7 @@ const RECIPES = [
         readingRules: [
           "Units are explicit and must not be mixed: pitchDelta=cents, loudness=dB, tension/breathiness=±1, vibratoEnv=0..2 multiplier.",
           "intent.preset expands into reviewable fields via presetExpansion — show that expansion, never treat it as an opaque button.",
-          "Each applyRequest.arguments.target carries expectedNotes and expectedTimeOffsetBlick drift guards. Submit them; do not strip them.",
+          "apply.arguments.target carries expectedNotes and expectedTimeOffsetBlick drift guards. Submit them; do not strip them.",
           "Intent-derived gestures never anchor on breath notes. Explicit gestures may, deliberately.",
           "Natural vibrato presence is host-unobservable, so a pitchDelta vibrato may stack with it.",
         ],
@@ -424,7 +433,7 @@ const RECIPES = [
           ],
           dryRun: true,
         },
-        note: "In practice submit applyRequests[i].arguments from step 2 verbatim plus dryRun:true.",
+        note: "In practice submit apply.arguments from step 2 verbatim plus dryRun:true, then each apply.additionalCalls entry in order when apply.callCount > 1.",
         acceptable: ["status dry_run"],
       },
       {
@@ -487,7 +496,7 @@ const RECIPES = [
       {
         n: 2,
         tool: "sv_quantize_notes",
-        purpose: "Plan onset (and optionally duration) snapping. Pure in-memory; returns a patchRequest.",
+        purpose: "Plan onset (and optionally duration) snapping. Pure in-memory; returns an apply envelope.",
         arguments: {
           contextId: EXAMPLE.contextId,
           grid: { division: "1/16" },
@@ -520,7 +529,7 @@ const RECIPES = [
           ],
           dryRun: true,
         },
-        note: "In practice submit patchRequest.arguments from step 2 plus dryRun:true.",
+        note: "In practice submit apply.arguments from step 2 plus dryRun:true.",
         acceptable: ["status dry_run"],
       },
       {
@@ -632,7 +641,7 @@ const RECIPES = [
           ],
           dryRun: true,
         },
-        note: "In practice submit the returned restructure request arguments plus dryRun:true.",
+        note: "In practice submit apply.arguments from step 3 plus dryRun:true.",
         acceptable: ["status dry_run"],
       },
       {

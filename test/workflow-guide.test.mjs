@@ -150,6 +150,29 @@ test("the guide covers the required recipes and never invents host capabilities"
     ),
     "the guide must state that atomic:true is compensation, not ACID"
   );
+
+  // P0-D：指南必须教统一 apply 信封，而不是让模型去认四种规划器专属字段。
+  assert.ok(Array.isArray(index.globalRules.planHandoff));
+  assert.ok(
+    index.globalRules.planHandoff.some(
+      (line) => /apply\.tool/.test(line) && /apply\.arguments/.test(line)
+    ),
+    "the guide must tell the model to read apply.tool and submit apply.arguments"
+  );
+  assert.ok(
+    index.globalRules.planHandoff.some((line) => /apply is null/i.test(line)),
+    "the guide must explain that apply:null is no_change, not an error"
+  );
+  assert.ok(
+    index.globalRules.planHandoff.some(
+      (line) => /additionalCalls/.test(line) && /separate transactions/i.test(line)
+    ),
+    "the guide must warn that multi-call applies are not one transaction"
+  );
+  assert.ok(
+    index.globalRules.planHandoff.some((line) => /never a token for skipping preflight/i.test(line)),
+    "the guide must state that a plan does not authorize skipping live preflight"
+  );
 });
 
 test("recipes that consume range data declare what the capture must include", () => {

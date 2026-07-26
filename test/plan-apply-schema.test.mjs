@@ -8,7 +8,9 @@ import { StdioClientTransport } from "../server/node_modules/@modelcontextprotoc
 import AjvModule from "../server/node_modules/ajv/dist/ajv.js";
 
 import { ExpressionPlanService } from "../server/src/expression-plan.js";
+import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { LyricAlignService } from "../server/src/lyric-align.js";
+import { QuantizePlanService } from "../server/src/quantize-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 
 // 跨层契约回归：规划器（sv_plan_expression / sv_align_lyrics）产出的 applyRequests /
@@ -138,4 +140,232 @@ test("planner outputs validate against the schemas the real server serves", asyn
   assert.equal(aligned.patchRequest.arguments.patches.length, 200);
   assert.equal(aligned.continuation.remainingChangedCount, 1);
   assertValid(validatePatches, aligned.patchRequest.arguments, "sv_align_lyrics patchRequest");
+});
+
+// P0-D 统一信封：通用消费者只读 apply.tool + apply.arguments 就能提交，不需要知道
+// 自己在跟哪个规划器说话。这里对四个规划器跑同一段泛型代码。
+function harmonyContext(store) {
+  const stored = store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const sourceId = `${stored.contextId}:t:0:r:0`;
+  const targetId = `${stored.contextId}:t:1:r:0`;
+  const fingerprint = (occurrenceId, note, index) => ({
+    indexInGroup: index,
+    onsetBlick: note.onsetBlick,
+    durationBlick: note.durationBlick,
+    pitch: note.pitch,
+    lyrics: note.lyrics,
+    phonemesOverride: "",
+    languageOverride: "",
+    detuneCents: 0,
+    noteId: `${occurrenceId}:n:${index}`,
+  });
+  const sourceNotes = [
+    { onsetBlick: 0, durationBlick: Q, pitch: 69, lyrics: "a" },
+    { onsetBlick: Q, durationBlick: Q, pitch: 71, lyrics: "b" },
+    { onsetBlick: 2 * Q, durationBlick: Q, pitch: 72, lyrics: "c" },
+    { onsetBlick: 3 * Q, durationBlick: Q, pitch: 74, lyrics: "d" },
+  ];
+  for (const [occurrenceId, trackIndex, uuid, notes] of [
+    [sourceId, 0, "uuid-melody", sourceNotes],
+    [targetId, 1, "uuid-harmony", []],
+  ]) {
+    stored.context.occurrences.push({
+      occurrenceId,
+      trackIndex,
+      groupIndex: 0,
+      targetGroupUuid: uuid,
+      timeOffsetBlick: 0,
+      pitchOffsetSemitone: 0,
+      sharedTargetOccurrences: [occurrenceId],
+      noteFingerprints: notes.map((note, index) => fingerprint(occurrenceId, note, index)),
+    });
+  }
+  stored.context.quarterBlick = Q;
+  stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
+  stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
+  return { stored, sourceId, targetId };
+}
+
+async function buildPlans() {
+  const plans = [];
+
+  const expressionStore = new SnapshotStore({ now: () => 1000 });
+  const expressionContext = createStoredContext(expressionStore, [
+    { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "when" },
+    { onsetBlick: Q, durationBlick: 3 * Q, pitch: 66, lyrics: "see" },
+    { onsetBlick: 6 * Q, durationBlick: Q, pitch: 62, lyrics: "go" },
+  ]);
+  plans.push({
+    planner: "sv_plan_expression",
+    plan: await new ExpressionPlanService({ store: expressionStore, now: () => 2000 }).plan({
+      contextId: expressionContext.stored.contextId,
+      intent: { technique: ["controlled_belt"], emotion: "cool_anger", section: "chorus" },
+    }),
+    legacyField: "applyRequests",
+  });
+
+  const lyricStore = new SnapshotStore({ now: () => 1000 });
+  const lyricContext = createStoredContext(lyricStore, [
+    { onsetBlick: 0, durationBlick: Q },
+    { onsetBlick: Q, durationBlick: Q },
+  ]);
+  plans.push({
+    planner: "sv_align_lyrics",
+    plan: await new LyricAlignService({ store: lyricStore, now: () => 2000 }).align({
+      contextId: lyricContext.stored.contextId,
+      lyrics: "ひかり",
+      language: "japanese",
+    }),
+    legacyField: "patchRequest",
+  });
+
+  const quantizeStore = new SnapshotStore({ now: () => 1000 });
+  const quantizeContext = createStoredContext(quantizeStore, [
+    { onsetBlick: 1234, durationBlick: Q, pitch: 60, lyrics: "a" },
+    { onsetBlick: Q + 4321, durationBlick: Q, pitch: 62, lyrics: "b" },
+  ]);
+  plans.push({
+    planner: "sv_quantize_notes",
+    plan: await new QuantizePlanService({ store: quantizeStore, now: () => 2000 }).plan({
+      contextId: quantizeContext.stored.contextId,
+      grid: { division: "1/16" },
+    }),
+    legacyField: "patchRequest",
+  });
+
+  const harmonyStore = new SnapshotStore({ now: () => 1000 });
+  const harmonyCtx = harmonyContext(harmonyStore);
+  plans.push({
+    planner: "sv_generate_harmony",
+    plan: await new HarmonyPlanService({ store: harmonyStore, now: () => 2000 }).plan({
+      contextId: harmonyCtx.stored.contextId,
+      sourceOccurrenceId: harmonyCtx.sourceId,
+      targetOccurrenceId: harmonyCtx.targetId,
+      harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+    }),
+    legacyField: "restructureRequest",
+  });
+
+  return plans;
+}
+
+test("all four planners share one apply envelope a generic consumer can submit", async () => {
+  const plans = await buildPlans();
+  assert.equal(plans.length, 4);
+
+  const toolNames = [
+    ...new Set(
+      plans.flatMap(({ plan }) => [
+        plan.apply.tool,
+        ...(plan.apply.additionalCalls ?? []).map((call) => call.tool),
+      ])
+    ),
+  ];
+  const schemas = await fetchServedSchemas(toolNames);
+  const validators = new Map(
+    toolNames.map((name) => [name, compile(schemas[name])])
+  );
+
+  for (const { planner, plan, legacyField } of plans) {
+    // 1) 顶层结构统一：不需要按规划器分支。
+    assert.ok(plan.planId, `${planner} must return a planId`);
+    assert.ok(plan.apply, `${planner} must return an apply envelope`);
+    assert.ok(plan.review, `${planner} must return review`);
+    assert.equal(plan.apply.atomicity, "verified_compensation");
+    assert.ok(
+      Number.isInteger(plan.apply.expectedUserUndoSteps) && plan.apply.expectedUserUndoSteps >= 1,
+      `${planner} must report how many Undo steps the user will see`
+    );
+    assert.ok(Array.isArray(plan.apply.preconditions));
+    assert.match(plan.apply.planIsNotAPreflightToken, /does not authorize skipping live preflight/);
+
+    // 2) 泛型提交路径：读 apply.tool，用该工具的 schema 校验 apply.arguments。
+    const validate = validators.get(plan.apply.tool);
+    assert.ok(validate, `${planner} named an unserved tool ${plan.apply.tool}`);
+    assertValid(validate, plan.apply.arguments, `${planner} apply.arguments`);
+
+    // 多次调用（expression 的非相邻手势簇）同样逐条可校验。
+    for (const call of plan.apply.additionalCalls ?? []) {
+      assertValid(
+        validators.get(call.tool),
+        call.arguments,
+        `${planner} additionalCalls[${call.callIndex}].arguments`
+      );
+    }
+    const callCount = 1 + (plan.apply.additionalCalls?.length ?? 0);
+    assert.equal(
+      plan.apply.expectedUserUndoSteps,
+      callCount,
+      `${planner} must not under-report Undo steps`
+    );
+
+    // 3) 兼容期：旧字段仍在，且与 apply 内容完全一致（不是另一份计划）。
+    const legacy = plan[legacyField];
+    assert.ok(legacy, `${planner} must keep ${legacyField} for one release`);
+    const legacyFirst = Array.isArray(legacy) ? legacy[0] : legacy;
+    assert.equal(legacyFirst.tool, plan.apply.tool);
+    assert.deepEqual(legacyFirst.arguments, plan.apply.arguments);
+  }
+});
+
+test("the apply envelope reports multiple sequential calls honestly", async () => {
+  const store = new SnapshotStore({ now: () => 1000 });
+  const context = createStoredContext(store, [
+    { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
+    { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "b" },
+    { onsetBlick: 20 * Q, durationBlick: Q, pitch: 64, lyrics: "c" },
+    { onsetBlick: 21 * Q, durationBlick: Q, pitch: 65, lyrics: "d" },
+  ]);
+  const notes = context.stored.context.occurrences[0].noteFingerprints;
+  // 同一参数的两个互不相邻手势簇 → 必须拆成两次调用（两条 Undo 记录）。
+  const plan = await new ExpressionPlanService({ store, now: () => 2000 }).plan({
+    contextId: context.stored.contextId,
+    gestures: [
+      {
+        type: "hairpin",
+        fromNoteId: notes[0].noteId,
+        toNoteId: notes[1].noteId,
+        parameter: "loudness",
+        amount: 3,
+      },
+      {
+        type: "hairpin",
+        fromNoteId: notes[2].noteId,
+        toNoteId: notes[3].noteId,
+        parameter: "loudness",
+        amount: 3,
+      },
+    ],
+  });
+
+  assert.equal(plan.applyRequests.length, 2);
+  assert.equal(plan.apply.callCount, 2);
+  assert.equal(plan.apply.callIndex, 0);
+  assert.equal(plan.apply.expectedUserUndoSteps, 2);
+  assert.equal(plan.apply.additionalCalls.length, 1);
+  assert.equal(plan.apply.additionalCalls[0].callIndex, 1);
+  // 不得暗示多次调用是一个事务。
+  assert.match(plan.apply.sequencing, /does NOT roll back earlier committed calls/);
+  assert.deepEqual(plan.apply.additionalCalls[0].arguments, plan.applyRequests[1].arguments);
+});
+
+test("a no-op plan returns apply:null instead of an empty request", async () => {
+  const store = new SnapshotStore({ now: () => 1000 });
+  // 已经落在 1/16 网格上的音符：无事可做。
+  const context = createStoredContext(store, [
+    { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
+    { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "b" },
+  ]);
+  const plan = await new QuantizePlanService({ store, now: () => 2000 }).plan({
+    contextId: context.stored.contextId,
+    grid: { division: "1/16" },
+  });
+  assert.equal(plan.status, "no_change");
+  assert.equal(plan.apply, null);
+  assert.equal(plan.patchRequest, null);
 });

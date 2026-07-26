@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
+import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 
 // sv_plan_expression：dry-run 表情规划器（M-03 / §6.1 表情手势生成器）。
@@ -1280,6 +1281,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
       ? {}
       : { gestures: publicGestures, operations: operationsMeta }),
     ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
+    apply: buildApplyEnvelope(applyRequests, { sharedTargetConfirmationRequired: requiresSharedTargetConfirmation }),
+    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
     applyRequests,
     review: {
       requiresHumanAudition: true,

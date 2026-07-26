@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { MAX_PATCHES } from "./note-patch.js";
+import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 
 // sv_quantize_notes：无副作用量化规划器（HANDOFF §8.16 "仍未实现"清单项）。
@@ -407,6 +408,9 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
     .digest("hex")
     .slice(0, 16)}`;
   const revertedCount = planned.filter((item) => item.onsetReverted).length;
+  // 共享 target 的写入会同时改变所有 occurrence；规划阶段就如实声明。
+  const requiresSharedTargetConfirmation =
+    (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1;
   const cap = input.responseMode === "verbose" ? planned.length : MAX_LIST_ITEMS;
   if (input.responseMode !== "compact" && planned.length > cap) {
     warnings.push({
@@ -421,6 +425,11 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
   if (revertedCount > 0) {
     checklist.push(
       `${revertedCount} note(s) kept their original onset (grid collision or introduced overlap); resolve them manually if the grid position matters.`
+    );
+  }
+  if (requiresSharedTargetConfirmation) {
+    checklist.push(
+      "The target NoteGroup is shared by multiple occurrences: committing changes every one of them and requires allowSharedTargetMutation:true."
     );
   }
   if (continuation) {
@@ -477,9 +486,13 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
           })),
           perNoteTruncated: planned.length > cap,
         }),
+    apply: buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
+      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+    }),
+    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
     patchRequest,
     ...(continuation ? { continuation } : {}),
-    review: { requiresHumanReview: revertedCount > 0, checklist },
+    review: { requiresHumanReview: revertedCount > 0, requiresSharedTargetConfirmation, checklist },
     provenance: PROVENANCE,
     warnings,
     timings,
