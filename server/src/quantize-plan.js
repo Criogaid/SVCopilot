@@ -262,36 +262,54 @@ function quantizeNotes(loaded, input, warnings) {
     previousOnset = Math.max(previousOnset, item.plannedAbsOnsetBlick);
   }
 
-  // 重叠检查：量化把前音推进后音、或把后音拉进前音时，撤销引入重叠的 onset 变更
-  // （quantizeDurations:true 时优先收短前音时值）。快照时已存在的重叠不动。
-  for (let index = 0; index + 1 < perNote.length; index += 1) {
-    const current = perNote[index];
-    const next = perNote[index + 1];
-    const plannedEnd = current.plannedAbsOnsetBlick + current.plannedDurationBlick;
-    if (plannedEnd <= next.plannedAbsOnsetBlick) continue;
-    const originalEnd = current.note.absOnsetBlick + current.note.durationBlick;
-    const preExisting = originalEnd > next.note.absOnsetBlick;
-    if (preExisting) continue;
-    if (input.quantizeDurations) {
-      current.plannedDurationBlick = Math.max(1, next.plannedAbsOnsetBlick - current.plannedAbsOnsetBlick);
-      continue;
+  // onset 回退会改变相邻两侧的关系，因此循环到稳定状态；每轮只会回退尚未回退的
+  // onset 或缩短时值，状态单调收敛。快照时已存在的重叠保持不动。
+  let overlapAdjusted;
+  do {
+    overlapAdjusted = false;
+    for (let index = 0; index + 1 < perNote.length; index += 1) {
+      const current = perNote[index];
+      const next = perNote[index + 1];
+      const plannedEnd = current.plannedAbsOnsetBlick + current.plannedDurationBlick;
+      if (plannedEnd <= next.plannedAbsOnsetBlick) continue;
+      const originalEnd = current.note.absOnsetBlick + current.note.durationBlick;
+      const preExisting = originalEnd > next.note.absOnsetBlick;
+      if (preExisting) continue;
+      if (input.quantizeDurations) {
+        const trimmedDuration = Math.max(
+          1,
+          next.plannedAbsOnsetBlick - current.plannedAbsOnsetBlick
+        );
+        if (trimmedDuration !== current.plannedDurationBlick) {
+          current.plannedDurationBlick = trimmedDuration;
+          overlapAdjusted = true;
+        }
+        continue;
+      }
+      // 后音左移优先撤销；若前音同时右移，必须在后音回到原位后重新检查并一并撤销。
+      if (next.plannedAbsOnsetBlick < next.note.absOnsetBlick) {
+        next.plannedAbsOnsetBlick = next.note.absOnsetBlick;
+        next.onsetReverted = true;
+        next.revertReason = "overlap";
+        overlapAdjusted = true;
+      }
+      if (
+        current.plannedAbsOnsetBlick + current.plannedDurationBlick >
+          next.plannedAbsOnsetBlick &&
+        current.plannedAbsOnsetBlick > current.note.absOnsetBlick
+      ) {
+        current.plannedAbsOnsetBlick = current.note.absOnsetBlick;
+        current.onsetReverted = true;
+        current.revertReason = "overlap";
+        overlapAdjusted = true;
+      }
+      appendOnce(warnings, {
+        code: "OVERLAP_AFTER_QUANTIZE",
+        message:
+          "quantizing would overlap adjacent notes; every onset change contributing to the overlap was reverted (set quantizeDurations:true to trim durations instead).",
+      });
     }
-    // 谁的移动引入了重叠就撤销谁：后音左移优先撤销，其次前音右移。
-    if (next.plannedAbsOnsetBlick < next.note.absOnsetBlick) {
-      next.plannedAbsOnsetBlick = next.note.absOnsetBlick;
-      next.onsetReverted = true;
-      next.revertReason = "overlap";
-    } else {
-      current.plannedAbsOnsetBlick = current.note.absOnsetBlick;
-      current.onsetReverted = true;
-      current.revertReason = "overlap";
-    }
-    appendOnce(warnings, {
-      code: "OVERLAP_AFTER_QUANTIZE",
-      message:
-        "quantizing would overlap adjacent notes; the onset change that introduced the overlap was reverted (set quantizeDurations:true to trim durations instead).",
-    });
-  }
+  } while (overlapAdjusted);
 
   for (const item of perNote) {
     item.changedOnset = item.plannedAbsOnsetBlick !== item.note.absOnsetBlick;

@@ -89,7 +89,7 @@ MCP 客户端配置示例：
 | `sv_describe` | 获取一个类或指定方法的完整官方 API 元数据 |
 | `sv_snapshot` | 将选择区、工程或指定组读取为统一的 0-based 数据，并签发短期 `contextId` |
 | `sv_run` | 在一个不可插队的执行单元中运行有序 call/index 步骤、局部引用和断言；未返回的临时句柄自动释放，`retainResult`/`exports` 返回的句柄转移给调用方 |
-| `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高；直接接受 group/selection context 或 range context + occurrenceId，单 occurrence 可自动选择，超时返回最后一次观测而非伪造成功 |
+| `sv_wait_for_processing` | 只读轮询音素、计算属性或计算音高；直接接受 group/selection context 或 range context + occurrenceId，单 occurrence 可自动选择；computedPitch 会继承 range snapshot 已捕获的采样参数，否则需显式给出 startBlick/intervalBlick/frames；超时返回最后一次观测而非伪造成功 |
 | `sv_set_lyrics` | 对选择区或快照上下文设置歌词，可选音素/语言，执行冲突检查、撤销边界和逐项读回 |
 | `sv_patch_notes` | 按快照 noteId 对现有音符做字段级 patch，支持 expected 前置条件、dryRun plannedDiff、Undo 边界、读回验证和已验证补偿回滚；接受 group/selection snapshot context 和 range context（range noteId 自带 occurrence，共享 target 需显式确认） |
 | `sv_snapshot_range` | 一次读取可编辑范围上下文：相交音符/occurrence 身份、voice、Automation、computed pitch、attributes、processing、tempo/meter、mixer；严格拒绝未知字段；按数据类型预算分页，cursor 续读不重访宿主；`sinceToken` 命中时用 `detailCursor` 取得新 context 身份 |
@@ -108,7 +108,7 @@ MCP 客户端配置示例：
 | `sv_style_profile` | 工程级风格统计聚合（纯内存只读）：对 1--8 个 range context 逐 target 报告旋律音符（br 单独计数）的音域/音程直方图/节奏/休止、乐句长度分布、languageOverride 分布、Automation **控制点**统计（点数/min/max/mean/非默认占比/逐乐句 min-max——不是宿主插值后的可闻曲线）与可观测 vocalModeParams 键名（singer 身份仍 unobservable）；聚合层合并样本重算中位数（不平均中位数）、音程直方图求和（不跨 target 边界拼音程），并按调用方自供的 `label` 分组并排（verse/chorus 等段落标签绝不由服务推断——`sectionLabels:"caller_provided_not_inferred"`）。context 未 include automation/voiceParameters 的 target 对应剖面如实报 `not_captured` + 警告，不拿 0 冒充实测 |
 | `sv_validate_lyrics_prosody` | 咬字/韵律校验器（纯内存只读，只报告不生成 patch——修复动作指向 sv_patch_notes/sv_align_lyrics/sv_restructure_notes）：breath（br 带 language/phonemes override 或异常长换气）、japaneseMora（单音符多 mora、孤立小假名，确定性规则）、englishSyllables（元音簇音节数 vs 其后 "+" 续拍数，~85-90% 启发式）、languageConsistency（字符类别与 languageOverride 冲突、续拍残留 override）、stressAlignment（首音节重读近似 vs 拍强——无词典，只发 info 级 `confidence:"low"`，绝不报 error）、phonemeCoverage（旋律词音符的空音素；br/"-"/"+" 的空音素合法，无 processing 数据时如实 `not_captured`）。issues 带 kind/severity/confidence/suggestion，按严重度+乐谱时间排序，standard 截断 100 并警告 |
 | `sv_quantize_notes` | 无副作用量化规划器（纯内存只读）：onset 吸附到以小节边界为原点的网格（`1/4`…`1/32` 与 `1/8T`/`1/16T` 三连音，拍号变化处重锚），`strength` 线性插值、`swing` 奇数格后移（三连音网格拒绝 swing）、可选时值量化。确定性且不重排：同格碰撞的后音保留原位（`QUANTIZE_COLLISION`），量化引入的重叠撤销该 onset 变更（`OVERLAP_AFTER_QUANTIZE`，`quantizeDurations:true` 时改为收短前音）；**不提供 humanize**（随机微时移与确定性规划器契约冲突）；"br" 换气照常量化。产出带 expected onset/duration 前置条件的 `sv_patch_notes` patchRequest；>200 patch 走与 sv_align_lyrics 相同的 continuation 收敛工作流（commit → 重拍快照 → 同参重跑，显式 occurrenceId 仅在短期身份记录证明同一 target UUID 时重锚定） |
-| `sv_generate_harmony` | 调内和声规划器（纯内存只读，不创建轨道/组——先用 `sv_clone_track_from_template` 等准备目标组并重拍快照，使源与目标共享同一 range context）：旋律源音符（br 跳过）按自然音阶级映射三度/六度上下方，显式 key 或 K-S 检测（margin 过薄警告 `KEY_AMBIGUOUS` 并给出次名候选）；调外源音按最近调内音半音差近似并标 needsReview；register 越界先八度位移再跳过，位移导致声部交叉则 `VOICE_CROSSING_AVOIDED` 跳过；lyricsMode copy/sustain。目标既有完全一致的音符视为 already_applied 跳过（收敛基础），同跨度不同内容列入 `TARGET_NOTE_CONFLICT` **绝不覆盖**。产出目标本地坐标的 `sv_restructure_notes` insert 请求；>64 操作走 continuation 收敛工作流。和声好不好听 human_only |
+| `sv_generate_harmony` | 调内和声规划器（纯内存只读，不创建轨道/组——先用 `sv_clone_track_from_template` 等准备目标组并重拍快照，使源与目标共享同一 range context）：旋律源音符（br 跳过）按自然音阶级映射三度/六度上下方，显式 key 或 K-S 检测（margin 过薄警告 `KEY_AMBIGUOUS` 并给出次名候选）；整数 occurrence pitch offset 会进入实际发声音高上的调性/register/声部交叉计算，写入请求与 `harmonyPitch` 使用目标本地 MIDI，`harmonySoundingPitch` 回显实际发声坐标；非整数 offset 因下游只接受整数 MIDI 音高而明确返回 `UNSUPPORTED_PITCH_OFFSET`；调外源音按最近调内音半音差近似并标 needsReview；register 越界先八度位移再跳过，位移导致声部交叉则 `VOICE_CROSSING_AVOIDED` 跳过；lyricsMode copy/sustain。目标既有 onset、时值、本地音高和歌词均一致的音符才视为 already_applied（收敛基础），同跨度不同内容列入 `TARGET_NOTE_CONFLICT` **绝不覆盖**。产出目标本地坐标的 `sv_restructure_notes` insert 请求；>64 操作走 continuation 收敛工作流。和声好不好听 human_only |
 
 MCP 资源还提供：
 
@@ -241,7 +241,18 @@ lua ..\test\dispatcher_test.lua `
 - 官方 API 完全没有枚举已安装声库、可用 singer、当前 singer 身份或 singer 分配关系的方法；当前只能读取/写入公开的 voice 参数，能力资源会显式报告该缺口。
 - 原始 dispatcher 暂无运行时反射或通用自动回滚；高层编辑工具提供各自的 dry-run、前置条件和已验证补偿。清单预检来自下载的官方文档而非宿主反射，类型未知 handle 的调用仍需调用方谨慎确认。
 
-更完整的协议、故障模型和宿主验证清单见 [docs/architecture.md](docs/architecture.md)。
+更完整的协议与故障模型见 [docs/architecture.md](docs/architecture.md)。当前实现、验证和工作区状态见
+[HANDOFF.md](HANDOFF.md)；唯一有效的后续路线图与宿主验收计划见
+[docs/MCP_MUSIC_WORKFLOW_MASTER_PLAN.md](docs/MCP_MUSIC_WORKFLOW_MASTER_PLAN.md)。
+
+## 项目文档
+
+| 文档 | 用途 |
+| --- | --- |
+| [HANDOFF.md](HANDOFF.md) | 当前接口、验证、工作区和最近下一步 |
+| [音乐工作流主计划](docs/MCP_MUSIC_WORKFLOW_MASTER_PLAN.md) | 唯一未来路线图、宿主可行性和验收标准 |
+| [IO PIPE 架构](docs/architecture.md) | 协议、并发、生命周期和失败模型 |
+| [2026-07 归档](docs/archive/2026-07/README.md) | 已完成的 PRD、审查、研究和黑盒历史 |
 
 ## 官方 API 文档镜像
 

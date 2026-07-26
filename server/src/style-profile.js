@@ -596,7 +596,7 @@ function normalizeProfileRequest(request) {
   // 重复 target 会让聚合统计重复计数，直接拒绝。
   const seen = new Set();
   for (let index = 0; index < targets.length; index += 1) {
-    const key = `${targets[index].contextId} ${targets[index].occurrenceId ?? ""}`;
+    const key = `${targets[index].contextId}\u0000${targets[index].occurrenceId ?? ""}`;
     if (seen.has(key)) {
       throw codedError(
         "INVALID_ARGUMENTS",

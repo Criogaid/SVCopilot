@@ -1,5 +1,5 @@
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
-import { RANGE_REQUEST_LIMITS } from "./musical-range.js";
+import { getStoredComputedPitch, RANGE_REQUEST_LIMITS } from "./musical-range.js";
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
 
@@ -41,6 +41,9 @@ export class ProcessingService {
             scope = createHostScope(host);
             const roots = await scope.roots();
             resolved = { roots, group: options.group };
+          }
+          if (options.kind === "computedPitch") {
+            completeComputedPitchSampling(options, resolved.computedPitchSampling);
           }
         });
         const result = await timer.measure("processingWaitMs", () =>
@@ -239,23 +242,7 @@ function normalizeRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "occurrenceId requires contextId");
   }
   if (kind === "computedPitch") {
-    for (const [name, value] of [
-      ["startBlick", request.startBlick],
-      ["intervalBlick", request.intervalBlick],
-      ["frames", request.frames],
-    ]) {
-      const minimum = name === "startBlick" ? 0 : 1;
-      if (!Number.isSafeInteger(value) || value < minimum) {
-        throw codedError("INVALID_ARGUMENTS", `${name} must be a valid non-negative integer`);
-      }
-    }
-    // frames 会直接进入宿主计算并决定结果规模，必须在调用 SynthV 前应用单组硬上限。
-    if (request.frames > RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup) {
-      throw codedError(
-        "INVALID_ARGUMENTS",
-        `frames must be between 1 and ${RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup}`
-      );
-    }
+    validateComputedPitchSampling(request, { allowMissing: true });
   }
   if (request.requireNonEmpty !== undefined && typeof request.requireNonEmpty !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "requireNonEmpty must be a boolean");
@@ -278,7 +265,11 @@ function normalizeRequest(request) {
     RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
     1
   );
-  if (kind === "computedPitch" && minimumObservedFrames > request.frames) {
+  if (
+    kind === "computedPitch" &&
+    request.frames !== undefined &&
+    minimumObservedFrames > request.frames
+  ) {
     throw codedError(
       "INVALID_ARGUMENTS",
       "minimumObservedFrames cannot exceed the requested frame count"
@@ -303,6 +294,7 @@ function normalizeRequest(request) {
 
 async function resolveProcessingContext(host, stored, contextId, requestedOccurrenceId) {
   const selected = selectContextOccurrence(stored, contextId, requestedOccurrenceId);
+  const capturedPitch = getStoredComputedPitch(stored, selected.occurrenceId);
   const scope = createHostScope(host);
   try {
     const roots = await scope.roots();
@@ -326,6 +318,13 @@ async function resolveProcessingContext(host, stored, contextId, requestedOccurr
       roots,
       group,
       expectedNotes,
+      computedPitchSampling: capturedPitch
+        ? {
+            startBlick: capturedPitch.startBlick,
+            intervalBlick: capturedPitch.intervalBlick,
+            frames: capturedPitch.frames,
+          }
+        : null,
       target: {
         contextId,
         ...(selected.occurrenceId ? { occurrenceId: selected.occurrenceId } : {}),
@@ -342,6 +341,47 @@ async function resolveProcessingContext(host, stored, contextId, requestedOccurr
     throw codedError(
       "STALE_CONTEXT",
       `could not resolve processing target: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function completeComputedPitchSampling(options, capturedSampling) {
+  for (const name of ["startBlick", "intervalBlick", "frames"]) {
+    options[name] ??= capturedSampling?.[name];
+  }
+  validateComputedPitchSampling(options, { allowMissing: false });
+  if (options.minimumObservedFrames > options.frames) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "minimumObservedFrames cannot exceed the requested frame count"
+    );
+  }
+}
+
+function validateComputedPitchSampling(values, { allowMissing }) {
+  for (const [name, minimum] of [
+    ["startBlick", 0],
+    ["intervalBlick", 1],
+    ["frames", 1],
+  ]) {
+    const value = values[name];
+    if (value === undefined && allowMissing) continue;
+    if (value === undefined) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `${name} is required for computedPitch unless it can be inferred from a range context captured with include:["computedPitch"]`
+      );
+    }
+    if (!Number.isSafeInteger(value) || value < minimum) {
+      const requirement = minimum === 0 ? "a non-negative safe integer" : "a positive safe integer";
+      throw codedError("INVALID_ARGUMENTS", `${name} must be ${requirement}`);
+    }
+  }
+  // frames 会直接进入宿主计算并决定结果规模，必须在调用 SynthV 前应用单组硬上限。
+  if (values.frames > RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `frames must be between 1 and ${RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup}`
     );
   }
 }

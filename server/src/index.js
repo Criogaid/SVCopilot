@@ -495,7 +495,7 @@ const TOOLS = [
   {
     name: "sv_wait_for_processing",
     description:
-      "Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide occurrenceId; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.",
+      'Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide occurrenceId; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT. For computedPitch, omitted startBlick/intervalBlick/frames inherit that occurrence\'s sampling when the range context was captured with include:["computedPitch"]; otherwise all three are required. Explicit values override captured sampling. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -528,12 +528,24 @@ const TOOLS = [
           description:
             "Optional phoneme coverage condition, default false. It never changes processing state; on timeout, complete results remain ready and the tool reports phoneme_coverage_unsatisfied.",
         },
-        startBlick: { type: "integer", minimum: 0 },
-        intervalBlick: { type: "integer", minimum: 1 },
+        startBlick: {
+          type: "integer",
+          minimum: 0,
+          description:
+            'Computed pitch only. Optional when inferred from a range context captured with include:["computedPitch"]; otherwise required.',
+        },
+        intervalBlick: {
+          type: "integer",
+          minimum: 1,
+          description:
+            'Computed pitch only. Optional when inferred from a range context captured with include:["computedPitch"]; otherwise required.',
+        },
         frames: {
           type: "integer",
           minimum: 1,
           maximum: RANGE_REQUEST_LIMITS.computedPitchFramesPerGroup,
+          description:
+            'Computed pitch only. Optional when inferred from a range context captured with include:["computedPitch"]; otherwise required.',
         },
         minimumObservedFrames: {
           type: "integer",
@@ -1309,7 +1321,7 @@ const TOOLS = [
   {
     name: "sv_generate_harmony",
     description:
-      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) a diatonic third or sixth below/above using an explicit key or Krumhansl-Schmuckler detection (a thin margin warns KEY_AMBIGUOUS with the runner-up; pass harmony.key to lock the mapping). Non-diatonic source notes get a nearest-scale-tone semitone-offset approximation flagged needsReview. Register bounds trigger one octave shift, then skip; a shift that would cross the source voice is skipped as VOICE_CROSSING_AVOIDED. lyricsMode "copy" copies source lyrics, "sustain" uses the first melodic lyric then "-" melisma. Existing target notes that match a planned note exactly are skipped as already_applied (convergence basis); overlapping-but-different target notes become TARGET_NOTE_CONFLICT and are NEVER overwritten. Returns one ready-to-submit sv_restructure_notes insert request in the target\'s local coordinates; plans above the 64-operation cap return the first 64 plus a continuation block (commit → re-snapshot → re-run with identical options; already-inserted notes skip as already_applied so the loop converges to no_change). Whether the harmony sounds good is human-only.',
+      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) a diatonic third or sixth below/above using an explicit key or Krumhansl-Schmuckler detection (a thin margin warns KEY_AMBIGUOUS with the runner-up; pass harmony.key to lock the mapping). Integer occurrence pitch offsets participate in key/register/voice-crossing calculations in sounding MIDI space; perNote.harmonyPitch and the insert request use target-local MIDI, while perNote.harmonySoundingPitch reports the sounding coordinate. A non-integer occurrence offset returns UNSUPPORTED_PITCH_OFFSET because sv_restructure_notes requires integer MIDI note pitches. Non-diatonic source notes get a nearest-scale-tone semitone-offset approximation flagged needsReview. Register bounds trigger one octave shift, then skip; a shift that would cross the source voice is skipped as VOICE_CROSSING_AVOIDED. lyricsMode "copy" copies source lyrics, "sustain" uses the first melodic lyric then "-" melisma. Existing target notes that match onset, duration, local pitch, and lyrics are skipped as already_applied (convergence basis); overlapping-but-different target notes become TARGET_NOTE_CONFLICT and are NEVER overwritten. Returns one ready-to-submit sv_restructure_notes insert request in the target\'s local coordinates; plans above the 64-operation cap return the first 64 plus a continuation block (commit → re-snapshot → re-run with identical options; already-inserted notes skip as already_applied so the loop converges to no_change). Whether the harmony sounds good is human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,

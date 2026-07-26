@@ -8,3 +8,7 @@ Thumbs.db
 
 # transient IPC (file-IPC legacy; runtime scratch)
 *.tmp
+
+.serena/
+.codex/
+.codegraph/

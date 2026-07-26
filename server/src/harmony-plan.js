@@ -149,12 +149,14 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
   }
   const sourceOffset = source.timeOffsetBlick ?? 0;
+  const sourcePitchOffset = occurrencePitchOffset(source, "source");
+  const targetPitchOffset = occurrencePitchOffset(target, "target");
   const allSourceNotes = [...(source.noteFingerprints ?? [])]
     .map((fingerprint) => ({
       noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
-      pitch: fingerprint.pitch,
+      pitch: fingerprint.pitch + sourcePitchOffset,
       absOnsetBlick: sourceOffset + fingerprint.onsetBlick,
       durationBlick: fingerprint.durationBlick,
     }))
@@ -198,8 +200,21 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
     skippedBreathCount: selected.length - melodicNotes.length,
     targetNotes,
     targetOffset: target.timeOffsetBlick ?? 0,
+    sourcePitchOffset,
+    targetPitchOffset,
     quarterBlick,
   };
+}
+
+function occurrencePitchOffset(occurrence, label) {
+  const pitchOffset = occurrence.pitchOffsetSemitone ?? 0;
+  if (!Number.isSafeInteger(pitchOffset)) {
+    throw codedError(
+      "UNSUPPORTED_PITCH_OFFSET",
+      `${label} occurrence uses a non-integer pitchOffsetSemitone; sv_generate_harmony cannot produce an integer-MIDI sv_restructure_notes request for it`
+    );
+  }
+  return pitchOffset;
 }
 
 // selector 解析 + continuation 重锚定（与 quantize 同模式：位置后缀寻找候选，
@@ -383,7 +398,14 @@ function mapHarmony(loaded, input, warnings) {
       });
       continue;
     }
-    item.harmonyPitch = harmonyPitch;
+    const targetLocalPitch = harmonyPitch - loaded.targetPitchOffset;
+    if (targetLocalPitch < 0 || targetLocalPitch > 127) {
+      item.status = "skipped";
+      item.skipReason = "target_local_midi_range";
+      continue;
+    }
+    item.harmonyPitch = targetLocalPitch;
+    item.harmonySoundingPitch = harmonyPitch;
     // 歌词：copy 原样复制；sustain 首个旋律词用源词、其余 "-" 延音。
     if (input.lyricsMode === "copy") {
       item.harmonyLyrics = note.lyrics;
@@ -416,7 +438,8 @@ function mapHarmony(loaded, input, warnings) {
       (note) =>
         note.localOnsetBlick === item.localOnsetBlick &&
         note.durationBlick === item.durationBlick &&
-        note.pitch === item.harmonyPitch
+        note.pitch === item.harmonyPitch &&
+        note.lyrics === item.harmonyLyrics
     );
     if (exact) {
       item.status = "already_applied";
@@ -433,8 +456,10 @@ function mapHarmony(loaded, input, warnings) {
         sourceNoteId: item.sourceNoteId,
         plannedOnsetBlick: item.localOnsetBlick,
         plannedPitch: item.harmonyPitch,
+        plannedLyrics: item.harmonyLyrics,
         existingNoteId: overlapping.noteId,
         existingPitch: overlapping.pitch,
+        existingLyrics: overlapping.lyrics,
       });
     }
   }
@@ -565,6 +590,7 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
       trackIndex: loaded.source.trackIndex,
       groupIndex: loaded.source.groupIndex,
       targetGroupUuid: loaded.source.targetGroupUuid,
+      pitchOffsetSemitone: loaded.sourcePitchOffset,
     },
     target: {
       occurrenceId: loaded.target.occurrenceId,
@@ -572,6 +598,7 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
       groupIndex: loaded.target.groupIndex,
       targetGroupUuid: loaded.target.targetGroupUuid,
       timeOffsetBlick: loaded.targetOffset,
+      pitchOffsetSemitone: loaded.targetPitchOffset,
       sharedTargetOccurrences,
     },
     key: planned.key,
@@ -590,6 +617,9 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
             sourcePitch: item.sourcePitch,
             status: item.status,
             ...(item.harmonyPitch !== undefined ? { harmonyPitch: item.harmonyPitch } : {}),
+            ...(item.harmonySoundingPitch !== undefined
+              ? { harmonySoundingPitch: item.harmonySoundingPitch }
+              : {}),
             ...(item.harmonyLyrics !== undefined ? { harmonyLyrics: item.harmonyLyrics } : {}),
             ...(item.localOnsetBlick !== undefined
               ? { targetLocalOnsetBlick: item.localOnsetBlick }

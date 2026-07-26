@@ -16,6 +16,8 @@ function createStoredContext(store, options = {}) {
     sourceNotes = [],
     targetNotes = [],
     targetOffsetBlick = 0,
+    sourcePitchOffsetSemitone = 0,
+    targetPitchOffsetSemitone = 0,
     sourceUuid = "uuid-melody",
     targetUuid = "uuid-harmony",
     sharedTargetOccurrences = null,
@@ -46,7 +48,7 @@ function createStoredContext(store, options = {}) {
     groupIndex: 0,
     targetGroupUuid: sourceUuid,
     timeOffsetBlick: 0,
-    pitchOffsetSemitone: 0,
+    pitchOffsetSemitone: sourcePitchOffsetSemitone,
     sharedTargetOccurrences: [sourceId],
     noteFingerprints: sourceNotes.map((note, index) => fingerprint(sourceId, note, index)),
   });
@@ -56,7 +58,7 @@ function createStoredContext(store, options = {}) {
     groupIndex: 0,
     targetGroupUuid: targetUuid,
     timeOffsetBlick: targetOffsetBlick,
-    pitchOffsetSemitone: 0,
+    pitchOffsetSemitone: targetPitchOffsetSemitone,
     sharedTargetOccurrences: sharedTargetOccurrences ?? [targetId],
     noteFingerprints: targetNotes.map((note, index) => fingerprint(targetId, note, index)),
   });
@@ -314,6 +316,72 @@ test("existing identical target notes are skipped as already_applied; different 
   assert.equal(result.conflicts[0].existingPitch, 50);
   assert.ok(result.warnings.some((warning) => warning.code === "TARGET_NOTE_CONFLICT"));
   assert.equal(result.restructureRequest.arguments.operations.length, 3);
+});
+
+test("same pitch and span with different lyrics is a target conflict, not already_applied", async () => {
+  const store = createStore();
+  const { stored, targetId } = createStoredContext(store, {
+    sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
+    targetNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 57, lyrics: "WRONG" }],
+  });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    targetOccurrenceId: targetId,
+    harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+    lyricsMode: "copy",
+  });
+
+  assert.equal(result.summary.alreadyApplied, 0);
+  assert.equal(result.summary.conflicts, 1);
+  assert.equal(result.conflicts[0].plannedLyrics, "do");
+  assert.equal(result.conflicts[0].existingLyrics, "WRONG");
+  assert.ok(result.warnings.some((warning) => warning.code === "TARGET_NOTE_CONFLICT"));
+});
+
+test("occurrence pitch offsets are applied in sounding space and converted to target-local pitch", async () => {
+  const store = createStore();
+  const sourceShifted = createStoredContext(store, {
+    sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
+    sourcePitchOffsetSemitone: 12,
+  });
+  const sourceResult = await createService(store).plan({
+    contextId: sourceShifted.stored.contextId,
+    targetOccurrenceId: sourceShifted.targetId,
+    harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+  });
+  assert.equal(sourceResult.restructureRequest.arguments.operations[0].note.pitch, 69);
+  assert.equal(sourceResult.perNote[0].harmonySoundingPitch, 69);
+
+  const targetShifted = createStoredContext(store, {
+    sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
+    targetPitchOffsetSemitone: 12,
+  });
+  const targetResult = await createService(store).plan({
+    contextId: targetShifted.stored.contextId,
+    targetOccurrenceId: targetShifted.targetId,
+    harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+  });
+  assert.equal(targetResult.restructureRequest.arguments.operations[0].note.pitch, 45);
+  assert.equal(targetResult.perNote[0].harmonyPitch, 45);
+  assert.equal(targetResult.perNote[0].harmonySoundingPitch, 57);
+  assert.equal(targetResult.source.pitchOffsetSemitone, 0);
+  assert.equal(targetResult.target.pitchOffsetSemitone, 12);
+});
+
+test("fractional occurrence pitch offsets fail before emitting a non-integer restructure request", async () => {
+  const store = createStore();
+  const { stored, targetId } = createStoredContext(store, {
+    sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
+    sourcePitchOffsetSemitone: 0.5,
+  });
+  await assert.rejects(
+    createService(store).plan({
+      contextId: stored.contextId,
+      targetOccurrenceId: targetId,
+      harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+    }),
+    (error) => error.code === "UNSUPPORTED_PITCH_OFFSET"
+  );
 });
 
 test("plans above the operation cap return the first 64 plus a continuation workflow", async () => {

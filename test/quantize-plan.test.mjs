@@ -227,6 +227,33 @@ test("onset changes that introduce overlaps are reverted unless durations are qu
   assert.ok(!trimmed.warnings.some((warning) => warning.code === "OVERLAP_AFTER_QUANTIZE"));
 });
 
+test("overlap repair rechecks the pair after both adjacent notes moved", async () => {
+  const store = createStore();
+  const firstOnset = Math.round(Q * (30 / 96));
+  const secondOnset = Math.round(Q * (100 / 96));
+  const firstDuration = Math.round(Q * (60 / 96));
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: firstOnset, durationBlick: firstDuration },
+      { onsetBlick: secondOnset, durationBlick: Math.round(Q * (20 / 96)) },
+    ],
+  });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    grid: { division: "1/8" },
+  });
+
+  // 两音原本不重叠；前音右移且后音左移时，两个移动都必须撤销。
+  assert.equal(result.perNote[0].plannedOnsetBlick, firstOnset);
+  assert.equal(result.perNote[1].plannedOnsetBlick, secondOnset);
+  assert.ok(
+    result.perNote[0].plannedOnsetBlick + firstDuration <=
+      result.perNote[1].plannedOnsetBlick
+  );
+  assert.equal(result.perNote[0].revertReason, "overlap");
+  assert.equal(result.perNote[1].revertReason, "overlap");
+});
+
 test("set.onsetBlick is written in group-local coordinates when the occurrence has a time offset", async () => {
   const store = createStore();
   const offset = 2 * BAR_4_4;

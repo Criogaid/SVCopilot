@@ -677,12 +677,20 @@ test("ProcessingService resolves single and explicit range occurrences", async (
   const model = createSynthModel();
   const callHost = model.host.call;
   let noteGetterCalls = 0;
+  const computedPitchCalls = [];
   model.host.call = async (request) => {
     if (
       model.handles.notes.some((note) => note.__handle__ === request.handle?.__handle__) &&
       request.method.startsWith("get")
     ) {
       noteGetterCalls += 1;
+    }
+    if (
+      request.handle?.__handle__ === model.handles.sv.__handle__ &&
+      request.method === "getComputedPitchForGroup"
+    ) {
+      computedPitchCalls.push(request.args);
+      return Array.from({ length: request.args[3] }, (_, index) => 60 + index / 100);
     }
     return callHost(request);
   };
@@ -714,6 +722,38 @@ test("ProcessingService resolves single and explicit range occurrences", async (
   assert.equal(automatic.target.occurrenceId, occurrenceId);
   assert.equal(automatic.target.groupUuid, "group-1");
   assert.equal(automatic.data.evidence.expectedNotes, 2);
+
+  await assert.rejects(
+    processing.wait({
+      contextId: stored.contextId,
+      kind: "computedPitch",
+      timeoutMs: 0,
+    }),
+    (error) =>
+      error.code === "INVALID_ARGUMENTS" &&
+      /captured with include:\["computedPitch"\]/.test(error.message)
+  );
+  assert.equal(computedPitchCalls.length, 0);
+
+  stored.context.computedPitchByOccurrence = {
+    [occurrenceId]: {
+      startBlick: 705_600,
+      intervalBlick: 176_400,
+      frames: 4,
+      values: [null, null, null, null],
+    },
+  };
+  const inferredPitch = await processing.wait({
+    contextId: stored.contextId,
+    kind: "computedPitch",
+    timeoutMs: 0,
+  });
+  assert.equal(inferredPitch.status, "succeeded");
+  assert.deepEqual(computedPitchCalls[0].slice(1), [705_600, 176_400, 4]);
+  assert.deepEqual(inferredPitch.data.evidence, {
+    requestedFrames: 4,
+    observedFrames: 4,
+  });
 
   const secondOccurrenceId = `${stored.contextId}:t:0:r:1`;
   stored.context.occurrences.push({
