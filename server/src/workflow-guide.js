@@ -70,6 +70,7 @@ const GLOBAL_RULES = {
   humanGates: [
     "Whether anything sounds good, better, or in tune to the ear is human_only. MCP has no audio input.",
     "Audition tools only organize playback for a person. Never claim an audition sounded correct.",
+    "sv_audition_compare plays two EXISTING versions (different track solos) back to back. It cannot apply a temporary edit for variant B, because the official API has no Undo call and such a write could not be taken back. To compare an edit, commit it to a duplicate track first.",
   ],
   capabilityBlocked: [
     "No audio render, export, or audio bytes exist in the official API. Track.setBounced only flags the Render Panel. Ask the human to render in the UI.",
@@ -784,7 +785,7 @@ const RECIPES = [
     title: "Organize playback so a person can judge the result",
     goal: "Play a range for a human and restore the project state afterwards, without claiming to hear anything.",
     requiredCapabilities: ["playback"],
-    expectedCalls: { min: 1, max: 3 },
+    expectedCalls: { min: 1, max: 4 },
     humanGates: ["Every perceptual conclusion. MCP has no audio input."],
     captureTemplate: null,
     steps: [
@@ -826,6 +827,30 @@ const RECIPES = [
         readingRules: [
           "Mixer fields are restored ONLY if they still hold the audition-set value; user changes are left alone and reported as RESTORE_SKIPPED_USER_CHANGES.",
           "With autoStop:true this step is unnecessary unless the human wants to stop early.",
+        ],
+      },
+      {
+        n: 4,
+        tool: "sv_audition_compare",
+        purpose:
+          "A/B two EXISTING versions back to back (e.g. an original track against an edited duplicate) so a person can choose between them.",
+        arguments: {
+          fromBlick: 0,
+          toBlick: 2822400000,
+          variants: [
+            { label: "a", soloTrackIndices: [0] },
+            { label: "b", soloTrackIndices: [1] },
+          ],
+          estimatedDurationMs: 8000,
+        },
+        optional: true,
+        acceptable: ["succeeded (playing_a, then gap, then playing_b, then restored)"],
+        readingRules: [
+          "Non-blocking: it returns a comparisonId immediately. Poll sv_get_audition_compare or stop early with sv_stop_audition_compare (both idempotent).",
+          "Variant A is fully stopped and restored BEFORE variant B starts, which is what gives both variants the same playhead, range, and mixer baseline.",
+          "It NEVER applies a temporary edit for variant B: the official API has no Undo call, so an audition-only write could not be taken back. To compare an edit, commit it to a duplicate track first, then A/B the two tracks.",
+          "It creates no project-content Undo record — only mixer solo and playhead are touched, and both are restored.",
+          "Ask the person which variant they preferred. Never state a preference yourself.",
         ],
       },
     ],
@@ -891,6 +916,11 @@ const TOOL_SELECTION = {
     { need: "Several edit kinds in ONE Undo", tool: "sv_edit_phrase" },
     { need: "Read observable voice parameters", tool: "sv_get_voice_profile" },
     { need: "Let a human listen", tool: "sv_start_audition" },
+    {
+      need: "Let a human A/B two existing versions",
+      tool: "sv_audition_compare",
+      note: "Compares two solo configurations over the same range. It never applies a temporary edit for variant B — there is no Undo API, so an audition-only write could not be taken back.",
+    },
     {
       need: "Change the editor note selection",
       tool: "sv_set_selection",

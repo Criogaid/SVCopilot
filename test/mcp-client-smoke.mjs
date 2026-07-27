@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 34);
+  assert.equal(listed.tools.length, 37);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -106,6 +106,14 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_generate_harmony"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_vocal_context"));
+  const compareTool = listed.tools.find((tool) => tool.name === "sv_audition_compare");
+  assert.ok(compareTool);
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_get_audition_compare"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_stop_audition_compare"));
+  // A/B 只比较既有版本：不做"临时编辑 -> B -> 还原"，因为官方无 Undo 调用。
+  assert.match(compareTool.description, /NEVER applies a temporary musical edit/);
+  assert.match(compareTool.description, /no project-content Undo record/);
+  assert.match(compareTool.description, /human_only/);
   const selectionTool = listed.tools.find((tool) => tool.name === "sv_set_selection");
   assert.ok(selectionTool);
   // 高层 selection 的存在理由：宿主 boolean 不可信，必须以读回为准。
@@ -269,6 +277,8 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_generate_harmony"));
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_vocal_context"));
   assert.deepEqual(capabilities.interfaces.editorState, ["sv_set_selection"]);
+  assert.ok(capabilities.interfaces.audition.includes("sv_audition_compare"));
+  assert.ok(capabilities.interfaces.audition.includes("sv_stop_audition_compare"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,

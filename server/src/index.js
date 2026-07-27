@@ -20,6 +20,7 @@ import {
   searchApi,
 } from "./api-catalog.js";
 import { HostSession } from "./host-session.js";
+import { AuditionCompareService } from "./audition-compare.js";
 import { AuditionService } from "./audition.js";
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
 import { ExpressionPlanService } from "./expression-plan.js";
@@ -71,6 +72,7 @@ const rangeSnapshotService = new RangeSnapshotService(hostSession, { snapshotSer
 const parameterCurveService = new ParameterCurveService(hostSession, { snapshotService });
 const noteStructureService = new NoteStructureService(hostSession, snapshotService);
 const auditionService = new AuditionService(hostSession);
+const auditionCompareService = new AuditionCompareService(auditionService);
 const voiceProfileService = new VoiceProfileService(hostSession);
 const phraseEditService = new PhraseEditService(hostSession, snapshotService);
 // 纯内存分析服务：与 range snapshot 共享同一 SnapshotStore，不访问宿主。
@@ -2006,6 +2008,111 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
+    name: "sv_audition_compare",
+    description:
+      'Organize a non-blocking human A/B audition of two EXISTING versions over the same range — different track solo configurations, e.g. an original take against an edited duplicate track. Returns a comparisonId immediately; the variants play in sequence with a gap between them. Every variant runs through the same hardened sv_start_audition kernel (verified startup, auto-stop timing, restore-only-if-the-user-has-not-changed-it mixer semantics, per-variant recovery payload), so playback recovery is never reimplemented here. Variant A is fully stopped and restored BEFORE variant B starts, which is what makes both variants share one playhead, range, and mixer baseline. This tool NEVER applies a temporary musical edit for variant B: the official API has no Undo call, so there is no general recovery token after a successful commit, and an un-undoable "audition-only write" would be dishonest. It therefore creates no project-content Undo record; only mixer solo and playhead are touched, and both are restored. MCP cannot hear audio: the response reports playback order and restore evidence only, and perception stays human_only — ask the person which variant they preferred and never state a preference yourself.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        fromBlick: { type: "integer", minimum: 0 },
+        toBlick: { type: "integer", minimum: 1 },
+        variants: {
+          type: "array",
+          minItems: 2,
+          maxItems: 2,
+          description: 'Exactly two variants labelled "a" and "b" with different solo configurations.',
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              label: { enum: ["a", "b"] },
+              soloTrackIndices: {
+                type: "array",
+                minItems: 1,
+                maxItems: 32,
+                items: { type: "integer", minimum: 0 },
+                description: "0-based tracks soloed while this variant plays.",
+              },
+            },
+            required: ["label", "soloTrackIndices"],
+          },
+        },
+        order: {
+          type: "array",
+          minItems: 2,
+          maxItems: 8,
+          items: { enum: ["a", "b"] },
+          description:
+            'Explicit playback order, e.g. ["a","b","a","b"]. Mutually exclusive with repeats; must include both labels.',
+        },
+        repeats: {
+          type: "integer",
+          minimum: 1,
+          maximum: 4,
+          default: 1,
+          description: 'Number of a-then-b rounds when order is omitted. Mutually exclusive with order.',
+        },
+        gapMs: {
+          type: "integer",
+          minimum: 0,
+          maximum: 5000,
+          default: 400,
+          description: "Silence between variants so the listener can reset.",
+        },
+        estimatedDurationMs: {
+          type: "integer",
+          minimum: 100,
+          maximum: 600000,
+          default: 8000,
+          description:
+            "How long the range takes to play, used only to schedule the switch between variants. The authoritative stop is still the underlying audition's own auto-stop. Compute it from the range's seconds when you know the tempo.",
+        },
+        autoRestore: {
+          type: "boolean",
+          default: true,
+          description: "Restore saved playhead and temporary solo state after each variant.",
+        },
+        stopToleranceMs: {
+          type: "integer",
+          minimum: 0,
+          maximum: 2000,
+          default: 100,
+          description: "Passed through to each variant's audition for overrun reporting.",
+        },
+      },
+      required: ["fromBlick", "toBlick", "variants"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_get_audition_compare",
+    description:
+      "Read the current state of an A/B comparison, including which variant is playing, the transition history, and the live playback state of the underlying audition. Idempotent; once the comparison is finished it returns the remembered terminal result.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { comparisonId: { type: "string", minLength: 1 } },
+      required: ["comparisonId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_stop_audition_compare",
+    description:
+      "Stop an A/B comparison early and restore the saved playhead and temporary solo state through the underlying audition kernel. Idempotent: repeat calls return the same remembered terminal result. Mixer fields the user changed themselves are left alone and reported.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { comparisonId: { type: "string", minLength: 1 } },
+      required: ["comparisonId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  },
+  {
     name: "sv_get_voice_profile",
     description:
       "Read observable voice parameters (getVoice, including vocalModeParams names) for a track's groups. The official API exposes NO singer identity, installed voicebank catalog, or assignment relation — those are reported as unobservable, never inferred.",
@@ -2277,6 +2384,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_set_selection":
         result = await selectionService.setSelection(args);
         break;
+      case "sv_audition_compare":
+        result = await auditionCompareService.compare(args);
+        break;
+      case "sv_get_audition_compare":
+        result = await auditionCompareService.get(args);
+        break;
+      case "sv_stop_audition_compare":
+        result = await auditionCompareService.stop(args);
+        break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
         break;
@@ -2513,6 +2629,9 @@ function capabilities() {
         "sv_get_audition",
         "sv_stop_audition",
         "sv_restore_audition",
+        "sv_audition_compare",
+        "sv_get_audition_compare",
+        "sv_stop_audition_compare",
       ],
       voice: ["sv_get_voice_profile", "sv_clone_track_from_template"],
       editorState: ["sv_set_selection"],

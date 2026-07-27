@@ -114,6 +114,8 @@ MCP 客户端配置示例：
 
 | `sv_set_selection` | 高层编辑器选择操作（`clear`/`select`/`add`/`remove`）：真实宿主的 `unselectNote()` 已观察到**状态改变却返回 false**，因此本工具**绝不把宿主 boolean 当作变更证据**——操作前后各读一次 selection，`changed` 完全由读回差异判定，宿主原始返回值保留在 `hostResults` 中作对照，两者矛盾时发 `HOST_RETURN_DISAGREES_WITH_READBACK` 并声明以读回为准。目标可用 snapshot/range context 的 noteId（range noteId 可再用 occurrenceId 收窄），或直接用宿主当前编辑组的 `indexInGroup`（无快照时可用）；快照后组变短时报 `NOTE_INDEX_OUT_OF_RANGE`，绝不悄悄选中另一个音符。selection 是 UI 状态，`undo.recordCreated:false`，绝不调用 `newUndoRecord()` |
 
+| `sv_audition_compare` / `sv_get_audition_compare` / `sv_stop_audition_compare` | 既有版本的人类 A/B 试听编排：在同一范围上依次播放两种 track solo 配置（例如原轨 vs 已编辑的复制轨）。**不复制播放恢复内核**——每个 variant 都走既有 `sv_start_audition`，启动读回校验、auto-stop、“用户改过就不覆盖”的 mixer 恢复与 recovery payload 全部原样复用。A 完整停止并恢复后 B 才开始，这正是两个 variant 共用同一 playhead/范围/mixer 基线的原因。非阻塞返回 `comparisonId`，get/stop 幂等。**绝不为 variant B 应用临时编辑**：官方 API 没有 Undo 调用，成功提交后不存在通用恢复 token，那样会制造无法撤销的“试听用写入”；要比较编辑，先提交到复制轨再 A/B 两条轨。因此它不产生任何工程内容 Undo，只触碰 mixer solo 与 playhead 且都会恢复。MCP 听不到声音：只报播放顺序与恢复证据，`perception` 恒为 human_only |
+
 MCP 资源还提供：
 
 - `svapi://manifest`：完整官方 API 清单。

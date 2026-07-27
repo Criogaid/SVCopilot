@@ -175,6 +175,26 @@ test("the guide covers the required recipes and never invents host capabilities"
   );
 });
 
+test("the audition recipe offers A/B without promising an undoable temporary edit", () => {
+  const { recipe } = musicWorkflowGuideRecipe("audition_for_human", "0.8.0");
+  const compare = recipe.steps.find((step) => step.tool === "sv_audition_compare");
+  assert.ok(compare, "the guide must show the A/B comparison");
+  const rules = compare.readingRules.join(" ");
+  assert.match(rules, /fully stopped and restored BEFORE variant B starts/i);
+  assert.match(rules, /NEVER applies a temporary edit/i);
+  assert.match(rules, /no Undo call/i);
+  assert.match(rules, /creates no project-content Undo record/i);
+  assert.match(rules, /Never state a preference yourself/i);
+
+  // 全局人类门也必须写明这条边界，而不是只藏在一个 recipe 里。
+  const index = musicWorkflowGuideIndex("0.8.0");
+  assert.ok(
+    index.globalRules.humanGates.some(
+      (line) => /sv_audition_compare/.test(line) && /cannot apply a temporary edit/i.test(line)
+    )
+  );
+});
+
 test("recipes that consume range data declare what the capture must include", () => {
   // 纯内存分析器无法回头读宿主，所以每个消费 range context 的 step 必须声明必要 include。
   const analyzerRecipes = ["analyze_vocal_phrase", "quantize_notes", "verify_after_edit"];
