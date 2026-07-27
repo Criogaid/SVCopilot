@@ -413,7 +413,17 @@ try {
     "scaleDegrees",
     "phrases",
     "statistics",
+    "metricalRoles",
+    "chordCandidates",
+    "cadence",
+    "tensionResolution",
   ]);
+  // P1-A 的和声语境 section 是 opt-in，且候选下限为 2：歧义不得被写成唯一事实。
+  assert.match(analyzeSchema.properties.include.description, /OPT-IN/);
+  assert.match(analyzeSchema.properties.include.description, /melody_only/);
+  assert.equal(analyzeSchema.properties.maxChordCandidates.minimum, 2);
+  assert.equal(analyzeSchema.properties.maxCadenceCandidates.minimum, 2);
+  assert.deepEqual(analyzeSchema.properties.harmonicWindow.enum, ["bar", "half_bar"]);
   const analyzeUnknownContext = parseToolError(
     await client.callTool({
       name: "sv_analyze_phrase",

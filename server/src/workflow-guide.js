@@ -251,10 +251,19 @@ const RECIPES = [
         n: 4,
         tool: "sv_analyze_phrase",
         purpose:
-          "Optional drill-down when you need one section's full detail — call whatever sections[].details names, with its details.arguments verbatim.",
+          "Optional drill-down when you need one section's full detail, or the OPT-IN harmonic-context sections that the composite call does not include.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          include: ["key", "scaleDegrees", "phrases", "statistics"],
+          include: [
+            "key",
+            "scaleDegrees",
+            "phrases",
+            "statistics",
+            "metricalRoles",
+            "chordCandidates",
+            "cadence",
+            "tensionResolution",
+          ],
           responseMode: "verbose",
         },
         optional: true,
@@ -262,6 +271,10 @@ const RECIPES = [
         readingRules: [
           "key.candidates is RANKED. When the margin to the runner-up is thin (relative major/minor on short melodies), report both.",
           "Breath notes (lyrics \"br\") are excluded from key/phrase/statistics by design and reported as breathEvents.",
+          "metricalRoles, chordCandidates, cadence, and tensionResolution are opt-in and all declare evidenceScope:\"melody_only\": only ONE melodic line was observed, so a chord candidate is a pitch set COMPATIBLE with the melody, never an observation of the real accompaniment. Never state a chord progression as fact from this alone.",
+          "Windows and phrase endings flagged ambiguous carry several ranked candidates — report the alternatives, not just the top score. The runner-up gap is a ranking margin, not a probability.",
+          "Without meter marks, metricalRoles and chordCandidates report not_captured rather than assuming 4/4.",
+          "tensionResolution names BOTH noteIds plus the actual semitone motion; a suspension-like descent is only a melodic contour, since the accompaniment that would make it a real suspension is unobservable.",
         ],
       },
       {
@@ -859,6 +872,12 @@ const TOOL_SELECTION = {
     { need: "Capture an editable phrase", tool: "sv_snapshot_range" },
     { need: "Diagnose a phrase (start here)", tool: "sv_analyze_vocal_context" },
     { need: "Key / phrases / scale degrees", tool: "sv_analyze_phrase" },
+    {
+      need: "Chord candidates / cadence / strong beats",
+      tool: "sv_analyze_phrase",
+      scope: "melody_only",
+      note: "Opt-in include sections. A single melody cannot determine the real harmony — report candidates, never a chord progression as fact.",
+    },
     { need: "Lyric and prosody problems", tool: "sv_validate_lyrics_prosody" },
     { need: "Objective intonation evidence", tool: "sv_compare_computed_pitch" },
     { need: "Cross-section style statistics", tool: "sv_style_profile" },

@@ -1108,7 +1108,7 @@ const TOOLS = [
   {
     name: "sv_analyze_phrase",
     description:
-      'Read-only music-theory analysis over a range context (include ["notes"]): duration-weighted pitch-class histogram correlated against all 24 Krumhansl-Kessler key profiles returns RANKED key candidates with Pearson correlations and the margin to the runner-up (relative major/minor ambiguity on short melodies is expected and exposed, not hidden); per-note scale degrees with non-diatonic flags (sharps-only spelling, natural-minor degrees); rest-threshold phrase segmentation with climax/ambitus/rests; register, interval, and rhythm statistics. Breath notes (lyrics "br", a host convention) carry a nominal pitch but no singable pitch: they are excluded from key/scale-degree/phrase/statistics entirely and reported separately as breathEvents with nominalPitch (noteCount counts melodic notes only; a range that is all breaths fails with NO_MELODIC_NOTES). Everything is derived/heuristic, never claimed as host fact; musical judgment stays human-only.',
+      'Read-only music-theory analysis over a range context (include ["notes"]): duration-weighted pitch-class histogram correlated against all 24 Krumhansl-Kessler key profiles returns RANKED key candidates with Pearson correlations and the margin to the runner-up (relative major/minor ambiguity on short melodies is expected and exposed, not hidden); per-note scale degrees with non-diatonic flags (sharps-only spelling, natural-minor degrees); rest-threshold phrase segmentation with climax/ambitus/rests; register, interval, and rhythm statistics. Four OPT-IN harmonic-context sections extend it: metricalRoles (bar/beat position and downbeat/strong/weak/offbeat weight per note, plus anacrusis detection), chordCandidates (pitch classes aggregated per bar or half-bar weighted by duration AND metric position, matched against triad/seventh templates into a ranked list with root, quality, covered chord tones, ABSENT chord tones, non-chord tones, score, and runner-up gap), cadence (phrase endings ranked heuristically from key candidates, final and penultimate scale degrees, and metric position), and tensionResolution (leading-tone resolution or escape, chromatic resolution, and suspension-like descents, each naming BOTH noteIds plus the actual semitone motion and scale degrees). CRITICAL HONESTY BOUND: only one melodic line is observable, so every harmonic section declares evidenceScope:"melody_only" — chord candidates are pitch sets COMPATIBLE with the melody, never an observation of the real accompaniment, which may differ entirely. Ambiguous windows and phrase endings return multiple ranked candidates and are flagged ambiguous; confidence is a heuristic ranking margin, never a probability. Without meter marks, metricalRoles and chordCandidates report not_captured instead of assuming 4/4. Breath notes (lyrics "br", a host convention) carry a nominal pitch but no singable pitch: they are excluded from key/scale-degree/phrase/statistics/harmonic analysis entirely and reported separately as breathEvents with nominalPitch (noteCount counts melodic notes only; a range that is all breaths fails with NO_MELODIC_NOTES). Everything is derived/heuristic, never claimed as host fact; musical judgment stays human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1127,8 +1127,57 @@ const TOOLS = [
           type: "array",
           minItems: 1,
           uniqueItems: true,
-          items: { enum: ["key", "scaleDegrees", "phrases", "statistics"] },
-          description: "Defaults to all sections; scaleDegrees implies key detection.",
+          items: {
+            enum: [
+              "key",
+              "scaleDegrees",
+              "phrases",
+              "statistics",
+              "metricalRoles",
+              "chordCandidates",
+              "cadence",
+              "tensionResolution",
+            ],
+          },
+          description:
+            'Defaults to key, scaleDegrees, phrases, statistics. scaleDegrees implies key detection. The harmonic-context sections (metricalRoles, chordCandidates, cadence, tensionResolution) are OPT-IN and every one of them declares evidenceScope:"melody_only".',
+        },
+        harmonicWindow: {
+          enum: ["bar", "half_bar"],
+          default: "bar",
+          description:
+            "chordCandidates only: the span aggregated into one harmonic window. Notes spanning a boundary contribute their overlapping duration to each window.",
+        },
+        ambiguityThreshold: {
+          type: "number",
+          minimum: 0,
+          maximum: 1,
+          default: 0.08,
+          description:
+            "chordCandidates/cadence only: a runner-up gap below this marks the window or phrase ending ambiguous. It is a ranking margin, not a probability.",
+        },
+        maxChordCandidates: {
+          type: "integer",
+          minimum: 2,
+          maximum: 12,
+          default: 4,
+          description:
+            "chordCandidates only. The floor is 2 so an ambiguous window can never be reported as a single asserted chord.",
+        },
+        maxCadenceCandidates: {
+          type: "integer",
+          minimum: 2,
+          maximum: 8,
+          default: 3,
+          description: "cadence only. The floor is 2 for the same reason as maxChordCandidates.",
+        },
+        suspensionMinQuarter: {
+          type: "number",
+          minimum: 0.25,
+          maximum: 8,
+          default: 1,
+          description:
+            "tensionResolution only: minimum note length (in quarters) on a strong beat before a stepwise descent is reported as suspension-like.",
         },
         phraseGapQuarter: {
           type: "number",

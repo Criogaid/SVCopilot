@@ -231,6 +231,23 @@ test("the diagnosis recipe leads with the composite analyzer, not four separate 
     index.toolSelection.byNeed.some((entry) => entry.tool === "sv_analyze_vocal_context"),
     "the tool-selection table must offer the composite analyzer"
   );
+
+  // P1-A：和声语境是 opt-in，且指南必须写明单旋律无法确定真实和弦。
+  const drill = recipe.steps.find(
+    (step) => step.tool === "sv_analyze_phrase" && step.arguments.include.includes("chordCandidates")
+  );
+  assert.ok(drill, "the guide must show how to request the harmonic-context sections");
+  const drillRules = drill.readingRules.join(" ");
+  assert.match(drillRules, /melody_only/);
+  assert.match(drillRules, /never an observation of the real accompaniment/i);
+  assert.match(drillRules, /Never state a chord progression as fact/i);
+  assert.match(drillRules, /ranking margin, not a probability/i);
+  assert.match(drillRules, /not_captured rather than assuming 4\/4/);
+  const harmonicEntry = index.toolSelection.byNeed.find((entry) =>
+    /cadence/i.test(entry.need)
+  );
+  assert.ok(harmonicEntry);
+  assert.equal(harmonicEntry.scope, "melody_only");
 });
 
 test("every write recipe names the shared-target gate and the non-retryable outcomes", () => {

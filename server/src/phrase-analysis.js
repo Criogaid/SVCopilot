@@ -1,4 +1,12 @@
 import { isBreathLyrics, segmentPhrases } from "./expression-plan.js";
+import {
+  HARMONIC_INCLUDES,
+  HARMONIC_PROVENANCE,
+  analyzeCadence,
+  analyzeChordCandidates,
+  analyzeMetricalRoles,
+  analyzeTensionResolution,
+} from "./harmonic-context.js";
 import { ServiceTiming } from "./service-timing.js";
 
 // sv_analyze_phrase：只读乐理分析（调性候选 / 音级 / 乐句 / 统计）。
@@ -18,7 +26,11 @@ export const PHRASE_ANALYSIS_INCLUDES = Object.freeze([
   "scaleDegrees",
   "phrases",
   "statistics",
+  ...HARMONIC_INCLUDES,
 ]);
+// 默认只返回基础四项。P1-A 的和声语境 section 需要显式 include：它们体积更大，
+// 而且结论受"只观察到单旋律"的硬约束，不应在调用方没要求时悄悄塞进响应。
+const DEFAULT_INCLUDES = Object.freeze(["key", "scaleDegrees", "phrases", "statistics"]);
 
 // Krumhansl-Kessler (1982) 音级权重（music21 analysis/discrete.py 同源）。
 const KK_MAJOR = Object.freeze([
@@ -83,7 +95,10 @@ export class PhraseAnalysisService {
       breathCount: loaded.breathNotes.length,
       ...analysis,
       breathEvents: buildBreathEvents(loaded, input.responseMode, warnings),
-      provenance: PROVENANCE,
+      // 请求了和声语境时，把它的证据边界（尤其 evidenceScope:"melody_only"）并入 provenance。
+      provenance: HARMONIC_INCLUDES.some((name) => input.include.has(name))
+        ? { ...PROVENANCE, harmonicContext: HARMONIC_PROVENANCE }
+        : PROVENANCE,
       warnings,
       timings: timer.finish(),
     };
@@ -162,7 +177,10 @@ function resolveAnalysisSource(store, input) {
       "every captured note is a breath event (lyrics 'br'); there is no melodic material to analyze"
     );
   }
-  return { stored, occurrence, notes, breathNotes, quarterBlick };
+  // meterMarks 供 metricalRoles/chordCandidates 的小节与强拍分区使用。sv_snapshot_range
+  // 默认捕获它；缺失时相关 section 如实降级，而不是假设 4/4。
+  const meterMarks = Array.isArray(stored.context.meterMarks) ? stored.context.meterMarks : null;
+  return { stored, occurrence, notes, breathNotes, quarterBlick, meterMarks };
 }
 
 // 呼吸事件逐项返回：音高字段标 nominalPitch——宿主要求换气音符也有 pitch，
@@ -198,10 +216,17 @@ function buildBreathEvents(loaded, responseMode, warnings) {
 function runAnalysis(loaded, input, warnings) {
   const result = {};
   let bestKey = null;
-  if (input.include.has("key") || input.include.has("scaleDegrees")) {
-    const key = analyzeKey(loaded.notes, warnings);
-    bestKey = key?.bestCandidate ?? null;
-    if (input.include.has("key")) result.key = key;
+  let keyResult = null;
+  // 和声语境各 section 都依赖调性；用同一次 K-S 检测结果，避免重复计算或结论不一致。
+  const needsKey =
+    input.include.has("key") ||
+    input.include.has("scaleDegrees") ||
+    input.include.has("cadence") ||
+    input.include.has("tensionResolution");
+  if (needsKey) {
+    keyResult = analyzeKey(loaded.notes, warnings);
+    bestKey = keyResult?.bestCandidate ?? null;
+    if (input.include.has("key")) result.key = keyResult;
   }
   if (input.include.has("scaleDegrees")) {
     result.scaleDegrees = bestKey
@@ -213,6 +238,31 @@ function runAnalysis(loaded, input, warnings) {
   }
   if (input.include.has("statistics")) {
     result.statistics = analyzeStatistics(loaded);
+  }
+  // ---- P1-A：和声语境。单旋律无法确定真实和弦，各 section 自带 evidenceScope。----
+  const harmonicOptions = {
+    responseMode: input.responseMode,
+    phraseGapQuarter: input.phraseGapQuarter,
+    harmonicWindow: input.harmonicWindow,
+    ambiguityThreshold: input.ambiguityThreshold,
+    maxChordCandidates: input.maxChordCandidates,
+    maxCadenceCandidates: input.maxCadenceCandidates,
+    suspensionMinQuarter: input.suspensionMinQuarter,
+  };
+  if (input.include.has("metricalRoles")) {
+    result.metricalRoles = analyzeMetricalRoles(loaded, input.responseMode, warnings);
+  }
+  // cadence 会引用和弦窗口作为佐证，因此先算 chordCandidates。
+  let chordSection = null;
+  if (input.include.has("chordCandidates") || input.include.has("cadence")) {
+    chordSection = analyzeChordCandidates(loaded, harmonicOptions, warnings);
+    if (input.include.has("chordCandidates")) result.chordCandidates = chordSection;
+  }
+  if (input.include.has("cadence")) {
+    result.cadence = analyzeCadence(loaded, keyResult, chordSection, harmonicOptions, warnings);
+  }
+  if (input.include.has("tensionResolution")) {
+    result.tensionResolution = analyzeTensionResolution(loaded, keyResult, harmonicOptions, warnings);
   }
   return result;
 }
@@ -456,7 +506,18 @@ function normalizeAnalyzeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "include", "phraseGapQuarter", "responseMode"],
+    [
+      "contextId",
+      "occurrenceId",
+      "include",
+      "phraseGapQuarter",
+      "responseMode",
+      "harmonicWindow",
+      "ambiguityThreshold",
+      "maxChordCandidates",
+      "maxCadenceCandidates",
+      "suspensionMinQuarter",
+    ],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -470,7 +531,7 @@ function normalizeAnalyzeRequest(request) {
   }
   let include;
   if (request.include === undefined) {
-    include = new Set(PHRASE_ANALYSIS_INCLUDES);
+    include = new Set(DEFAULT_INCLUDES);
   } else {
     if (
       !Array.isArray(request.include) ||
@@ -492,12 +553,49 @@ function normalizeAnalyzeRequest(request) {
   if (!["compact", "standard", "verbose"].includes(responseMode)) {
     throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
   }
+  const harmonicWindow = request.harmonicWindow ?? "bar";
+  if (!["bar", "half_bar"].includes(harmonicWindow)) {
+    throw codedError("INVALID_ARGUMENTS", 'harmonicWindow must be "bar" or "half_bar"');
+  }
+  const ambiguityThreshold = request.ambiguityThreshold ?? 0.08;
+  if (!Number.isFinite(ambiguityThreshold) || ambiguityThreshold < 0 || ambiguityThreshold > 1) {
+    throw codedError("INVALID_ARGUMENTS", "ambiguityThreshold must be a number between 0 and 1");
+  }
+  const maxChordCandidates = request.maxChordCandidates ?? 4;
+  if (!Number.isSafeInteger(maxChordCandidates) || maxChordCandidates < 2 || maxChordCandidates > 12) {
+    // 下限 2：歧义案例必须能返回至少两个候选，不允许把最高分写成唯一事实。
+    throw codedError("INVALID_ARGUMENTS", "maxChordCandidates must be an integer between 2 and 12");
+  }
+  const maxCadenceCandidates = request.maxCadenceCandidates ?? 3;
+  if (
+    !Number.isSafeInteger(maxCadenceCandidates) ||
+    maxCadenceCandidates < 2 ||
+    maxCadenceCandidates > 8
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "maxCadenceCandidates must be an integer between 2 and 8");
+  }
+  const suspensionMinQuarter = request.suspensionMinQuarter ?? 1;
+  if (
+    !Number.isFinite(suspensionMinQuarter) ||
+    suspensionMinQuarter < 0.25 ||
+    suspensionMinQuarter > 8
+  ) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "suspensionMinQuarter must be a number between 0.25 and 8"
+    );
+  }
   return {
     contextId: request.contextId,
     occurrenceId: request.occurrenceId,
     include,
     phraseGapQuarter,
     responseMode,
+    harmonicWindow,
+    ambiguityThreshold,
+    maxChordCandidates,
+    maxCadenceCandidates,
+    suspensionMinQuarter,
   };
 }
 
