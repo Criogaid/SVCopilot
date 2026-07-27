@@ -112,6 +112,8 @@ MCP 客户端配置示例：
 
 | `sv_analyze_vocal_context` | 一次性声乐上下文诊断（纯内存只读，宿主调用数恒为 0）：在**一次调用**中组合 `sv_analyze_phrase`、`sv_validate_lyrics_prosody`、`sv_style_profile` 与 `sv_compare_computed_pitch`。它**不新增任何音乐学权威**——每个 section 的 `authority` 与 `provenance.sectionAuthority` 声明结论归属哪个既有分析器。各 section 独立返回 `succeeded`/`not_captured`/`insufficient_evidence`/`failed` 并附 `remedy`，一个 section 数据不足绝不吞掉其余结果；只有请求级问题（未知/无效 context、未知或歧义 occurrence、参数错误）才整体失败。`summary.evidence` 区分 `all_requested_sections_analyzed`/`partial_evidence`/`no_section_produced_evidence`——最后一种是“没有证据”，绝不能读成“没有问题”；computed pitch 缺失或全 null 报 `insufficient_evidence` 并显式说明“数据不足以分析，不是零误差”。`topFindings` 合并韵律 issue（heuristic）与 computed-pitch 异常区段（`observed_measurement`，是偏差测量而非“唱错了”的判决），按严重度再按乐谱时间排序；`nextSteps` 给出具体后续工具与参数。compact 默认只给摘要 + 最高优先问题 + 下一步，明细通过各 section 的 `details.tool`/`details.arguments` 重跑该分析器获得（分析器可无代价重跑，因此没有会过期的 cursor）。相同 context + 请求输出确定性一致；是否好听仍是 human_only |
 
+| `sv_set_selection` | 高层编辑器选择操作（`clear`/`select`/`add`/`remove`）：真实宿主的 `unselectNote()` 已观察到**状态改变却返回 false**，因此本工具**绝不把宿主 boolean 当作变更证据**——操作前后各读一次 selection，`changed` 完全由读回差异判定，宿主原始返回值保留在 `hostResults` 中作对照，两者矛盾时发 `HOST_RETURN_DISAGREES_WITH_READBACK` 并声明以读回为准。目标可用 snapshot/range context 的 noteId（range noteId 可再用 occurrenceId 收窄），或直接用宿主当前编辑组的 `indexInGroup`（无快照时可用）；快照后组变短时报 `NOTE_INDEX_OUT_OF_RANGE`，绝不悄悄选中另一个音符。selection 是 UI 状态，`undo.recordCreated:false`，绝不调用 `newUndoRecord()` |
+
 MCP 资源还提供：
 
 - `svapi://manifest`：完整官方 API 清单。

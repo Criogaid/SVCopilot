@@ -48,6 +48,7 @@ import {
 import { PhraseEditService } from "./phrase-edit.js";
 import { PhraseAnalysisService } from "./phrase-analysis.js";
 import { QuantizePlanService } from "./quantize-plan.js";
+import { SelectionService } from "./selection.js";
 import { VocalContextAnalysisService } from "./vocal-context.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { StyleProfileService } from "./style-profile.js";
@@ -84,6 +85,7 @@ const lyricProsodyService = new LyricProsodyService({ store: snapshotService.sto
 const quantizePlanService = new QuantizePlanService({ store: snapshotService.store });
 const harmonyPlanService = new HarmonyPlanService({ store: snapshotService.store });
 const vocalContextService = new VocalContextAnalysisService({ store: snapshotService.store });
+const selectionService = new SelectionService(hostSession, { snapshotService });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -1959,6 +1961,51 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
+    name: "sv_set_selection",
+    description:
+      'Set the editor note selection with a trustworthy result. SynthV has been observed CHANGING selection state while unselectNote() returned false, so this tool never treats a host boolean as evidence: it reads the selection before and after the operation and derives `changed` from that read-back, reporting the raw hostResults alongside and warning HOST_RETURN_DISAGREES_WITH_READBACK when they contradict each other. Operations: "clear" (unselect all notes), "select" (replace the selection), "add" (extend it), "remove" (unselect the listed notes). Target notes either by noteIds from a sv_snapshot or sv_snapshot_range context (resolved to group-local indices; a range noteId may be narrowed with occurrenceId) or by indexInGroup against the host\'s CURRENT editor group directly. If the group shrank after the snapshot, the call fails NOTE_INDEX_OUT_OF_RANGE instead of quietly selecting a different note. Selection is UI state: this creates no Undo record, because the official API does not make one for it.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        operation: {
+          enum: ["clear", "select", "add", "remove"],
+          description:
+            '"clear" takes no targets. "select" replaces the current selection, "add" extends it, "remove" unselects the listed notes.',
+        },
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Required with noteIds; the context that issued them.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Optional narrowing for range-context noteIds. The host selection always applies to the current editor group.",
+        },
+        noteIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: 200,
+          items: { type: "string", minLength: 1 },
+          description: "Note ids from the supplied contextId. Mutually exclusive with indexInGroup.",
+        },
+        indexInGroup: {
+          type: "array",
+          minItems: 1,
+          maxItems: 200,
+          items: { type: "integer", minimum: 0 },
+          description:
+            "0-based note indices in the host's CURRENT editor group, for when no snapshot context is held. Mutually exclusive with noteIds/contextId.",
+        },
+      },
+      required: ["operation"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
     name: "sv_get_voice_profile",
     description:
       "Read observable voice parameters (getVoice, including vocalModeParams names) for a track's groups. The official API exposes NO singer identity, installed voicebank catalog, or assignment relation — those are reported as unobservable, never inferred.",
@@ -2227,6 +2274,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_analyze_vocal_context":
         result = await vocalContextService.analyze(args);
         break;
+      case "sv_set_selection":
+        result = await selectionService.setSelection(args);
+        break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
         break;
@@ -2465,6 +2515,7 @@ function capabilities() {
         "sv_restore_audition",
       ],
       voice: ["sv_get_voice_profile", "sv_clone_track_from_template"],
+      editorState: ["sv_set_selection"],
       typedResultFormat: "typed-v2",
       guide: {
         musicWorkflows: "svcopilot://guide/music-workflows",

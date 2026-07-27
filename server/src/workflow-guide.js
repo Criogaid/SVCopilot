@@ -65,7 +65,7 @@ const GLOBAL_RULES = {
     "observed = read back from the host. derived = computed from observed data. heuristic = an engineering rule that can be wrong. human_only = requires a person.",
     "Analyzer confidence values are heuristic rankings, not probabilities. Ambiguous key/cadence results return multiple candidates; report the ambiguity instead of picking one silently.",
     "computed pitch that is empty or all-null means NOT ENOUGH DATA TO ANALYZE. It is not zero error, and it is not evidence of a host fault.",
-    "Host-native booleans may not describe whether state actually changed. Trust read-back and high-level tool verification, never a raw boolean.",
+    "Host-native booleans may not describe whether state actually changed. Trust read-back and high-level tool verification, never a raw boolean. SynthV has been observed changing the selection while unselectNote() returned false, which is why sv_set_selection derives `changed` from a before/after read-back.",
   ],
   humanGates: [
     "Whether anything sounds good, better, or in tune to the ear is human_only. MCP has no audio input.",
@@ -891,6 +891,11 @@ const TOOL_SELECTION = {
     { need: "Several edit kinds in ONE Undo", tool: "sv_edit_phrase" },
     { need: "Read observable voice parameters", tool: "sv_get_voice_profile" },
     { need: "Let a human listen", tool: "sv_start_audition" },
+    {
+      need: "Change the editor note selection",
+      tool: "sv_set_selection",
+      note: "Reads the selection back to decide `changed`; the host boolean is not trustworthy. Creates no Undo record.",
+    },
     { need: "Official API details", tool: "sv_describe / sv_search_api" },
   ],
   doNotAsk: [

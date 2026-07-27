@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 33);
+  assert.equal(listed.tools.length, 34);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -106,6 +106,17 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_generate_harmony"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_vocal_context"));
+  const selectionTool = listed.tools.find((tool) => tool.name === "sv_set_selection");
+  assert.ok(selectionTool);
+  // 高层 selection 的存在理由：宿主 boolean 不可信，必须以读回为准。
+  assert.match(selectionTool.description, /never treats a host boolean as evidence/);
+  assert.match(selectionTool.description, /creates no Undo record/);
+  assert.deepEqual(selectionTool.inputSchema.properties.operation.enum, [
+    "clear",
+    "select",
+    "add",
+    "remove",
+  ]);
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -257,6 +268,7 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_quantize_notes"));
   assert.ok(capabilities.interfaces.music.includes("sv_generate_harmony"));
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_vocal_context"));
+  assert.deepEqual(capabilities.interfaces.editorState, ["sv_set_selection"]);
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
