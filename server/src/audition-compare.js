@@ -70,6 +70,10 @@ export class AuditionCompareService {
       playedVariants: [],
       currentVariantIndex: -1,
       currentAuditionId: null,
+      currentStopPromise: null,
+      transitionPromise: null,
+      finishPromise: null,
+      lastVariantResult: null,
       timer: null,
       terminalResult: null,
       stopRequested: false,
@@ -78,27 +82,14 @@ export class AuditionCompareService {
     this.comparisons.set(comparisonId, comparison);
 
     // 第一个 variant 同步启动，这样启动失败能直接返回给调用方，而不是藏进后台。
-    const first = await this._startVariant(comparison, 0);
+    let first;
+    try {
+      first = await this._startVariant(comparison, 0);
+    } catch (error) {
+      first = failureResult(error, "AUDITION_START_FAILED");
+    }
     if (!first.ok) {
-      transition(comparison, "failed", this.now());
-      comparison.terminalResult = {
-        ok: false,
-        status: "failed",
-        data: {
-          comparisonId,
-          state: comparison.state,
-          transitionHistory: comparison.transitionHistory,
-          failedVariant: input.order[0],
-          variantResult: first,
-          perception: "human_only",
-        },
-        error: first.error ?? {
-          code: "AUDITION_START_FAILED",
-          message: "the first variant could not start",
-        },
-        provenance: PROVENANCE,
-        warnings: comparison.warnings,
-      };
+      this._failVariant(comparison, 0, first);
       return { ...comparison.terminalResult, timings: timer.finish() };
     }
     this._scheduleNext(comparison);
@@ -179,6 +170,13 @@ export class AuditionCompareService {
       this.clearTimeout(comparison.timer);
       comparison.timer = null;
     }
+    // 后台切换可能正在 stop A 或 start B；先等同一条状态迁移收敛，避免漏停刚启动的 B。
+    if (comparison.transitionPromise) {
+      await comparison.transitionPromise;
+      if (comparison.terminalResult) {
+        return { ...comparison.terminalResult, timings: timer.finish() };
+      }
+    }
     const result = await this._finish(comparison, "stopped_by_user");
     return { ...result, timings: timer.finish() };
   }
@@ -230,14 +228,31 @@ export class AuditionCompareService {
     const durationMs = comparison.input.estimatedDurationMs;
     const delay = Math.max(0, durationMs + comparison.input.gapMs);
     comparison.timer = this.setTimeout(() => {
-      void this._advance(comparison.id);
+      comparison.timer = null;
+      if (comparison.terminalResult || comparison.stopRequested) return null;
+      let tracked;
+      tracked = this._advance(comparison.id)
+        .catch((error) => {
+          if (!comparison.terminalResult) {
+            this._failVariant(
+              comparison,
+              Math.max(0, comparison.currentVariantIndex),
+              failureResult(error, "AUDITION_TRANSITION_FAILED")
+            );
+          }
+          return comparison.terminalResult;
+        })
+        .finally(() => {
+          if (comparison.transitionPromise === tracked) comparison.transitionPromise = null;
+        });
+      comparison.transitionPromise = tracked;
+      return tracked;
     }, delay);
   }
 
   async _advance(comparisonId) {
     const comparison = this.comparisons.get(comparisonId);
     if (!comparison || comparison.terminalResult || comparison.stopRequested) return;
-    comparison.timer = null;
     // 上一个 variant 必须完整停止并恢复，B 才能从同一基线开始。stop 幂等：
     // auto-stop 已经跑过时它直接返回记忆的终态。
     const previous = await this._stopCurrentVariant(comparison);
@@ -246,49 +261,79 @@ export class AuditionCompareService {
         code: "VARIANT_STOP_INCOMPLETE",
         message: `stopping a variant did not fully restore; see its recovery payload (${previous.status ?? "failed"}).`,
       });
+      await this._finish(comparison, "variant_restore_failed", previous);
+      return;
     }
-    if (comparison.stopRequested) return;
+    if (comparison.stopRequested) {
+      await this._finish(comparison, "stopped_by_user", previous);
+      return;
+    }
     const nextIndex = comparison.currentVariantIndex + 1;
     if (nextIndex >= comparison.input.order.length) {
-      await this._finish(comparison, "completed");
+      await this._finish(comparison, "completed", previous);
       return;
     }
     transition(comparison, "gap", this.now());
-    const started = await this._startVariant(comparison, nextIndex);
+    let started;
+    try {
+      started = await this._startVariant(comparison, nextIndex);
+    } catch (error) {
+      started = failureResult(error, "AUDITION_START_FAILED");
+    }
     if (!started.ok) {
       comparison.warnings.push({
         code: "VARIANT_START_FAILED",
         message: `variant ${comparison.input.order[nextIndex]} could not start; the comparison ends early.`,
       });
-      await this._finish(comparison, "variant_start_failed");
+      this._failVariant(comparison, nextIndex, started);
+      return;
+    }
+    if (comparison.stopRequested) {
+      await this._finish(comparison, "stopped_by_user");
       return;
     }
     this._scheduleNext(comparison);
   }
 
   async _stopCurrentVariant(comparison) {
+    if (comparison.currentStopPromise) return comparison.currentStopPromise;
     if (!comparison.currentAuditionId) return null;
     const auditionId = comparison.currentAuditionId;
-    comparison.currentAuditionId = null;
-    return this.audition.stop({ auditionId }).catch((error) => ({
-      ok: false,
-      status: "failed",
-      error: {
-        code: error?.code ?? "AUDITION_STOP_FAILED",
-        message: String(error?.message ?? error),
-      },
-    }));
+    let tracked;
+    tracked = Promise.resolve()
+      .then(() => this.audition.stop({ auditionId }))
+      .catch((error) => failureResult(error, "AUDITION_STOP_FAILED"))
+      .then((result) => {
+        comparison.lastVariantResult = result;
+        return result;
+      })
+      .finally(() => {
+        if (comparison.currentAuditionId === auditionId) comparison.currentAuditionId = null;
+        if (comparison.currentStopPromise === tracked) comparison.currentStopPromise = null;
+      });
+    comparison.currentStopPromise = tracked;
+    return tracked;
   }
 
-  async _finish(comparison, reason) {
+  async _finish(comparison, reason, knownStopResult = undefined) {
     if (comparison.terminalResult) return comparison.terminalResult;
+    if (comparison.finishPromise) return comparison.finishPromise;
+    comparison.finishPromise = this._performFinish(comparison, reason, knownStopResult);
+    return comparison.finishPromise;
+  }
+
+  async _performFinish(comparison, reason, knownStopResult) {
     if (comparison.timer) {
       this.clearTimeout(comparison.timer);
       comparison.timer = null;
     }
     transition(comparison, "restoring", this.now());
-    const finalStop = await this._stopCurrentVariant(comparison);
-    const restored = finalStop === null || finalStop.ok === true;
+    const finalStop =
+      knownStopResult === undefined
+        ? await this._stopCurrentVariant(comparison)
+        : knownStopResult;
+    const restorationResult = finalStop ?? comparison.lastVariantResult;
+    const restored = restorationResult?.ok === true;
     transition(comparison, restored ? "restored" : "restore_failed", this.now());
     comparison.terminalResult = {
       ok: restored,
@@ -300,13 +345,37 @@ export class AuditionCompareService {
         transitionHistory: comparison.transitionHistory,
         order: comparison.input.order,
         playedVariants: comparison.playedVariants,
-        finalVariantResult: finalStop,
+        finalVariantResult: restorationResult,
         // 恢复证据来自底层 audition 的读回，不是本模块的断言。
-        restoreEvidence: finalStop?.data?.restoration ?? null,
-        recovery: finalStop?.data?.recovery ?? null,
+        restoreEvidence: restorationResult?.data?.restoration ?? null,
+        recovery: restorationResult?.data?.recovery ?? null,
         perception: "human_only",
         humanGate:
           "Ask the person which variant they preferred. MCP has no audio input and cannot judge.",
+      },
+      provenance: PROVENANCE,
+      warnings: comparison.warnings,
+    };
+    return comparison.terminalResult;
+  }
+
+  _failVariant(comparison, index, result) {
+    if (comparison.terminalResult) return comparison.terminalResult;
+    transition(comparison, "failed", this.now());
+    comparison.terminalResult = {
+      ok: false,
+      status: "failed",
+      data: {
+        comparisonId: comparison.id,
+        state: comparison.state,
+        transitionHistory: comparison.transitionHistory,
+        failedVariant: comparison.input.order[index] ?? null,
+        variantResult: result,
+        perception: "human_only",
+      },
+      error: result.error ?? {
+        code: "AUDITION_START_FAILED",
+        message: "the variant could not start",
       },
       provenance: PROVENANCE,
       warnings: comparison.warnings,
@@ -424,8 +493,11 @@ function normalizeCompareRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "gapMs must be an integer between 0 and 5000");
   }
   const autoRestore = request.autoRestore ?? true;
-  if (typeof autoRestore !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "autoRestore must be a boolean");
+  if (autoRestore !== true) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "autoRestore must be true because every variant must restore the shared A/B baseline"
+    );
   }
   const stopToleranceMs = request.stopToleranceMs ?? 100;
   if (!Number.isSafeInteger(stopToleranceMs) || stopToleranceMs < 0 || stopToleranceMs > 2000) {
@@ -473,4 +545,15 @@ function codedError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function failureResult(error, fallbackCode) {
+  return {
+    ok: false,
+    status: "failed",
+    error: {
+      code: typeof error?.code === "string" ? error.code : fallbackCode,
+      message: error instanceof Error ? error.message : String(error),
+    },
+  };
 }

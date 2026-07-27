@@ -72,6 +72,10 @@ function createContext(store, options = {}) {
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
+  stored.context.range = {
+    from: { bar: 1, beat: 1, tickInBeatBlick: 0, blick: 0 },
+    to: { bar: 2, beat: 1, tickInBeatBlick: 0, blick: 4 * Q },
+  };
   stored.snapshotToken = `snap_${stored.contextId}`;
   return { stored, occurrenceId };
 }
@@ -160,8 +164,15 @@ test("missing computed pitch is reported as not-enough-data, never as zero error
   assert.doesNotMatch(serialized, /"coverage":0\b/);
   assert.doesNotMatch(serialized, /"maeCent":0\b/);
 
-  const step = result.nextSteps.find((entry) => entry.tool === "sv_wait_for_processing");
-  assert.ok(step, "the response must point at the processing waiter");
+  const step = result.nextSteps.find((entry) => entry.tool === "sv_snapshot_range");
+  assert.ok(step, "uncaptured data must point at a new snapshot, not an unusable waiter call");
+  assert.deepEqual(step.arguments.scope, {
+    kind: "range",
+    trackIndices: [0],
+    from: { bar: 1, beat: 1 },
+    to: { bar: 2, beat: 1 },
+  });
+  assert.deepEqual(step.arguments.include, ["notes", "computedPitch"]);
   assert.match(step.note, /NOT ENOUGH DATA TO ANALYZE/);
   assert.match(step.note, /never report it as zero error/);
 });
@@ -218,6 +229,8 @@ test("prosody issues surface as ranked findings with an actionable next step", a
   assert.equal(finding.source, "prosody");
   assert.equal(finding.authority, "sv_validate_lyrics_prosody");
   assert.ok(["error", "warning", "info"].includes(finding.severity));
+  assert.deepEqual(finding.noteIds, [`${stored.contextId}:t:0:r:0:n:6`]);
+  assert.equal(finding.startBlick, 6 * Q);
   // 最高严重度排在最前，供 compact 模式直接展示。
   assert.ok(
     result.topFindings.every(
@@ -227,6 +240,32 @@ test("prosody issues surface as ranked findings with an actionable next step", a
           ["error", "warning", "info"].indexOf(item.severity)
     )
   );
+});
+
+test("mixed findings preserve prosody identity and sort equal severity by score time", async () => {
+  const store = createStore();
+  const notes = MELODY.map((note, index) =>
+    index === MELODY.length - 1 ? { ...note, lyrics: "きら" } : note
+  );
+  const { stored } = createContext(store, {
+    notes,
+    // 第一个音符偏低一个半音，产生比末尾 mora warning 更早的 warning。
+    computedPitchValues: pitchFramesForMelody([-1, 0, 0, 0, 0, 0]),
+  });
+  const result = await analyzer(store).analyze({
+    contextId: stored.contextId,
+    include: ["prosody", "computedPitch"],
+  });
+
+  const warnings = result.topFindings.filter((finding) => finding.severity === "warning");
+  const pitchIndex = warnings.findIndex((finding) => finding.source === "computedPitch");
+  const prosodyIndex = warnings.findIndex((finding) => finding.source === "prosody");
+  assert.ok(pitchIndex >= 0 && prosodyIndex >= 0);
+  assert.ok(pitchIndex < prosodyIndex, "equal-severity findings must follow score time");
+  assert.deepEqual(warnings[prosodyIndex].noteIds, [
+    `${stored.contextId}:t:0:r:0:n:${MELODY.length - 1}`,
+  ]);
+  assert.equal(warnings[prosodyIndex].startBlick, 5 * Q);
 });
 
 test("an all-breath range degrades to insufficient_evidence rather than failing the call", async () => {

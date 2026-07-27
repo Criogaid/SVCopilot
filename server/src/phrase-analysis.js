@@ -57,6 +57,7 @@ const PROVENANCE = Object.freeze({
   phraseSegmentation: "rest_threshold_heuristic",
   breathNotes: "excluded_from_all_musical_statistics_reported_as_breathEvents",
   breathDetection: "lyrics_br_host_convention_not_official_api_fact",
+  pitchBasis: "sounding_midi_with_occurrence_pitch_offset",
   basis: "derived_not_host_fact",
   perception: "human_only",
 });
@@ -89,6 +90,7 @@ export class PhraseAnalysisService {
         trackIndex: loaded.occurrence.trackIndex,
         groupIndex: loaded.occurrence.groupIndex,
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
+        pitchOffsetSemitone: loaded.occurrence.pitchOffsetSemitone ?? 0,
       },
       // noteCount 只数旋律音符；呼吸音符单独计数并在 breathEvents 中逐项返回。
       noteCount: loaded.notes.length,
@@ -149,14 +151,23 @@ function resolveAnalysisSource(store, input) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
   }
   const timeOffset = occurrence.timeOffsetBlick ?? 0;
+  const pitchOffset = occurrence.pitchOffsetSemitone ?? 0;
+  if (!Number.isInteger(pitchOffset)) {
+    throw codedError(
+      "INVALID_CONTEXT",
+      "occurrence pitchOffsetSemitone must be an integer for MIDI pitch analysis"
+    );
+  }
   const allNotes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
       noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
-      pitch: fingerprint.pitch,
-      // 调性统计用记谱 MIDI 音高；detune 是表现性微调，只并入 targetSemitone 供乐句 climax 等使用。
-      targetSemitone: fingerprint.pitch + (fingerprint.detuneCents ?? 0) / 100,
+      // Reference 的 pitch offset 会改变实际发声音高；调性、音域与和声语境必须使用同一坐标。
+      pitch: fingerprint.pitch + pitchOffset,
+      // detune 是表现性微调，只并入 targetSemitone 供乐句 climax 等连续音高统计使用。
+      targetSemitone:
+        fingerprint.pitch + pitchOffset + (fingerprint.detuneCents ?? 0) / 100,
       absOnsetBlick: timeOffset + fingerprint.onsetBlick,
       absEndBlick: timeOffset + fingerprint.onsetBlick + fingerprint.durationBlick,
       durationBlick: fingerprint.durationBlick,

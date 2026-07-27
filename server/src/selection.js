@@ -159,8 +159,27 @@ async function resolvePositions(service, input, scope, target, warnings) {
         "contextId not found or expired; re-run sv_snapshot or sv_snapshot_range"
       );
     }
+    const expectedGroupUuids = new Set();
     for (const noteId of input.noteIds) {
-      positions.push(resolveContextNotePosition(stored, input, noteId));
+      const resolved = resolveContextNotePosition(stored, input, noteId);
+      positions.push(resolved.indexInGroup);
+      expectedGroupUuids.add(resolved.targetGroupUuid);
+    }
+    if (expectedGroupUuids.size !== 1 || expectedGroupUuids.has(null)) {
+      throw codedError(
+        "INVALID_CONTEXT",
+        "the supplied noteIds do not identify exactly one target NoteGroup"
+      );
+    }
+    const expectedGroupUuid = expectedGroupUuids.values().next().value;
+    const observedGroupUuid = await scope.call(target, "getUUID");
+    if (observedGroupUuid !== expectedGroupUuid) {
+      const error = codedError(
+        "CURRENT_GROUP_MISMATCH",
+        `the note context targets group ${expectedGroupUuid}, but the current editor group is ${observedGroupUuid}; open the captured group and retry`
+      );
+      error.details = { expectedGroupUuid, observedGroupUuid };
+      throw error;
     }
   } else {
     positions.push(...input.indexInGroup);
@@ -198,7 +217,13 @@ function resolveContextNotePosition(stored, input, noteId) {
       const fingerprint = (occurrence.noteFingerprints ?? []).find(
         (item) => item.noteId === noteId
       );
-      if (fingerprint) return fingerprint.indexInGroup;
+      if (fingerprint) {
+        return {
+          indexInGroup: fingerprint.indexInGroup,
+          targetGroupUuid:
+            typeof occurrence.targetGroupUuid === "string" ? occurrence.targetGroupUuid : null,
+        };
+      }
     }
     throw codedError(
       "UNKNOWN_NOTE_ID",
@@ -224,7 +249,13 @@ function resolveContextNotePosition(stored, input, noteId) {
       `noteId ${noteId} is not present in the supplied snapshot context`
     );
   }
-  return note.indexInGroup;
+  return {
+    indexInGroup: note.indexInGroup,
+    targetGroupUuid:
+      stored.baseData?.group?.uuid ??
+      stored.baseData?.tracks?.[0]?.groups?.[0]?.uuid ??
+      null,
+  };
 }
 
 // ---------- 请求校验 ----------

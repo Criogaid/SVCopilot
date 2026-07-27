@@ -116,6 +116,13 @@ MCP 客户端配置示例：
 
 | `sv_audition_compare` / `sv_get_audition_compare` / `sv_stop_audition_compare` | 既有版本的人类 A/B 试听编排：在同一范围上依次播放两种 track solo 配置（例如原轨 vs 已编辑的复制轨）。**不复制播放恢复内核**——每个 variant 都走既有 `sv_start_audition`，启动读回校验、auto-stop、“用户改过就不覆盖”的 mixer 恢复与 recovery payload 全部原样复用。A 完整停止并恢复后 B 才开始，这正是两个 variant 共用同一 playhead/范围/mixer 基线的原因。非阻塞返回 `comparisonId`，get/stop 幂等。**绝不为 variant B 应用临时编辑**：官方 API 没有 Undo 调用，成功提交后不存在通用恢复 token，那样会制造无法撤销的“试听用写入”；要比较编辑，先提交到复制轨再 A/B 两条轨。因此它不产生任何工程内容 Undo，只触碰 mixer solo 与 playhead 且都会恢复。MCP 听不到声音：只报播放顺序与恢复证据，`perception` 恒为 human_only |
 
+本轮安全收口补充：乐句/和声分析使用 `pitch + occurrence.pitchOffsetSemitone` 的实际发声
+MIDI，cadence 不把普通 weak beat 冒充强拍；组合诊断在 computed pitch 未捕获时返回可直接
+执行的 `sv_snapshot_range` recapture，已捕获但证据不足时才建议 waiter，且聚合 finding
+保留原始 noteId/乐谱位置。`sv_set_selection` 使用 context noteId 时会在 mutation 前复核
+当前编辑组 UUID，不匹配返回 `CURRENT_GROUP_MISMATCH`。A/B 比较要求 `autoRestore:true`；
+任一 variant 启动或恢复失败都会终止，后台切换与显式 stop 共享同一恢复完成态。
+
 MCP 资源还提供：
 
 - `svapi://manifest`：完整官方 API 清单。

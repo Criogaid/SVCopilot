@@ -404,7 +404,9 @@ function classifyCadence(loaded, key, scale, finalNote, penultimate, phrase, cho
   const position = loaded.meterMarks
     ? blickToMusical(finalNote.absOnsetBlick, loaded.meterMarks, loaded.quarterBlick)
     : null;
-  const onStrongBeat = position ? metricalRole(position, loaded.quarterBlick) !== "offbeat" : false;
+  const finalMetricalRole = position ? metricalRole(position, loaded.quarterBlick) : null;
+  const onStrongBeat =
+    finalMetricalRole === "downbeat" || finalMetricalRole === "strong";
   const chordWindow = chordSection?.items?.find(
     (window) => finalNote.absOnsetBlick >= window.startBlick && finalNote.absOnsetBlick < window.endBlick
   );

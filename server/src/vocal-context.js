@@ -169,6 +169,7 @@ function resolveTarget(store, input) {
   return {
     contextId: stored.contextId,
     occurrenceId: occurrence.occurrenceId,
+    captureRange: stored.context.range,
     publicOccurrence: {
       occurrenceId: occurrence.occurrenceId,
       trackIndex: occurrence.trackIndex,
@@ -401,7 +402,8 @@ function collectFindings(sections, input) {
         kind: issue.kind,
         confidence: issue.confidence,
         message: issue.message,
-        ...(issue.noteId ? { noteId: issue.noteId } : {}),
+        ...(Array.isArray(issue.noteIds) ? { noteIds: [...issue.noteIds] } : {}),
+        ...(Number.isSafeInteger(issue.startBlick) ? { startBlick: issue.startBlick } : {}),
         ...(issue.suggestion ? { suggestion: issue.suggestion } : {}),
       });
     }
@@ -457,7 +459,25 @@ function summarize(sections, findings) {
 function nextSteps(sections, findings, target) {
   const steps = [];
   const pitch = sections.computedPitch;
-  if (pitch?.status === "not_captured" || pitch?.status === "insufficient_evidence") {
+  if (pitch?.status === "not_captured") {
+    const from = snapshotMusicalPoint(target.captureRange?.from);
+    const to = snapshotMusicalPoint(target.captureRange?.to);
+    steps.push({
+      reason: pitch.reason?.code ?? "computed_pitch_not_captured",
+      tool: "sv_snapshot_range",
+      arguments: {
+        scope: {
+          kind: "range",
+          trackIndices: [target.publicOccurrence.trackIndex],
+          from,
+          to,
+        },
+        include: ["notes", "computedPitch"],
+      },
+      then: "Use the new contextId and occurrenceId with sv_analyze_vocal_context.",
+      note: "Missing computed pitch means NOT ENOUGH DATA TO ANALYZE — never report it as zero error.",
+    });
+  } else if (pitch?.status === "insufficient_evidence") {
     steps.push({
       reason: pitch.reason?.code ?? "computed_pitch_unavailable",
       tool: "sv_wait_for_processing",
@@ -501,6 +521,23 @@ function nextSteps(sections, findings, target) {
     });
   }
   return steps;
+}
+
+function snapshotMusicalPoint(point) {
+  if (!isRecord(point) || !Number.isSafeInteger(point.bar) || point.bar < 1) {
+    throw codedError(
+      "INVALID_CONTEXT",
+      "range context is missing the musical boundaries needed to recapture computed pitch"
+    );
+  }
+  return {
+    bar: point.bar,
+    ...(point.beat === undefined
+      ? {}
+      : {
+          beat: isRecord(point.beat) ? { ...point.beat } : point.beat,
+        }),
+  };
 }
 
 // ---------- 预算 ----------

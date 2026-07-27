@@ -271,6 +271,132 @@ test("a failed first variant fails the whole comparison instead of hiding it", a
   assert.deepEqual(model.solo, [false, false, false]);
 });
 
+test("a thrown first-variant preflight failure becomes terminal and does not lock comparisons", async () => {
+  const model = createModel();
+  const harness = createHarness(model);
+  const invalid = {
+    ...BASE_REQUEST,
+    variants: [
+      { label: "a", soloTrackIndices: [99] },
+      { label: "b", soloTrackIndices: [1] },
+    ],
+  };
+
+  const failed = await harness.compare.compare(invalid);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error.code, "TRACK_INDEX_OUT_OF_RANGE");
+  assert.equal(failed.data.failedVariant, "a");
+
+  const next = await harness.compare.compare({ ...BASE_REQUEST });
+  assert.equal(next.ok, true, "a terminal preflight failure must not leave COMPARISON_ACTIVE");
+});
+
+test("a failed variant restore aborts before the next variant starts", async () => {
+  const model = createModel();
+  const harness = createHarness(model);
+  const started = await harness.compare.compare({ ...BASE_REQUEST });
+  model.failures.push({
+    method: "setSolo",
+    code: "HOST_CALL_FAILED",
+    message: "solo restore refused",
+  });
+
+  await harness.advance(4200);
+  const result = await harness.compare.get({ comparisonId: started.data.comparisonId });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "restore_failed");
+  assert.equal(result.data.reason, "variant_restore_failed");
+  assert.equal(result.data.playedVariants.length, 1, "variant B must not start off a dirty baseline");
+  assert.ok(result.data.recovery, "the failed restore must retain its recovery payload");
+});
+
+test("a structured later-variant start failure remains failed instead of becoming succeeded", async () => {
+  const model = createModel();
+  const harness = createHarness(model);
+  const started = await harness.compare.compare({ ...BASE_REQUEST });
+  model.failures.push({ method: "play", code: "HOST_CALL_FAILED", message: "B play refused" });
+
+  await harness.advance(4200);
+  const result = await harness.compare.get({ comparisonId: started.data.comparisonId });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "failed");
+  assert.equal(result.data.failedVariant, "b");
+  assert.equal(result.error.code, "HOST_CALL_FAILED");
+});
+
+test("a thrown later-variant preflight failure is caught by the background transition", async () => {
+  const model = createModel();
+  const harness = createHarness(model);
+  const started = await harness.compare.compare({
+    ...BASE_REQUEST,
+    variants: [
+      { label: "a", soloTrackIndices: [0] },
+      { label: "b", soloTrackIndices: [99] },
+    ],
+  });
+
+  await harness.advance(4200);
+  const result = await harness.compare.get({ comparisonId: started.data.comparisonId });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "failed");
+  assert.equal(result.data.failedVariant, "b");
+  assert.equal(result.error.code, "TRACK_INDEX_OUT_OF_RANGE");
+});
+
+test("an explicit stop waits for an in-flight variant restore and preserves its failure", async () => {
+  let scheduled = null;
+  let releaseStop;
+  const stopGate = new Promise((resolve) => {
+    releaseStop = resolve;
+  });
+  const audition = {
+    start: async () => ({
+      ok: true,
+      data: { auditionId: "aud_deferred", playbackStartedAt: 1000, recovery: {} },
+      warnings: [],
+    }),
+    get: async () => ({ ok: true }),
+    stop: async () => stopGate,
+  };
+  const compare = new AuditionCompareService(audition, {
+    now: () => 1000,
+    setTimeoutFn: (callback) => {
+      scheduled = callback;
+      return callback;
+    },
+    clearTimeoutFn: () => {},
+  });
+  const started = await compare.compare({ ...BASE_REQUEST });
+
+  scheduled();
+  await new Promise((resolve) => setImmediate(resolve));
+  let settled = false;
+  const stopPromise = compare
+    .stop({ comparisonId: started.data.comparisonId })
+    .then((result) => {
+      settled = true;
+      return result;
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledBeforeRestore = settled;
+  releaseStop({
+    ok: false,
+    status: "restore_failed",
+    data: { recovery: { version: 1 }, restoration: [] },
+    error: { code: "RESTORE_FAILED", message: "injected restore failure" },
+  });
+  const result = await stopPromise;
+
+  assert.equal(settledBeforeRestore, false, "stop must share the in-flight restore completion");
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "restore_failed");
+  assert.equal(result.data.state, "restore_failed");
+});
+
 test("only one comparison may be active at a time", async () => {
   const model = createModel();
   const harness = createHarness(model);
@@ -353,6 +479,7 @@ test("malformed comparison requests are rejected before touching the host", asyn
     { ...BASE_REQUEST, order: ["a", "b"], repeats: 2 },
     { ...BASE_REQUEST, gapMs: -1 },
     { ...BASE_REQUEST, estimatedDurationMs: 10 },
+    { ...BASE_REQUEST, autoRestore: false },
     { ...BASE_REQUEST, unknownField: true },
   ];
   for (const request of cases) {

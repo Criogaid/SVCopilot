@@ -12,7 +12,12 @@ import { SnapshotStore } from "../server/src/snapshot.js";
 const Q = 705600000;
 
 function createModel(options = {}) {
-  const { noteCount = 6, lyingBooleans = true, selected = [] } = options;
+  const {
+    noteCount = 6,
+    lyingBooleans = true,
+    selected = [],
+    groupUuid = "uuid-selection",
+  } = options;
   let nextHandle = 900;
   const handle = (type) => ({ __handle__: nextHandle++, __type__: type, __epoch__: 1 });
   const h = {
@@ -54,6 +59,7 @@ function createModel(options = {}) {
       }
       if (id === h.group.__handle__ && method === "getTarget") return h.target;
       if (id === h.target.__handle__) {
+        if (method === "getUUID") return groupUuid;
         if (method === "getNumNotes") return model.notes.length;
         if (method === "getNote") {
           if (model.failOnGetNote !== null && args[0] - 1 === model.failOnGetNote) {
@@ -123,6 +129,7 @@ function createGroupContext(store, indices) {
     scope: { kind: "group" },
     observedAt: new Date(1000).toISOString(),
     context: { kind: "group" },
+    baseData: { group: { uuid: "uuid-selection" } },
     notes: indices.map((indexInGroup) => ({ indexInGroup })),
   });
   return stored;
@@ -278,6 +285,32 @@ test("range-context noteIds resolve and can be narrowed by occurrenceId", async 
         noteIds: [`${occurrenceId}:n:0`],
       }),
     (error) => error.code === "UNKNOWN_NOTE_ID"
+  );
+});
+
+test("context noteIds reject a different current editor group before selection changes", async () => {
+  const model = createModel({ selected: [1], groupUuid: "uuid-current-editor" });
+  const { service, store } = createService(model);
+  const { stored, occurrenceId } = createRangeContext(store, [1, 2]);
+
+  await assert.rejects(
+    () =>
+      service.setSelection({
+        operation: "select",
+        contextId: stored.contextId,
+        occurrenceId,
+        noteIds: [`${occurrenceId}:n:1`],
+      }),
+    (error) =>
+      error.code === "CURRENT_GROUP_MISMATCH" &&
+      error.details?.expectedGroupUuid === "uuid-selection" &&
+      error.details?.observedGroupUuid === "uuid-current-editor"
+  );
+  assert.deepEqual([...model.selected], [1], "a target mismatch must not mutate selection");
+  assert.equal(
+    model.calls.includes("clearNotes"),
+    false,
+    "identity validation must precede selection mutation"
   );
 });
 

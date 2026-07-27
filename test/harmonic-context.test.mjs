@@ -16,7 +16,10 @@ function createStore() {
 }
 
 function createContext(store, notes, options = {}) {
-  const { meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }] } = options;
+  const {
+    meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }],
+    pitchOffsetSemitone = 0,
+  } = options;
   const stored = store.create({
     epoch: 1,
     scope: { kind: "range" },
@@ -30,7 +33,7 @@ function createContext(store, notes, options = {}) {
     groupIndex: 0,
     targetGroupUuid: "uuid-harmonic",
     timeOffsetBlick: 0,
-    pitchOffsetSemitone: 0,
+    pitchOffsetSemitone,
     sharedTargetOccurrences: [occurrenceId],
     noteFingerprints: notes.map((note, index) => ({
       indexInGroup: index,
@@ -140,6 +143,37 @@ test("a clear I-IV-V-I melody yields the expected chord and cadence reading", as
   assert.equal(ending.candidates[0].type, "authentic");
   assert.ok(ending.candidates[0].rationale.length > 0);
   assert.equal(ending.confidenceKind, "heuristic_ranking_not_probability");
+});
+
+test("cadence does not report an ordinary weak beat as a strong beat", async () => {
+  const store = createStore();
+  const weakBeatEnding = CLEAR_CADENCE.map((note, index) =>
+    index === CLEAR_CADENCE.length - 1 ? { ...note, onsetBlick: 13 * Q } : note
+  );
+  const { stored } = createContext(store, weakBeatEnding);
+  const result = await analyzer(store).analyze({
+    contextId: stored.contextId,
+    include: ["key", "cadence"],
+  });
+
+  const ending = result.cadence.items[result.cadence.items.length - 1];
+  assert.equal(ending.finalScaleDegree.degree, 1);
+  assert.equal(ending.onStrongBeat, false);
+});
+
+test("occurrence pitch offset shifts sounding key and register analysis", async () => {
+  const store = createStore();
+  const { stored } = createContext(store, CLEAR_CADENCE, { pitchOffsetSemitone: 2 });
+  const result = await analyzer(store).analyze({
+    contextId: stored.contextId,
+    include: ["key", "statistics"],
+  });
+
+  assert.equal(result.key.bestCandidate.tonic, "D");
+  assert.equal(result.statistics.register.minPitch, 62);
+  assert.equal(result.statistics.register.maxPitch, 76);
+  assert.equal(result.occurrence.pitchOffsetSemitone, 2);
+  assert.equal(result.provenance.pitchBasis, "sounding_midi_with_occurrence_pitch_offset");
 });
 
 test("an ambiguous window returns several candidates instead of one asserted fact", async () => {
