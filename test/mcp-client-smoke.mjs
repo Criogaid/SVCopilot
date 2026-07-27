@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 32);
+  assert.equal(listed.tools.length, 33);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -105,6 +105,7 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_validate_lyrics_prosody"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_generate_harmony"));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_vocal_context"));
   const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
@@ -255,6 +256,7 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_validate_lyrics_prosody"));
   assert.ok(capabilities.interfaces.music.includes("sv_quantize_notes"));
   assert.ok(capabilities.interfaces.music.includes("sv_generate_harmony"));
+  assert.ok(capabilities.interfaces.music.includes("sv_analyze_vocal_context"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
@@ -297,6 +299,7 @@ try {
       "sv_validate_lyrics_prosody",
       "sv_quantize_notes",
       "sv_generate_harmony",
+      "sv_analyze_vocal_context",
     ]
   );
   const phraseResource = await client.readResource({

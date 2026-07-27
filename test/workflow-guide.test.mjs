@@ -207,6 +207,32 @@ test("recipes that consume range data declare what the capture must include", ()
   }
 });
 
+test("the diagnosis recipe leads with the composite analyzer, not four separate calls", () => {
+  const { recipe } = musicWorkflowGuideRecipe("analyze_vocal_phrase", "0.8.0");
+  const required = recipe.steps.filter((step) => !step.optional);
+  // 必做步骤应当只有"捕获 + 一次组合分析"；逐分析器调用降级为可选钻取。
+  assert.deepEqual(
+    required.map((step) => step.tool),
+    ["sv_snapshot_range", "sv_analyze_vocal_context"]
+  );
+  assert.equal(recipe.expectedCalls.min, 2);
+
+  const composite = required[1];
+  const rules = composite.readingRules.join(" ");
+  assert.match(rules, /summary\.sectionStatus/);
+  assert.match(rules, /one weak section does NOT invalidate the others/i);
+  assert.match(rules, /no_section_produced_evidence/);
+  assert.match(rules, /never report the last one as 'no problems found'/i);
+  assert.match(rules, /details\.tool/);
+
+  // 目录页的选工具表也要把它列为诊断入口。
+  const index = musicWorkflowGuideIndex("0.8.0");
+  assert.ok(
+    index.toolSelection.byNeed.some((entry) => entry.tool === "sv_analyze_vocal_context"),
+    "the tool-selection table must offer the composite analyzer"
+  );
+});
+
 test("every write recipe names the shared-target gate and the non-retryable outcomes", () => {
   const writeRecipes = [
     "align_and_commit_lyrics",

@@ -48,6 +48,7 @@ import {
 import { PhraseEditService } from "./phrase-edit.js";
 import { PhraseAnalysisService } from "./phrase-analysis.js";
 import { QuantizePlanService } from "./quantize-plan.js";
+import { VocalContextAnalysisService } from "./vocal-context.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { StyleProfileService } from "./style-profile.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
@@ -82,6 +83,7 @@ const styleProfileService = new StyleProfileService({ store: snapshotService.sto
 const lyricProsodyService = new LyricProsodyService({ store: snapshotService.store });
 const quantizePlanService = new QuantizePlanService({ store: snapshotService.store });
 const harmonyPlanService = new HarmonyPlanService({ store: snapshotService.store });
+const vocalContextService = new VocalContextAnalysisService({ store: snapshotService.store });
 
 const HANDLE_SCHEMA = {
   anyOf: [
@@ -1397,6 +1399,63 @@ const TOOLS = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
+    name: "sv_analyze_vocal_context",
+    description:
+      'One-shot vocal context analysis: composes sv_analyze_phrase, sv_validate_lyrics_prosody, sv_style_profile, and sv_compare_computed_pitch over ONE range context in a single call (in-memory only, never touches the host, makes zero host calls). It adds NO new musical authority — every conclusion belongs to the analyzer named in the section\'s authority field and in provenance.sectionAuthority. Each section independently reports succeeded, not_captured, insufficient_evidence, or failed with a remedy, so one weak section never swallows the rest; only request-level problems (unknown/invalid context, unknown or ambiguous occurrence, bad arguments) fail the whole call. Missing computed pitch reports insufficient_evidence with an explicit "not enough data to analyze, NOT zero error" remedy. topFindings merges prosody issues (heuristic, severity-ranked) and computed-pitch anomaly segments (objective deviation measurements, not a verdict that the singing is wrong) sorted by severity then score time; nextSteps names the concrete follow-up tool and arguments. compact (default) returns summaries, the top findings, and next steps; every section also carries details.tool/details.arguments for re-running that analyzer verbatim to get its full lists — there is no cursor to expire because these analyzers are free to re-run. Deterministic: identical context and request produce identical output. Whether the singing sounds good remains human_only.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description: "Range context from sv_snapshot_range captured with notes.",
+        },
+        occurrenceId: {
+          type: "string",
+          minLength: 1,
+          description: "Optional when the context has exactly one occurrence with notes.",
+        },
+        include: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { enum: ["phrase", "prosody", "style", "computedPitch"] },
+          description:
+            'Defaults to all sections. computedPitch needs a context captured with include ["computedPitch"]; prosody phoneme coverage needs include ["processing"]; style parameter statistics need include ["automation"].',
+        },
+        phraseGapQuarter: {
+          type: "number",
+          minimum: 0.25,
+          maximum: 8,
+          default: 1,
+          description: "Rest length (in quarters) treated as a phrase boundary.",
+        },
+        responseMode: {
+          enum: ["compact", "standard", "verbose"],
+          default: "compact",
+          description:
+            "compact caps per-section item lists hard and relies on details.tool/arguments for full lists; standard and verbose honour the budgets below.",
+        },
+        budgets: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            issues: { type: "integer", minimum: 1, maximum: 500, default: 50 },
+            perNote: { type: "integer", minimum: 1, maximum: 2000, default: 100 },
+            anomalySegments: { type: "integer", minimum: 1, maximum: 200, default: 20 },
+            bytes: { type: "integer", minimum: 8192, maximum: 200000, default: 60000 },
+          },
+          description:
+            "Per-section item caps plus a response byte budget. Exceeding bytes drops per-section item lists (never the summaries, topFindings, or nextSteps) and warns RESPONSE_BUDGET_APPLIED.",
+        },
+      },
+      required: ["contextId"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "sv_get_parameter_curve",
     description:
       "Read one Automation parameter curve of a note group within a required blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> is accepted only when <Name> exists in the target group's observable vocalModeParams. Names are case-insensitive and the response reports requestedParameter and resolvedParameter. Unknown names are rejected before NoteGroup.getParameter because SynthV may silently return a default curve. The host curve is read once with getAllPoints and filtered locally; only an oversized 64 KiB result falls back to density-based range bisection. Automation lives in group-local blicks; every point reports localBlick and absoluteBlick together with the official definition and interpolation method.",
@@ -1988,6 +2047,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       description: "Exact JSON input schema used to validate sv_generate_harmony.",
       mimeType: "application/json",
     },
+    {
+      uri: "svcopilot://schemas/sv_analyze_vocal_context",
+      name: "sv_analyze_vocal_context input schema",
+      description: "Exact JSON input schema used to validate sv_analyze_vocal_context.",
+      mimeType: "application/json",
+    },
   ],
 }));
 
@@ -2109,6 +2174,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_generate_harmony":
         result = await harmonyPlanService.plan(args);
+        break;
+      case "sv_analyze_vocal_context":
+        result = await vocalContextService.analyze(args);
         break;
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
@@ -2339,6 +2407,7 @@ function capabilities() {
         "sv_validate_lyrics_prosody",
         "sv_quantize_notes",
         "sv_generate_harmony",
+        "sv_analyze_vocal_context",
       ],
       audition: [
         "sv_start_audition",
@@ -2381,6 +2450,7 @@ function capabilities() {
         sv_validate_lyrics_prosody: ["range"],
         sv_quantize_notes: ["range"],
         sv_generate_harmony: ["range"],
+        sv_analyze_vocal_context: ["range"],
       },
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
@@ -2426,6 +2496,7 @@ function musicWorkflowSchemaIndex() {
     "sv_validate_lyrics_prosody",
     "sv_quantize_notes",
     "sv_generate_harmony",
+    "sv_analyze_vocal_context",
   ];
   return {
     schemaVersion: INTERFACE_VERSION,
@@ -2453,6 +2524,7 @@ function toolInputSchema(name) {
         "sv_validate_lyrics_prosody",
         "sv_quantize_notes",
         "sv_generate_harmony",
+        "sv_analyze_vocal_context",
       ].includes(candidate.name)
   );
   if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);

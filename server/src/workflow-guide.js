@@ -189,7 +189,7 @@ const RECIPES = [
     goal:
       "Establish key, phrasing, prosody problems, and objective pitch evidence for a phrase before proposing any edit.",
     requiredCapabilities: ["computedPitch"],
-    expectedCalls: { min: 2, max: 5 },
+    expectedCalls: { min: 2, max: 4 },
     humanGates: [],
     captureTemplate: captureTemplate(
       ["notes", "tempoMap", "meterMap", "computedPitch", "processing", "automation"],
@@ -212,54 +212,76 @@ const RECIPES = [
       },
       {
         n: 2,
-        tool: "sv_analyze_phrase",
-        purpose: "Ranked key candidates, scale degrees, phrase segmentation, and statistics.",
-        arguments: { contextId: EXAMPLE.contextId, include: ["key", "phrases", "statistics"] },
-        acceptable: ["ok"],
+        tool: "sv_analyze_vocal_context",
+        purpose:
+          "One call returning phrase, prosody, style, and computed-pitch evidence together. Prefer this over calling the four analyzers separately — it is the same analysis cores, fewer calls, and nothing is silently skipped.",
+        arguments: { contextId: EXAMPLE.contextId, occurrenceId: EXAMPLE.occurrenceId },
+        acceptable: ["succeeded (read summary.evidence for how complete it is)"],
         nonRetryable: [
-          "NO_MELODIC_NOTES — the range is all breaths or empty; widen the range instead of retrying",
+          "AMBIGUOUS_CONTEXT — pass occurrenceId; do not guess which occurrence was meant",
+          "UNKNOWN_CONTEXT / INVALID_CONTEXT — re-snapshot, do not retry",
         ],
+        readingRules: [
+          "Read summary.sectionStatus first. succeeded / not_captured / insufficient_evidence / failed are per-section: one weak section does NOT invalidate the others.",
+          "summary.evidence says how much you actually have: all_requested_sections_analyzed, partial_evidence, or no_section_produced_evidence. Never report the last one as 'no problems found'.",
+          "Each section's authority field names the analyzer that owns the conclusion; this tool adds no musical authority of its own.",
+          "topFindings merges prosody issues (heuristic) and computed-pitch anomaly segments (objective measurement) — the confidence field distinguishes them. An anomaly is a deviation measurement, not proof the singing is wrong.",
+          "nextSteps names the concrete follow-up tool and arguments. Follow it rather than inventing a next call.",
+          "For a section's full item list, re-call the tool named in that section's details.tool with details.arguments. There is no cursor to expire.",
+        ],
+      },
+      {
+        n: 3,
+        tool: "sv_wait_for_processing",
+        purpose:
+          "Only when the computedPitch section reported not_captured or insufficient_evidence: let the host finish computing, then re-snapshot and re-analyze.",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          occurrenceId: EXAMPLE.occurrenceId,
+          kind: "computedPitch",
+        },
+        optional: true,
+        acceptable: ["ready", "timeout (reports the last observation, never a fake success)"],
+        readingRules: [
+          "Missing or all-null computed pitch means NOT ENOUGH DATA TO ANALYZE. It is never zero error and never proof of good intonation.",
+          "After ready, re-run sv_snapshot_range and sv_analyze_vocal_context; the analyzers cannot read the host themselves.",
+        ],
+      },
+      {
+        n: 4,
+        tool: "sv_analyze_phrase",
+        purpose:
+          "Optional drill-down when you need one section's full detail — call whatever sections[].details names, with its details.arguments verbatim.",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          include: ["key", "scaleDegrees", "phrases", "statistics"],
+          responseMode: "verbose",
+        },
+        optional: true,
+        acceptable: ["ok"],
         readingRules: [
           "key.candidates is RANKED. When the margin to the runner-up is thin (relative major/minor on short melodies), report both.",
           "Breath notes (lyrics \"br\") are excluded from key/phrase/statistics by design and reported as breathEvents.",
         ],
       },
       {
-        n: 3,
-        tool: "sv_validate_lyrics_prosody",
-        purpose: "Find breath, mora, syllable, language-consistency, and phoneme-coverage problems.",
-        arguments: { contextId: EXAMPLE.contextId },
-        acceptable: ["ok"],
-        readingRules: [
-          "phonemeCoverage reports not_captured unless the context included processing.",
-          "stressAlignment is dictionary-free: info-level and confidence:\"low\" only. Never present it as an error.",
-        ],
-      },
-      {
-        n: 4,
+        n: 5,
         tool: "sv_compare_computed_pitch",
-        purpose: "Objective intonation, vibrato, and transition evidence against note targets.",
+        purpose:
+          "Optional drill-down for full per-note intonation, vibrato, and transition detail beyond the composite summary.",
         arguments: {
           mode: "compare_to_target",
           contextId: EXAMPLE.contextId,
           occurrenceId: EXAMPLE.occurrenceId,
+          responseMode: "verbose",
         },
+        optional: true,
         acceptable: ["ok", "insufficient_data"],
         readingRules: [
           "LOW_COMPUTED_PITCH_COVERAGE means the sample is too small to conclude from. Say so.",
           "All-null frames mean not enough data to analyze — never report zero error or perfect intonation.",
           "If processing is still running, call sv_wait_for_processing (kind computedPitch) and RE-SNAPSHOT before comparing again; the comparer cannot read the host.",
         ],
-        onInsufficientData: {
-          tool: "sv_wait_for_processing",
-          arguments: {
-            contextId: EXAMPLE.contextId,
-            occurrenceId: EXAMPLE.occurrenceId,
-            kind: "computedPitch",
-          },
-          note:
-            "startBlick/intervalBlick/frames are inherited from a context captured with include:[\"computedPitch\"]. After it reports ready, re-run sv_snapshot_range, then compare again.",
-        },
       },
     ],
     reportingRules: [
@@ -821,7 +843,7 @@ const RECIPES = [
 const DEFAULT_WORKFLOW = [
   "svcopilot://capabilities and this guide",
   "sv_snapshot_range (capture what the later steps need — analyzers cannot read the host)",
-  "analysis (sv_analyze_phrase / sv_validate_lyrics_prosody / sv_compare_computed_pitch / sv_style_profile)",
+  "analysis — prefer sv_analyze_vocal_context (one call composing phrase/prosody/style/computedPitch); drill into a single analyzer only when you need its full detail",
   "planner (sv_plan_expression / sv_align_lyrics / sv_quantize_notes / sv_generate_harmony)",
   "hardened editor dryRun:true and read plannedDiff",
   "hardened editor commit and read status/effects",
@@ -835,6 +857,7 @@ const TOOL_SELECTION = {
   byNeed: [
     { need: "See project structure", tool: "sv_snapshot", scope: "kind:\"project\"" },
     { need: "Capture an editable phrase", tool: "sv_snapshot_range" },
+    { need: "Diagnose a phrase (start here)", tool: "sv_analyze_vocal_context" },
     { need: "Key / phrases / scale degrees", tool: "sv_analyze_phrase" },
     { need: "Lyric and prosody problems", tool: "sv_validate_lyrics_prosody" },
     { need: "Objective intonation evidence", tool: "sv_compare_computed_pitch" },
