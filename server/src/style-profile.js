@@ -1,6 +1,7 @@
-import { isBreathLyrics, segmentPhrases } from "./expression-plan.js";
+import { segmentPhrases } from "./expression-plan.js";
 import { analyzeStatistics } from "./phrase-analysis.js";
 import { ServiceTiming } from "./service-timing.js";
+import { isBreathEventLyrics } from "./vocal-event-semantics.js";
 import { getVocalModeNames } from "./voice-parameters.js";
 
 // sv_style_profile：工程级风格统计聚合（HANDOFF §7 P2 / 研究提示 Layer B）。
@@ -35,7 +36,7 @@ const PROVENANCE = Object.freeze({
   sectionLabels: "caller_provided_not_inferred",
   parameterStatistics: "automation_control_points_not_rendered_curve",
   phraseSegmentation: "rest_threshold_heuristic",
-  breathDetection: "lyrics_br_host_convention_not_official_api_fact",
+  breathDetection: "official_documented_special_lyric_br",
   singerIdentity: "unobservable",
   perception: "human_only",
 });
@@ -148,8 +149,8 @@ function resolveProfileTarget(store, target, index) {
       durationBlick: fingerprint.durationBlick,
     }))
     .sort((left, right) => left.absOnsetBlick - right.absOnsetBlick);
-  const notes = allNotes.filter((note) => !isBreathLyrics(note.lyrics));
-  const breathNotes = allNotes.filter((note) => isBreathLyrics(note.lyrics));
+  const notes = allNotes.filter((note) => !isBreathEventLyrics(note.lyrics));
+  const breathNotes = allNotes.filter((note) => isBreathEventLyrics(note.lyrics));
   return { index, label: target.label ?? null, stored, occurrence, notes, breathNotes, quarterBlick };
 }
 

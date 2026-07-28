@@ -565,7 +565,7 @@ test("range occurrence identity distinguishes references to one shared target", 
 
 test("musicalToBlick reaches fractional positions inside the last beat of a measure", () => {
   const marks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
-  // 4/4 的 beat 4.5（"第 4 拍的后半"——切分/上勾/句末表情最常用的锚点）此前因
+  // 4/4 的 beat 4.5（"第 4 拍的后半"——切分/上勾/句末表现最常用的锚点）此前因
   // off-by-one 完全不可达，且没有任何等价写法。
   const half = musicalToBlick(normalizeMusicalPoint({ bar: 1, beat: 4.5 }), marks, Q);
   assert.equal(half, 3.5 * Q);

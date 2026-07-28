@@ -10,7 +10,7 @@
 //   rolled_back / rollback_failed / partial / outcome_unknown 语义不因信封改变。
 // - plan 不是跳过 live preflight 的凭据：宿主没有 revision API，preconditions 只描述
 //   规划时观测到的前提，仍由目标工具在写入前对活宿主重新校验。
-// - expectedUserUndoSteps 是"用户需要按几次撤销"的诚实计数：expression 的非相邻手势簇
+// - expectedUserUndoSteps 是"用户需要按几次撤销"的诚实计数：expression 的非相邻表现手法簇
 //   会拆成 K 次调用即 K 条 Undo 记录，不能谎报为 1。
 //
 // 兼容：本版同时保留各规划器原有的 applyRequests/patchRequest/restructureRequest 字段

@@ -385,6 +385,17 @@ try {
     })
   );
   assert.equal(compareInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  const pitchGestureResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_plan_pitch_gesture",
+  });
+  assert.ok(pitchGestureResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const pitchGestureSchema = parseResource(pitchGestureResource).inputSchema;
+  assert.deepEqual(pitchGestureSchema.properties.specialEventPolicy.enum, [
+    "warn_and_skip",
+    "include",
+    "error",
+  ]);
+  assert.equal(pitchGestureSchema.properties.specialEventPolicy.default, "warn_and_skip");
   const planResource = await client.readResource({
     uri: "svcopilot://schemas/sv_plan_expression",
   });
@@ -490,6 +501,7 @@ try {
   const prosodySchema = parseResource(prosodyResource).inputSchema;
   assert.deepEqual(prosodySchema.properties.checks.items.enum, [
     "breath",
+    "specialLyricChains",
     "japaneseMora",
     "englishSyllables",
     "languageConsistency",

@@ -395,6 +395,170 @@ test("multi-syllable English words expand into '+' continuations", async () => {
   assert.equal(result.perNote[1].languageOverride.planned, "");
 });
 
+test("explicit continuation chains override inferred English syllable expansion", async () => {
+  const cases = [
+    {
+      lyrics: "beautiful + +",
+      plannedLyrics: ["beautiful", "+", "+"],
+      semanticRoles: ["lexical_head", "syllable_continuation", "syllable_continuation"],
+    },
+    {
+      lyrics: "ashame + - -",
+      plannedLyrics: ["ashame", "+", "-", "-"],
+      semanticRoles: [
+        "lexical_head",
+        "syllable_continuation",
+        "phonation_continuation",
+        "phonation_continuation",
+      ],
+    },
+    {
+      lyrics: "ashame - + -",
+      plannedLyrics: ["ashame", "-", "+", "-"],
+      semanticRoles: [
+        "lexical_head",
+        "phonation_continuation",
+        "syllable_continuation",
+        "phonation_continuation",
+      ],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const store = createStore();
+    const { stored, occurrenceId } = createStoredContext(store, {
+      notes: uniformNotes(new Array(fixture.plannedLyrics.length).fill("")),
+    });
+    const result = await createService(store).align({
+      contextId: stored.contextId,
+      lyrics: fixture.lyrics,
+    });
+
+    assert.equal(result.summary.unitCount, fixture.plannedLyrics.length);
+    assert.deepEqual(
+      result.perNote.map((item) => item.plannedLyrics),
+      fixture.plannedLyrics
+    );
+    assert.deepEqual(
+      result.perNote.map((item) => item.unit.semanticRole),
+      fixture.semanticRoles
+    );
+    assert.equal(result.perNote[0].unit.chainHeadNoteId, noteId(occurrenceId, 0));
+    assert.ok(
+      result.perNote
+        .slice(1)
+        .every((item) => item.unit.continuationValid === true)
+    );
+    assert.ok(
+      !result.warnings.some((warning) => warning.code === "SYLLABLE_CHAIN_GAP")
+    );
+  }
+});
+
+test("orphan continuations require review and compact preserves semantic counts", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: uniformNotes(["", "", ""]),
+  });
+  const result = await createService(store).align({
+    contextId: stored.contextId,
+    lyrics: "+ - word",
+    responseMode: "compact",
+  });
+
+  assert.equal(result.tokens, undefined);
+  assert.equal(result.perNote, undefined);
+  assert.deepEqual(result.summary.semanticRoles.byRole, {
+    syllable_continuation: 1,
+    phonation_continuation: 1,
+    lexical_head: 1,
+  });
+  assert.equal(result.summary.needsReviewCount, 2);
+  assert.equal(result.review.requiresHumanReview, true);
+  assert.ok(result.warnings.some((warning) => warning.code === "ORPHAN_PLUS"));
+  assert.ok(
+    result.warnings.some(
+      (warning) => warning.code === "ORPHAN_PHONATION_CONTINUATION"
+    )
+  );
+});
+
+test("special lyrics use exact spelling and expose official semantic evidence", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: uniformNotes(["", ""]),
+  });
+  const result = await createService(store).align({
+    contextId: stored.contextId,
+    lyrics: "br BR",
+  });
+
+  assert.deepEqual(
+    result.perNote.map((item) => item.plannedLyrics),
+    ["br", "BR"]
+  );
+  assert.deepEqual(
+    result.tokens.map((token) => token.semanticRole),
+    ["breath_event", "lexical_head"]
+  );
+  assert.deepEqual(
+    result.tokens.map((token) => token.semanticEvidence),
+    ["official_documented_special_lyric_br", "similar_to_official_special_lyric_but_not_exact"]
+  );
+  assert.ok(
+    result.warnings.some((warning) => warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT")
+  );
+  assert.equal(
+    result.provenance.plusMinusBreath,
+    "official_documented_exact_ascii_special_lyrics"
+  );
+});
+
+test("apostrophe prefixes carry glottal semantics while standalone apostrophe requires review", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: uniformNotes(["", "", "", ""]),
+  });
+  const result = await createService(store).align({
+    contextId: stored.contextId,
+    lyrics: "'a 'あ ' cl",
+  });
+
+  assert.deepEqual(
+    result.perNote.map((item) => item.plannedLyrics),
+    ["'a", "'あ", "'", "cl"]
+  );
+  assert.deepEqual(
+    result.tokens.map((token) => token.semanticRole),
+    ["glottal_onset", "glottal_onset", "unknown_special", "lexical_head"]
+  );
+  assert.deepEqual(
+    result.tokens.map((token) => token.semanticEvidence),
+    [
+      "official_documented_apostrophe_prefix_cl",
+      "official_documented_apostrophe_prefix_cl",
+      "standalone_apostrophe_pending_host_calibration",
+      "official_documented_lexical_lyric",
+    ]
+  );
+  assert.equal(result.tokens[2].needsReview, true);
+  assert.equal(result.perNote[2].needsReview, true);
+  assert.equal(result.review.requiresHumanReview, true);
+  assert.ok(
+    result.warnings.some(
+      (warning) => warning.code === "STANDALONE_APOSTROPHE_UNCALIBRATED"
+    )
+  );
+  assert.equal(
+    result.provenance.apostrophePrefix,
+    "official_documented_prefix_inserts_cl_phoneme"
+  );
+  assert.equal(
+    result.provenance.standaloneApostrophe,
+    "not_documented_requires_human_review"
+  );
+});
+
 test("unit overflow and leftover notes are reported honestly", async () => {
   const store = createStore();
   const overflow = createStoredContext(store, { notes: uniformNotes(["x", "y"]) });

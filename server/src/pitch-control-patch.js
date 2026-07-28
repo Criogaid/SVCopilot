@@ -336,7 +336,7 @@ async function resolvePitchTarget(scope, stored, input) {
     );
   }
   // 音符锚点漂移守卫（sv_plan_pitch_gesture 经 apply 传入）：PitchControl 不锚定音符，但
-  // 手势曲线是按快照音符位置/音高计算的——音符被移动（UUID/offset 不变）时绝对坐标曲线会落到
+  // 音高变化曲线是按快照音符位置/音高计算的——音符被移动（UUID/offset 不变）时绝对坐标曲线会落到
   // 错误位置，逐条核对快照指纹，漂移即 STALE_CONTEXT（发生在任何写入之前，effects 保持 none）。
   if (input.target.expectedNotes) {
     for (const expected of input.target.expectedNotes) {
@@ -1183,7 +1183,7 @@ function normalizeTarget(target) {
 
 const MAX_EXPECTED_NOTES = 256;
 
-// target.expectedNotes：手势曲线锚定的音符快照指纹（sv_plan_pitch_gesture 经 apply 传入）。
+// target.expectedNotes：音高变化曲线锚定的音符快照指纹（sv_plan_pitch_gesture 经 apply 传入）。
 // 与 parameter-curve 同契约：缺字段会导致必然失败的假 STALE_CONTEXT，宁可归一化阶段拒绝。
 function normalizeExpectedNotes(value) {
   if (value === undefined) return undefined;

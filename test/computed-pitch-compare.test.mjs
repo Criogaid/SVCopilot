@@ -202,6 +202,64 @@ test("GF-SYN-002: null frames stay out of statistics but count in coverage", asy
   assert.equal(result.perNote.items[0].status, "insufficient_data");
 });
 
+test("official br events are excluded from computed-pitch coverage and melodic details", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const { stored } = createStoredContext(store, {
+    values: [...new Array(10).fill(72), ...new Array(10).fill(60)],
+    intervalBlick: interval,
+    notes: [
+      { onsetBlick: 0, durationBlick: 10 * interval, pitch: 72, lyrics: "br" },
+      { onsetBlick: 10 * interval, durationBlick: 10 * interval, pitch: 60, lyrics: "word" },
+    ],
+  });
+  const result = await createService(store).compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+    analysis: { minValidFramesPerNote: 2, centerMinFrames: 2 },
+  });
+
+  assert.equal(result.summary.frameCount, 20);
+  assert.equal(result.summary.eligibleFrameCount, 10);
+  assert.equal(result.summary.excludedFrameCount, 10);
+  assert.equal(result.summary.excludedFiniteFrameCount, 10);
+  assert.equal(result.summary.rawFiniteFrameCount, 20);
+  assert.equal(result.summary.finiteFrameCount, 10);
+  assert.equal(result.summary.validFrameCount, 10);
+  assert.equal(result.summary.coverage, 1);
+  assert.equal(result.inputNoteCount, 2);
+  assert.equal(result.melodicNoteCount, 1);
+  assert.equal(result.excludedEvents.count, 1);
+  assert.equal(result.excludedEvents.byRole.breath_event, 1);
+  assert.deepEqual(
+    result.perNote.items.map((item) => item.lyrics),
+    ["word"]
+  );
+  assert.equal(result.transitions.length, 0);
+  assert.ok(!result.warnings.some((warning) => warning.code === "LOW_COMPUTED_PITCH_COVERAGE"));
+});
+
+test("an all-br range reports no melodic evidence instead of processing pending", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const { stored } = createStoredContext(store, {
+    values: new Array(10).fill(null),
+    intervalBlick: interval,
+    notes: [{ onsetBlick: 0, durationBlick: 10 * interval, pitch: 72, lyrics: "br" }],
+  });
+
+  await assert.rejects(
+    createService(store).compare({
+      mode: "compare_to_target",
+      contextId: stored.contextId,
+    }),
+    (error) =>
+      error.code === "NO_MELODIC_EVIDENCE" &&
+      error.details?.inputNoteCount === 1 &&
+      error.details?.excludedEvents?.byRole?.breath_event === 1
+  );
+});
+
 test("target uses pitch + detune + reference pitchOffset, and analysis overrides apply", async () => {
   const store = createStore();
   const interval = Q / 10;
@@ -484,6 +542,43 @@ test("low pairwise coverage raises the same warning in compare_contexts", async 
   });
   assert.equal(result.summary.coverage, 0.25);
   assert.ok(result.warnings.some((item) => item.code === "LOW_COMPUTED_PITCH_COVERAGE"));
+});
+
+test("compare_contexts excludes special-event frames on both sides and reports note counts", async () => {
+  const store = createStore();
+  const interval = Q / 10;
+  const { before, after } = createContextsPair(
+    store,
+    [72, 72, 60, 60],
+    [71, 71, 60.1, 60.1],
+    {
+      shared: {
+        intervalBlick: interval,
+        notes: [
+          { onsetBlick: 0, durationBlick: 2 * interval, pitch: 72, lyrics: "br" },
+          { onsetBlick: 2 * interval, durationBlick: 2 * interval, pitch: 60, lyrics: "word" },
+        ],
+      },
+    }
+  );
+  const result = await createService(store).compare({
+    mode: "compare_contexts",
+    before: { contextId: before.stored.contextId },
+    after: { contextId: after.stored.contextId },
+  });
+
+  assert.equal(result.summary.frameCount, 4);
+  assert.equal(result.summary.eligibleFrameCount, 2);
+  assert.equal(result.summary.excludedFrameCount, 2);
+  assert.equal(result.summary.validFrameCount, 2);
+  assert.equal(result.summary.coverage, 1);
+  assert.deepEqual(result.noteCounts, {
+    before: { inputNoteCount: 2, melodicNoteCount: 1 },
+    after: { inputNoteCount: 2, melodicNoteCount: 1 },
+  });
+  assert.equal(result.excludedEvents.before.byRole.breath_event, 1);
+  assert.equal(result.excludedEvents.after.byRole.breath_event, 1);
+  assert.equal(result.perNote.count, 1);
 });
 
 // ---------- compare_contexts ----------

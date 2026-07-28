@@ -308,7 +308,7 @@ test("all five planners share one apply envelope a generic consumer can submit",
     assert.ok(validate, `${planner} named an unserved tool ${plan.apply.tool}`);
     assertValid(validate, plan.apply.arguments, `${planner} apply.arguments`);
 
-    // 多次调用（expression 的非相邻手势簇）同样逐条可校验。
+    // 多次调用（expression 的非相邻表现手法簇）同样逐条可校验。
     for (const call of plan.apply.additionalCalls ?? []) {
       assertValid(
         validators.get(call.tool),
@@ -341,7 +341,7 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
     { onsetBlick: 21 * Q, durationBlick: Q, pitch: 65, lyrics: "d" },
   ]);
   const notes = context.stored.context.occurrences[0].noteFingerprints;
-  // 同一参数的两个互不相邻手势簇 → 必须拆成两次调用（两条 Undo 记录）。
+  // 同一参数的两个互不相邻表现手法簇 → 必须拆成两次调用（两条 Undo 记录）。
   const plan = await new ExpressionPlanService({ store, now: () => 2000 }).plan({
     contextId: context.stored.contextId,
     gestures: [

@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
+import {
+  analyzeVocalEventSequence,
+  isBreathEventLyrics,
+} from "./vocal-event-semantics.js";
 
-// sv_plan_expression：dry-run 表情规划器（M-03 / §6.1 表情手势生成器）。
+// sv_plan_expression：dry-run 演唱表现规划器（M-03 / §6.1 演唱表现手法生成器）。
 //
 // 关键契约：
 // - 纯内存只读：只读取 sv_snapshot_range 已存的音符指纹/tempo/meter 数据，不进入
@@ -17,7 +21,7 @@ import { ServiceTiming } from "./service-timing.js";
 //   SynthV 的 pitch 写面单位互不相同（automation=cents，PitchControl=半音），P0 只
 //   规划 automation 写面并显式声明，杜绝 +25 的量纲歧义。
 // - 诚实边界：规划基于快照指纹，宿主并发漂移由 apply 阶段的 UUID/live 校验兜底；
-//   replace 模式会覆盖手势区间内的既有控制点，规划器不读宿主、无法核对，review
+//   replace 模式会覆盖表现手法作用区间内的既有控制点，规划器不读宿主、无法核对，review
 //   中显式声明 existingPointsChecked:false；能否"更好听"永远是 human_only。
 export const EXPRESSION_PLAN_DEFAULTS = Object.freeze({
   constraints: Object.freeze({
@@ -55,7 +59,7 @@ const INTENT_EMOTIONS = Object.freeze(["cool_anger", "tender"]);
 const INTENT_TECHNIQUES = Object.freeze(["controlled_belt", "soft_airy", "light_rasp"]);
 // section-aware presets（M-04）：可审阅的常量展开，不是黑箱按钮。每个 preset 只是现有
 // intent 词表字段 + 约束默认值的组合（spoken_rap_transition 额外播种 vibratoEnv 压平
-// 手势）；展开结果逐字段回显在 presetExpansion 中，用户显式传的同名 intent 字段覆盖
+// 表现手法）；展开结果逐字段回显在 presetExpansion 中，用户显式传的同名 intent 字段覆盖
 // preset 值并发警告，用户 constraints 永远优先于 preset 约束默认值。
 export const INTENT_PRESETS = Object.freeze({
   jpop_cool: Object.freeze({
@@ -95,6 +99,8 @@ const PROVENANCE = Object.freeze({
   intentMappingBasis: "heuristic",
   thresholdBasis: "engineering_heuristic_requires_host_calibration",
   hostWriteSurfaces: Object.freeze(["automation"]),
+  specialLyrics: "official_v2_manual_enter_notes",
+  melodicEligibility: "shared_vocal_event_sequence_semantics",
   perception: "human_only",
 });
 
@@ -210,11 +216,14 @@ function resolvePlanSource(store, input) {
     }))
     .sort((left, right) => left.absOnsetBlick - right.absOnsetBlick);
   const noteById = new Map(notes.map((note) => [note.noteId, note]));
+  const semantics = analyzeVocalEventSequence(notes);
   return {
     stored,
     occurrence,
     notes,
     noteById,
+    semanticEvents: semantics.events,
+    semanticIssues: semantics.issues,
     quarterBlick,
     tempoMarks: stored.context.tempoMarks ?? [],
     timeOffsetBlick: timeOffset,
@@ -229,7 +238,7 @@ function requireNote(loaded, noteId, label) {
   return note;
 }
 
-// ---------- 手势构建 ----------
+// ---------- 表现手法构建 ----------
 
 function buildGestures(loaded, input, warnings) {
   const explicit = input.gestures.map((gesture, index) =>
@@ -257,6 +266,11 @@ function buildGestures(loaded, input, warnings) {
       left.gestureId.localeCompare(right.gestureId)
   );
   if (gestures.length === 0) {
+    const allIntentTargetsExcluded =
+      input.gestures.length === 0 &&
+      input.intent &&
+      loaded.semanticEvents.every((event) => !event.melodicEligible);
+    if (allIntentTargetsExcluded) return [];
     throw codedError(
       "EMPTY_PLAN",
       "no gestures to plan: provide explicit gestures, or an intent that matches the phrase structure"
@@ -265,7 +279,7 @@ function buildGestures(loaded, input, warnings) {
   return gestures;
 }
 
-// 把一个（显式或意图派生的）手势请求绑定到音符跨度，生成连续求值函数与采样位置。
+// 把一个显式或由意图派生的表现手法请求绑定到音符跨度，生成连续求值函数与采样位置。
 function instantiateGesture(gesture, loaded, input, meta) {
   switch (gesture.type) {
     case "scoop":
@@ -574,15 +588,27 @@ function instantiateHairpin(gesture, loaded, input, meta) {
 function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   const intent = input.intent;
   const quarter = loaded.quarterBlick;
-  // 意图手势只锚定旋律音符："br" 呼吸音符没有可唱音高，在换气上规划 scoop/颤音/
-  // 弧线毫无意义。显式手势不受此过滤（用户的话优先）。br 时值天然成为乐句间隙，
-  // 让呼吸位置照常参与 rest 阈值切分。
-  const melodicNotes = loaded.notes.filter((note) => !isBreathLyrics(note.lyrics));
-  if (melodicNotes.length < loaded.notes.length) {
-    appendOnce(warnings, {
-      code: "BREATH_NOTES_SKIPPED_BY_INTENT",
+  // 意图派生只使用状态机认可的旋律事件；显式 gesture 仍尊重调用者点名，不受此处过滤。
+  const melodicNotes = loaded.semanticEvents
+    .filter((event) => event.melodicEligible)
+    .map((event) => event.note);
+  for (const issue of loaded.semanticIssues) {
+    warnings.push({ ...issue });
+  }
+  for (const event of loaded.semanticEvents) {
+    if (event.melodicEligible) continue;
+    const issueCodes = loaded.semanticIssues
+      .filter((issue) => issue.noteIds?.includes(event.noteId))
+      .map((issue) => issue.code);
+    warnings.push({
+      code: "NON_MELODIC_SPECIAL_EVENT_SKIPPED",
+      noteId: event.noteId,
+      semanticRole: event.semanticRole,
+      lyrics: event.classification.rawLyrics,
+      evidence: event.semanticEvidence,
+      ...(issueCodes.length > 0 ? { issueCodes } : {}),
       message:
-        "breath notes (lyrics 'br') were excluded from intent-derived gesture anchoring; their duration still separates phrases.",
+        "Skipped intent-derived expression planning for a non-melodic special lyric event.",
     });
   }
   const phrases = segmentPhrases(melodicNotes, quartersToBlick(input.intentDefaults.phraseGapQuarter, quarter));
@@ -726,14 +752,14 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
     }
   }
   if (candidates.length === 0 && (intent.section || intent.emotion)) {
-    // genre/technique 未产出任何候选，但用户单独给了 section/emotion：直接播种基线手势兜底，
+    // genre/technique 未产出任何候选，但用户单独给了 section/emotion：直接播种基线表现方案兜底，
     // 不再必然 EMPTY_PLAN。在 applyIntentModifiers 之后播种，故这些已成形的基线不会被二次修饰。
     seedIntentBaselines(intent, phrases, push);
   }
 
   const derived = [];
   for (const candidate of candidates) {
-    // 显式手势覆盖同类同参数的重叠意图候选，用户的话优先于模板。
+    // 显式表现手法覆盖同类同参数的重叠意图候选，用户的话优先于模板。
     const bounds = candidateSpanBounds(candidate.spec, loaded);
     const superseded = explicitGestures.some(
       (gesture) =>
@@ -783,7 +809,7 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   return derived;
 }
 
-// 情绪/段落修饰只作用于意图派生的候选，显式手势保持用户原话。
+// 情绪/段落修饰只作用于意图派生的候选，显式表现手法保持用户原话。
 function applyIntentModifiers(candidates, intent) {
   for (const candidate of candidates) {
     const spec = candidate.spec;
@@ -834,7 +860,7 @@ function applyIntentModifiers(candidates, intent) {
   }
 }
 
-// section/emotion 单独出现（无 genre/technique 候选）时的基线手势。均为低置信启发式默认表情曲线：
+// section/emotion 单独出现（无 genre/technique 候选）时的基线表现方案。均为低置信启发式演唱表现曲线：
 // section 负责逐乐句的动态弧（loudness），emotion 负责其特征色（cool_anger→tension，tender→breathiness）；
 // 仅当没有 section 提供 loudness 时，emotion 才另补一条柔和的 loudness 弧，避免同一乐句叠两条 loudness。
 function seedIntentBaselines(intent, phrases, push) {
@@ -911,10 +937,9 @@ function candidateSpanBounds(spec, loaded) {
   };
 }
 
-// "br" 是宿主/社区约定的换气音符（与 lyric-align 的分词规则同源）：它带有名义 pitch 字段，
-// 但没有可唱音高。调性/音级/乐句/统计与意图手势都必须把它当呼吸事件而不是旋律音符。
+// 兼容既有内部导入；实际语义由共享分类器按 V2 官方精确写法判定。
 export function isBreathLyrics(lyrics) {
-  return typeof lyrics === "string" && lyrics.trim().toLowerCase() === "br";
+  return isBreathEventLyrics(lyrics);
 }
 
 // 乐句切分：休止 >= phraseGapBlick 即边界；climax 为最高目标音（并列取更长者）。
@@ -984,11 +1009,11 @@ function compileOperations(gestures, loaded, input, warnings) {
     throw error;
   }
   // sv_patch_parameter_curves 一次请求内每个参数只允许出现一次（DUPLICATE_PARAMETER），
-  // 而同参数的不相邻手势簇必须保持独立 range——把整段并成一个 replace 会抹掉簇间
+  // 而同参数的不相邻表现手法簇必须保持独立 range——把整段并成一个 replace 会抹掉簇间
   // 既有控制点。因此按"每参数第 j 个簇"分区成 K 次批量调用（通常 K=1），每次调用
   // 内参数唯一；K>1 时产生 K 个 Undo 记录，在 review 中如实声明。
   const clusterIndexByParameter = new Map();
-  let applyCallCount = 1;
+  let applyCallCount = operations.length > 0 ? 1 : 0;
   for (const operation of operations) {
     const index = clusterIndexByParameter.get(operation.parameter) ?? 0;
     operation.applyCallIndex = index;
@@ -1028,7 +1053,7 @@ function compileCluster(cluster, parameter, info, loaded, input, guardBlick, war
   const points = sortedPositions.map((blick) => {
     let value;
     if (isAbsolute) {
-      // absolute 手势（vibratoEnv）单簇单手势（PLAN_CONFLICT 已挡重叠），值即包络本身。
+      // absolute 表现手法（vibratoEnv）每簇仅一项（PLAN_CONFLICT 已挡重叠），值即包络本身。
       value = cluster[0].evaluate(blick);
     } else {
       value = 0;
@@ -1132,7 +1157,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     // 事务核锁住，reference 移动即 STALE_CONTEXT，而不是把曲线写到相对音符错误的本地位置。
     expectedTimeOffsetBlick: loaded.timeOffsetBlick,
   };
-  // 手势锚点音符的原始指纹：随 applyRequest 交给事务核，在写入前逐条 verifyAnchoredNote。
+  // 表现手法锚点音符的原始指纹：随 applyRequest 交给事务核，在写入前逐条 verifyAnchoredNote。
   // 音符被 UI/raw API 移动（UUID 不变、contextId 未失效）时，apply 以 STALE_CONTEXT 失败，
   // 而不是把绝对 BLICK 曲线写到音符早已离开的旧位置。
   const fingerprintById = new Map(
@@ -1236,12 +1261,15 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     applyCallIndex: operation.applyCallIndex,
     ...(input.responseMode === "verbose" ? { points: operation.points } : {}),
   }));
-  const checklist = [
-    "Review every operation's parameter, unit, and value range before applying.",
-    "replace mode overwrites existing control points inside each operation range; the planner does not read the host and did not check for existing points (use sv_get_parameter_curve if unsure).",
-    "Apply through the returned applyRequests (sv_patch_parameter_curves) with dryRun:true first, then commit each call.",
-    "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
-  ];
+  const hasOperations = applyRequests.length > 0;
+  const checklist = hasOperations
+    ? [
+        "Review every operation's parameter, unit, and value range before applying.",
+        "replace mode overwrites existing control points inside each operation range; the planner does not read the host and did not check for existing points (use sv_get_parameter_curve if unsure).",
+        "Apply through the returned applyRequests (sv_patch_parameter_curves) with dryRun:true first, then commit each call.",
+        "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
+      ]
+    : ["No melodic intent target remained after special-event filtering; no host write is needed."];
   if (applyRequests.length > 1) {
     checklist.push(
       `This plan needs ${applyRequests.length} sequential batch calls (a parameter has multiple disjoint gesture clusters), producing ${applyRequests.length} Undo records instead of one.`
@@ -1254,7 +1282,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
   }
   return {
     ok: true,
-    status: "planned",
+    status: hasOperations ? "planned" : "no_change",
     dryRun: true,
     effects: "none",
     planId,
@@ -1287,7 +1315,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     review: {
       requiresHumanAudition: true,
       requiresSharedTargetConfirmation,
-      replaceOverwritesExistingPoints: true,
+      replaceOverwritesExistingPoints: hasOperations,
       existingPointsChecked: false,
       checklist,
     },

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
+import { analyzeVocalEventSequence } from "./vocal-event-semantics.js";
 
 // sv_plan_pitch_gesture —— 把"起音上滑 / 句尾下坠 / 转音 / 颤音"等音乐意图编译成
 // PitchControlCurve 的 add 操作（主计划 P1-C Phase 3，目标写面 sv_patch_pitch_controls）。
@@ -22,6 +23,7 @@ import { ServiceTiming } from "./service-timing.js";
 //   永远是 human_only。
 
 export const PITCH_GESTURE_DEFAULTS = Object.freeze({
+  specialEventPolicy: "warn_and_skip",
   constraints: Object.freeze({
     maxAbsDepthSemitone: 2,
     maxTotalPoints: 600,
@@ -43,6 +45,7 @@ const PROVENANCE = Object.freeze({
   anchorsBasis: "observed_snapshot_fingerprints",
   interpolation: "bounded_no_overshoot",
   hostWriteSurfaces: Object.freeze(["pitchControl"]),
+  specialLyrics: "official_v2_manual_enter_notes",
   perception: "human_only",
 });
 
@@ -59,13 +62,24 @@ export class PitchGesturePlanService {
     timer.requestCoordinator();
     const warnings = [];
     const loaded = await timer.measure("loadMs", async () => resolvePlanSource(this.store, input));
+    const selection = selectGesturesForPolicy(input.gestures, loaded, input, warnings);
     const gestures = await timer.measure("buildMs", async () =>
-      input.gestures.map((gesture, index) => instantiateGesture(gesture, loaded, input, warnings, index))
+      selection.included.map(({ gesture, requestIndex }) =>
+        instantiateGesture(gesture, loaded, input, warnings, requestIndex)
+      )
     );
     const compiled = await timer.measure("compileMs", async () =>
       compileOperations(gestures, loaded, input, warnings)
     );
-    return buildPlanResponse(loaded, input, gestures, compiled, warnings, timer.finish());
+    return buildPlanResponse(
+      loaded,
+      input,
+      gestures,
+      compiled,
+      selection,
+      warnings,
+      timer.finish()
+    );
   }
 }
 
@@ -146,11 +160,16 @@ function resolvePlanSource(store, input) {
     }))
     .sort((left, right) => left.localOnsetBlick - right.localOnsetBlick);
   const noteById = new Map(notes.map((note) => [note.noteId, note]));
+  const semantics = analyzeVocalEventSequence(notes);
+  const semanticEvents = semantics.events;
+  const eventByNoteId = new Map(semanticEvents.map((event) => [event.noteId, event]));
   return {
     stored,
     occurrence,
     notes,
     noteById,
+    eventByNoteId,
+    semanticIssues: semantics.issues,
     quarterBlick,
     tempoMarks: stored.context.tempoMarks ?? [],
     timeOffsetBlick: timeOffset,
@@ -163,6 +182,79 @@ function requireNote(loaded, noteId, label) {
     throw codedError("UNKNOWN_NOTE_ID", `${label} is not part of the resolved occurrence: ${noteId}`);
   }
   return note;
+}
+
+function selectGesturesForPolicy(gestures, loaded, input, warnings) {
+  const included = [];
+  const excluded = [];
+  const referencedNoteIds = new Set(input.referencedNoteIds);
+  for (const issue of loaded.semanticIssues) {
+    if ((issue.noteIds ?? []).some((noteId) => referencedNoteIds.has(noteId))) {
+      warnings.push({ ...issue });
+    }
+  }
+  for (let requestIndex = 0; requestIndex < gestures.length; requestIndex += 1) {
+    const gesture = gestures[requestIndex];
+    const gestureId = `g${requestIndex}-${gesture.type}`;
+    const targetedEvents = gestureNoteIds(gesture)
+      .map((noteId) => loaded.eventByNoteId.get(noteId))
+      .filter(Boolean);
+    const nonMelodic = targetedEvents.filter((event) => !event.melodicEligible);
+    if (nonMelodic.length === 0 || input.specialEventPolicy === "include") {
+      included.push({ gesture, requestIndex });
+      continue;
+    }
+    const first = nonMelodic[0];
+    if (input.specialEventPolicy === "error") {
+      const error = codedError(
+        "NON_MELODIC_SPECIAL_EVENT_TARGETED",
+        `${gestureId} targets a non-melodic special lyric event`
+      );
+      error.details = {
+        gestureId,
+        noteId: first.noteId,
+        semanticRole: first.semanticRole,
+        lyrics: first.classification.rawLyrics,
+        evidence: first.semanticEvidence,
+      };
+      throw error;
+    }
+    excluded.push({ gestureId, events: nonMelodic });
+    for (const event of nonMelodic) {
+      warnings.push({
+        code: "NON_MELODIC_SPECIAL_EVENT_SKIPPED",
+        gestureId,
+        noteId: event.noteId,
+        semanticRole: event.semanticRole,
+        lyrics: event.classification.rawLyrics,
+        evidence: event.semanticEvidence,
+        message: "Skipped pitch planning for a non-melodic special lyric event.",
+      });
+    }
+  }
+
+  const uniqueEvents = new Map();
+  for (const item of excluded) {
+    for (const event of item.events) uniqueEvents.set(event.noteId, event);
+  }
+  const byRole = Object.create(null);
+  for (const event of uniqueEvents.values()) {
+    byRole[event.semanticRole] = (byRole[event.semanticRole] ?? 0) + 1;
+  }
+  return {
+    included,
+    skippedGestureCount: excluded.length,
+    excludedEvents: {
+      count: uniqueEvents.size,
+      byRole,
+    },
+  };
+}
+
+function gestureNoteIds(gesture) {
+  return ["noteId", "fromNoteId", "toNoteId"]
+    .map((key) => gesture[key])
+    .filter((noteId) => typeof noteId === "string");
 }
 
 // ---------- 时间量解析：秒 / 音符比例 / quarter，统一成整数 BLICK ----------
@@ -201,7 +293,7 @@ function resolveDuration(loaded, duration, note, fallbackQuarters, label) {
   return Math.max(1, Math.round(note.durationBlick * ratio));
 }
 
-// ---------- 手势构建（全部 group-local 坐标） ----------
+// ---------- 音高变化构建（全部 group-local 坐标） ----------
 
 function instantiateGesture(gesture, loaded, input, warnings, index) {
   const meta = { gestureId: `g${index}-${gesture.type}`, source: "explicit" };
@@ -219,7 +311,7 @@ function instantiateGesture(gesture, loaded, input, warnings, index) {
   }
 }
 
-// 每个手势最终产出一个 anchor 相对坐标系下的采样曲线定义：
+// 每种音高变化最终产出一个 anchor 相对坐标系下的采样曲线定义：
 // { anchorLocalBlick, anchorSemitone, spanFromBlick, spanToBlick, evaluate(blick)->semitoneOffset,
 //   samplePositions()->[blick] }。evaluate 的值被保证落在 [-depth, depth]（有界不超调）。
 
@@ -311,9 +403,13 @@ function instantiateRelease(gesture, loaded, input, meta) {
   const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
   let direction = gesture.direction ?? "down";
   if (direction === "auto") {
-    // auto：朝向下一个音符的音高方向；无下一个音符默认下坠。
+    // `br` 和无效 continuation 的名义 MIDI 不是旋律证据；遇到这类边界保持默认下坠。
     const next = loaded.notes[loaded.notes.findIndex((candidate) => candidate.noteId === note.noteId) + 1];
-    direction = next && next.targetSemitone > note.targetSemitone ? "up" : "down";
+    const nextEvent = next ? loaded.eventByNoteId.get(next.noteId) : null;
+    direction =
+      next && nextEvent?.melodicEligible && next.targetSemitone > note.targetSemitone
+        ? "up"
+        : "down";
   }
   const sign = direction === "down" ? -1 : 1;
   const lengthBlick = Math.min(
@@ -534,7 +630,7 @@ function compileOperations(gestures, loaded, input, warnings) {
 
 // ---------- 响应组装 ----------
 
-function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings) {
+function buildPlanResponse(loaded, input, gestures, compiled, selection, warnings, timings) {
   const sharedTargetOccurrences = loaded.occurrence.sharedTargetOccurrences ?? [];
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
   const target = {
@@ -548,7 +644,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
       ? { expectedPitchOffsetSemitone: loaded.occurrence.pitchOffsetSemitone }
       : {}),
   };
-  // 手势锚点音符的原始指纹：随 apply 交给事务核，写入前逐条 verifyAnchoredNote。
+  // 音高变化锚点音符的原始指纹：随 apply 交给事务核，写入前逐条 verifyAnchoredNote。
   const fingerprintById = new Map(
     (loaded.occurrence.noteFingerprints ?? []).map((fingerprint) => [fingerprint.noteId, fingerprint])
   );
@@ -570,27 +666,34 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     }))
     .sort((left, right) => left.indexInGroup - right.indexInGroup);
 
-  const applyArguments = {
-    contextId: loaded.stored.contextId,
-    occurrenceId: loaded.occurrence.occurrenceId,
-    target: {
-      expectedGroupUuid: target.expectedGroupUuid,
-      expectedTimeOffsetBlick: target.expectedTimeOffsetBlick,
-      ...(target.expectedPitchOffsetSemitone !== undefined
-        ? { expectedPitchOffsetSemitone: target.expectedPitchOffsetSemitone }
-        : {}),
-      ...(expectedNotes.length > 0 ? { expectedNotes } : {}),
-    },
-    operations: compiled.operations.map((operation) => operation.applyOperation),
-    dryRun: true,
-    atomic: true,
-  };
-  const applyRequests = [{ tool: "sv_patch_pitch_controls", arguments: applyArguments }];
+  const hasOperations = compiled.operations.length > 0;
+  const applyArguments = hasOperations
+    ? {
+        contextId: loaded.stored.contextId,
+        occurrenceId: loaded.occurrence.occurrenceId,
+        target: {
+          expectedGroupUuid: target.expectedGroupUuid,
+          expectedTimeOffsetBlick: target.expectedTimeOffsetBlick,
+          ...(target.expectedPitchOffsetSemitone !== undefined
+            ? { expectedPitchOffsetSemitone: target.expectedPitchOffsetSemitone }
+            : {}),
+          ...(expectedNotes.length > 0 ? { expectedNotes } : {}),
+        },
+        operations: compiled.operations.map((operation) => operation.applyOperation),
+        dryRun: true,
+        atomic: true,
+      }
+    : null;
+  const applyRequests = applyArguments
+    ? [{ tool: "sv_patch_pitch_controls", arguments: applyArguments }]
+    : [];
   const planId = `plan_${createHash("sha256")
     .update(
       stableStringify({
         occurrenceId: loaded.occurrence.occurrenceId,
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
+        specialEventPolicy: input.specialEventPolicy,
+        requestedGestures: input.gestures,
         operations: compiled.operations.map((operation) => operation.control),
       })
     )
@@ -639,7 +742,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
   }
   return {
     ok: true,
-    status: "planned",
+    status: hasOperations ? "planned" : "no_change",
     dryRun: true,
     effects: "none",
     planId,
@@ -654,15 +757,18 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
       sharedTargetOccurrences,
     },
     summary: {
+      requestedGestureCount: input.gestures.length,
       gestureCount: gestures.length,
+      skippedGestureCount: selection.skippedGestureCount,
+      excludedEvents: selection.excludedEvents,
       operationCount: compiled.operations.length,
       totalPoints: compiled.totalPoints,
-      applyCallCount: 1,
-      expectedUserUndoSteps: 1,
+      applyCallCount: hasOperations ? 1 : 0,
+      expectedUserUndoSteps: hasOperations ? 1 : 0,
       types: [...new Set(gestures.map((gesture) => gesture.type))],
     },
     ...(input.responseMode === "compact" ? {} : { gestures: publicGestures, operations: operationsMeta }),
-    apply: buildApplyEnvelope(applyRequests, {
+    apply: buildApplyEnvelope(hasOperations ? applyRequests : null, {
       sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
     }),
     // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
@@ -683,7 +789,19 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
 
 function normalizePlanRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(request, ["contextId", "occurrenceId", "gestures", "constraints", "sampling", "responseMode"], "request");
+  assertKnownKeys(
+    request,
+    [
+      "contextId",
+      "occurrenceId",
+      "gestures",
+      "specialEventPolicy",
+      "constraints",
+      "sampling",
+      "responseMode",
+    ],
+    "request"
+  );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
@@ -700,6 +818,14 @@ function normalizePlanRequest(request) {
   if (!["compact", "standard", "verbose"].includes(responseMode)) {
     throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
   }
+  const specialEventPolicy =
+    request.specialEventPolicy ?? PITCH_GESTURE_DEFAULTS.specialEventPolicy;
+  if (!["warn_and_skip", "include", "error"].includes(specialEventPolicy)) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "specialEventPolicy must be warn_and_skip, include, or error"
+    );
+  }
   const gestures = request.gestures.map((gesture, index) => normalizeGesture(gesture, index));
   const referencedNoteIds = [];
   for (const gesture of gestures) {
@@ -711,6 +837,7 @@ function normalizePlanRequest(request) {
     contextId: request.contextId,
     occurrenceId: request.occurrenceId,
     gestures,
+    specialEventPolicy,
     constraints: normalizeConstraints(request.constraints),
     sampling: normalizeSampling(request.sampling),
     responseMode,

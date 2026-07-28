@@ -1,4 +1,4 @@
-import { isBreathLyrics, segmentPhrases } from "./expression-plan.js";
+import { segmentPhrases } from "./expression-plan.js";
 import {
   HARMONIC_INCLUDES,
   HARMONIC_PROVENANCE,
@@ -8,6 +8,10 @@ import {
   analyzeTensionResolution,
 } from "./harmonic-context.js";
 import { ServiceTiming } from "./service-timing.js";
+import {
+  analyzeVocalEventSequence,
+  summarizeExcludedVocalEvents,
+} from "./vocal-event-semantics.js";
 
 // sv_analyze_phrase：只读乐理分析（调性候选 / 音级 / 乐句 / 统计）。
 //
@@ -16,9 +20,8 @@ import { ServiceTiming } from "./service-timing.js";
 // - 调性检测是"排序器"不是"分类器"：时值加权音级直方图与 24 个 Krumhansl-Kessler
 //   profile 旋转做皮尔逊相关，返回排序候选 + 与次名的差距（margin）。旋律（尤其
 //   单声部短句）在关系大小调间天然歧义，把歧义如实暴露正是正确行为。
-// - "br" 是呼吸事件不是旋律音符：宿主给它名义 pitch，但没有可唱音高。它被排除在
-//   调性、音级、乐句、音域/音程/节奏统计之外，单独在 breathEvents 中如实返回
-//   （名义音高标 nominalPitch，绝不混入 scale degree）。
+// - V2 官方特殊歌词语义由 vocal-event-semantics 统一解释。只有精确小写 "br" 是呼吸事件；
+//   无合法前驱的 +/- 与未校准的单独 apostrophe 也不作为高层音乐证据。原始歌词始终保留。
 // - 全部结论标 derived/heuristic：乐句、climax、调性都是推断，不是宿主事实；
 //   拼写只用升号（不做同音异名判定）；小调音级按自然小调解释。
 export const PHRASE_ANALYSIS_INCLUDES = Object.freeze([
@@ -56,7 +59,9 @@ const PROVENANCE = Object.freeze({
   minorScaleDegrees: "natural_minor",
   phraseSegmentation: "rest_threshold_heuristic",
   breathNotes: "excluded_from_all_musical_statistics_reported_as_breathEvents",
-  breathDetection: "lyrics_br_host_convention_not_official_api_fact",
+  breathDetection: "official_documented_special_lyric_br",
+  specialLyrics: "official_v2_manual_enter_notes",
+  melodicEligibility: "shared_vocal_event_sequence_semantics",
   pitchBasis: "sounding_midi_with_occurrence_pitch_offset",
   basis: "derived_not_host_fact",
   perception: "human_only",
@@ -81,6 +86,7 @@ export class PhraseAnalysisService {
     const analysis = await timer.measure("analyzeMs", async () =>
       runAnalysis(loaded, input, warnings)
     );
+    warnings.push(...loaded.semanticIssues);
     return {
       ok: true,
       status: "succeeded",
@@ -92,9 +98,12 @@ export class PhraseAnalysisService {
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
         pitchOffsetSemitone: loaded.occurrence.pitchOffsetSemitone ?? 0,
       },
-      // noteCount 只数旋律音符；呼吸音符单独计数并在 breathEvents 中逐项返回。
+      inputNoteCount: loaded.inputNoteCount,
+      melodicNoteCount: loaded.notes.length,
+      // noteCount 保持既有含义：只数进入高层音乐推断的音符。
       noteCount: loaded.notes.length,
       breathCount: loaded.breathNotes.length,
+      excludedEvents: buildExcludedEvents(loaded, input.responseMode, warnings),
       ...analysis,
       breathEvents: buildBreathEvents(loaded, input.responseMode, warnings),
       // 请求了和声语境时，把它的证据边界（尤其 evidenceScope:"melody_only"）并入 provenance。
@@ -179,19 +188,36 @@ function resolveAnalysisSource(store, input) {
       'the selected occurrence has no note fingerprints; re-run sv_snapshot_range with include ["notes"]'
     );
   }
-  // "br" 呼吸音符没有可唱音高：从全部音乐统计中剥离，单独如实返回。
-  const notes = allNotes.filter((note) => !isBreathLyrics(note.lyrics));
-  const breathNotes = allNotes.filter((note) => isBreathLyrics(note.lyrics));
+  const semantics = analyzeVocalEventSequence(allNotes);
+  const notes = semantics.events
+    .filter((event) => event.melodicEligible)
+    .map((event) => event.note);
+  const breathNotes = semantics.events
+    .filter((event) => event.semanticRole === "breath_event")
+    .map((event) => event.note);
+  const excludedEvents = summarizeExcludedVocalEvents(semantics.events);
   if (notes.length === 0) {
-    throw codedError(
+    const error = codedError(
       "NO_MELODIC_NOTES",
-      "every captured note is a breath event (lyrics 'br'); there is no melodic material to analyze"
+      "every captured note is excluded from high-level musical inference; there is no melodic material to analyze"
     );
+    error.details = { excludedEvents };
+    throw error;
   }
   // meterMarks 供 metricalRoles/chordCandidates 的小节与强拍分区使用。sv_snapshot_range
   // 默认捕获它；缺失时相关 section 如实降级，而不是假设 4/4。
   const meterMarks = Array.isArray(stored.context.meterMarks) ? stored.context.meterMarks : null;
-  return { stored, occurrence, notes, breathNotes, quarterBlick, meterMarks };
+  return {
+    stored,
+    occurrence,
+    inputNoteCount: allNotes.length,
+    notes,
+    breathNotes,
+    semanticIssues: semantics.issues,
+    excludedEvents,
+    quarterBlick,
+    meterMarks,
+  };
 }
 
 // 呼吸事件逐项返回：音高字段标 nominalPitch——宿主要求换气音符也有 pitch，
@@ -218,6 +244,24 @@ function buildBreathEvents(loaded, responseMode, warnings) {
       endBlick: note.absEndBlick,
       durationQuarter: note.durationBlick / loaded.quarterBlick,
     })),
+    itemsTruncated: count > cap,
+  };
+}
+
+function buildExcludedEvents(loaded, responseMode, warnings) {
+  const { count, byRole, items } = loaded.excludedEvents;
+  if (responseMode === "compact") return { count, byRole: { ...byRole } };
+  const cap = responseMode === "verbose" ? count : MAX_LIST_ITEMS;
+  if (count > cap) {
+    warnings.push({
+      code: "EXCLUDED_EVENTS_TRUNCATED",
+      message: `excludedEvents.items reports the first ${cap} of ${count} excluded events; use responseMode:"verbose" for the full list.`,
+    });
+  }
+  return {
+    count,
+    byRole: { ...byRole },
+    items: items.slice(0, cap),
     itemsTruncated: count > cap,
   };
 }

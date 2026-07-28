@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { isBreathLyrics } from "./expression-plan.js";
 import { MAX_OPERATIONS } from "./note-structure.js";
 import { analyzeKey } from "./phrase-analysis.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
+import { isBreathEventLyrics } from "./vocal-event-semantics.js";
 
 // sv_generate_harmony：调内和声规划器（HANDOFF §8.16 "仍未实现"清单最后一个规划项）。
 //
@@ -206,7 +206,7 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
       throw codedError("UNKNOWN_NOTE_ID", `noteId is not part of the source occurrence: ${missing}`);
     }
   }
-  const melodicNotes = selected.filter((note) => !isBreathLyrics(note.lyrics));
+  const melodicNotes = selected.filter((note) => !isBreathEventLyrics(note.lyrics));
   if (melodicNotes.length === 0) {
     throw codedError(
       "NO_MELODIC_NOTES",

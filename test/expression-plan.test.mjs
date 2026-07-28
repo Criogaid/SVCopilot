@@ -127,7 +127,7 @@ function assertApplyRequestsWellFormed(result) {
   }
 }
 
-// ---------- 显式手势 ----------
+// ---------- 显式表现手法 ----------
 
 test("explicit scoop compiles to a guarded pitchDelta replace operation", async () => {
   const store = createStore();
@@ -422,38 +422,125 @@ test("jpop intent derives deterministic per-phrase scoops with heuristic confide
   assert.deepEqual(first.applyRequests, second.applyRequests);
 });
 
-test("intent-derived gestures skip breath notes and anchor on the melodic entrance", async () => {
+test("intent-derived gestures skip every non-melodic event with structured warnings", async () => {
   const store = createStore();
-  // br 打头 + 乐句间 br：呼吸没有可唱音高，jpop 入口 scoop 必须锚在旋律音符上。
+  // br / orphan +/- / 单独 apostrophe 均不提供高层旋律证据；后续合法 +/- 链仍保留。
   const { stored, occurrenceId } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "br" },
-      { onsetBlick: Q, durationBlick: Q, pitch: 60, lyrics: "when" },
-      { onsetBlick: 2 * Q, durationBlick: 3 * Q, pitch: 66, lyrics: "see" },
-      { onsetBlick: 7 * Q, durationBlick: Q, pitch: 64, lyrics: "br" },
-      { onsetBlick: 8 * Q, durationBlick: Q, pitch: 62, lyrics: "あ" },
+      { onsetBlick: Q, durationBlick: Q, pitch: 61, lyrics: "+" },
+      { onsetBlick: 2 * Q, durationBlick: Q, pitch: 62, lyrics: "-" },
+      { onsetBlick: 3 * Q, durationBlick: Q, pitch: 63, lyrics: "'" },
+      { onsetBlick: 4 * Q, durationBlick: Q, pitch: 60, lyrics: "when" },
+      { onsetBlick: 5 * Q, durationBlick: Q, pitch: 62, lyrics: "+" },
+      { onsetBlick: 6 * Q, durationBlick: Q, pitch: 64, lyrics: "-" },
+      { onsetBlick: 9 * Q, durationBlick: Q, pitch: 64, lyrics: "br" },
+      { onsetBlick: 10 * Q, durationBlick: Q, pitch: 62, lyrics: "あ" },
     ],
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
     intent: { genre: "jpop" },
   });
-  // 修复前第一乐句 scoop 锚在 n:0(br)、第二乐句锚在 n:3(br)；现在锚在 when 与 あ。
   const scoops = result.gestures.filter((gesture) => gesture.type === "scoop");
   assert.equal(scoops.length, 2);
   assert.deepEqual(
     scoops.map((gesture) => gesture.noteIds[0]),
-    [noteId(occurrenceId, 1), noteId(occurrenceId, 4)]
+    [noteId(occurrenceId, 4), noteId(occurrenceId, 8)]
+  );
+  const skipped = result.warnings.filter(
+    (warning) => warning.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
+  );
+  assert.deepEqual(
+    skipped.map((warning) => warning.semanticRole),
+    [
+      "breath_event",
+      "syllable_continuation",
+      "phonation_continuation",
+      "unknown_special",
+      "breath_event",
+    ]
+  );
+  assert.ok(skipped.every((warning) => warning.noteId && warning.evidence));
+  assert.ok(
+    skipped.find((warning) => warning.semanticRole === "syllable_continuation")
+      .issueCodes.includes("ORPHAN_PLUS")
   );
   assert.ok(
-    result.warnings.some((warning) => warning.code === "BREATH_NOTES_SKIPPED_BY_INTENT")
+    skipped.find((warning) => warning.semanticRole === "phonation_continuation")
+      .issueCodes.includes("ORPHAN_PHONATION_CONTINUATION")
   );
-  // 显式手势不受过滤：用户点名 br 音符仍可规划（用户的话优先）。
+  assert.equal(result.provenance.specialLyrics, "official_v2_manual_enter_notes");
+
+  // 显式表现手法不受 intent 过滤：用户点名 br 音符仍可规划。
   const explicit = await createService(store).plan({
     contextId: stored.contextId,
     gestures: [{ type: "fall", noteId: noteId(occurrenceId, 0) }],
   });
   assert.equal(explicit.gestures[0].noteIds[0], noteId(occurrenceId, 0));
+});
+
+test("intent treats only exact lowercase br as breath and keeps valid continuations melodic", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "BR" },
+      { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "+" },
+      { onsetBlick: 2 * Q, durationBlick: Q, pitch: 64, lyrics: "-" },
+      { onsetBlick: 4 * Q, durationBlick: Q, pitch: 65, lyrics: "br" },
+      { onsetBlick: 5 * Q, durationBlick: Q, pitch: 67, lyrics: "word" },
+    ],
+  });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { genre: "jpop" },
+  });
+  const scoops = result.gestures.filter((gesture) => gesture.type === "scoop");
+  assert.deepEqual(
+    scoops.map((gesture) => gesture.noteIds[0]),
+    [noteId(occurrenceId, 0), noteId(occurrenceId, 4)]
+  );
+  assert.ok(
+    result.warnings.some(
+      (warning) =>
+        warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT" &&
+        warning.noteIds.includes(noteId(occurrenceId, 0))
+    )
+  );
+  assert.deepEqual(
+    result.warnings
+      .filter((warning) => warning.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED")
+      .map((warning) => warning.noteId),
+    [noteId(occurrenceId, 3)]
+  );
+});
+
+test("an all-excluded intent range returns no_change with warnings instead of an empty write", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "br" },
+      { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "+" },
+      { onsetBlick: 2 * Q, durationBlick: Q, pitch: 64, lyrics: "'" },
+    ],
+  });
+  const result = await createService(store).plan({
+    contextId: stored.contextId,
+    intent: { genre: "jpop" },
+  });
+  assert.equal(result.status, "no_change");
+  assert.equal(result.summary.gestureCount, 0);
+  assert.equal(result.summary.operationCount, 0);
+  assert.equal(result.summary.applyCallCount, 0);
+  assert.equal(result.summary.expectedUserUndoSteps, 0);
+  assert.equal(result.apply, null);
+  assert.deepEqual(result.applyRequests, []);
+  assert.equal(
+    result.warnings.filter(
+      (warning) => warning.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
+    ).length,
+    3
+  );
 });
 
 test("controlled_belt derives phrase arcs and sustain vibrato; cool_anger modifies them", async () => {
@@ -552,7 +639,7 @@ test("plan attaches referenced note fingerprints to each apply target (F1 drift 
   assert.equal(target.expectedTimeOffsetBlick, 2 * Q);
   assert.ok(Array.isArray(target.expectedNotes));
   const byIndex = new Map(target.expectedNotes.map((note) => [note.indexInGroup, note]));
-  // 手势锚定 n0、n1 → 指纹须与快照一致（apply 前 verifyAnchoredNote 会逐字段比对）。
+  // 表现手法锚定 n0、n1 → 指纹须与快照一致（apply 前 verifyAnchoredNote 会逐字段比对）。
   assert.equal(byIndex.get(0).onsetBlick, 0);
   assert.equal(byIndex.get(0).pitch, 60);
   assert.equal(byIndex.get(1).onsetBlick, Q);
@@ -652,7 +739,7 @@ test("plan resolves contexts and notes honestly across error paths", async () =>
     }),
     (error) => error.code === "UNKNOWN_NOTE_ID"
   );
-  // 意图对短乐句派生不出任何候选且无显式手势 → EMPTY_PLAN。
+  // 意图对短乐句派生不出任何候选且无显式表现手法 → EMPTY_PLAN。
   await assert.rejects(
     service.plan({
       contextId: single.stored.contextId,
@@ -740,7 +827,7 @@ test("jpop_belt preset expands to genre+technique with a reviewable presetExpans
   });
   assert.deepEqual(result.presetExpansion.overriddenFields, []);
   assert.ok(result.presetExpansion.notes.length > 0);
-  // 展开后的意图确实驱动了手势：jpop scoop + belt 弧线。
+  // 展开后的意图确实驱动了表现手法：jpop scoop + belt 弧线。
   assert.ok(result.gestures.some((gesture) => gesture.source === "intent:genre:jpop"));
   assert.ok(
     result.gestures.some((gesture) => gesture.source === "intent:technique:controlled_belt")

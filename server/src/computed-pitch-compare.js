@@ -1,6 +1,10 @@
 import { getStoredComputedPitch } from "./musical-range.js";
 import { secondsAtBlick } from "./musical-time.js";
 import { ServiceTiming } from "./service-timing.js";
+import {
+  analyzeVocalEventSequence,
+  summarizeExcludedVocalEvents,
+} from "./vocal-event-semantics.js";
 
 // sv_compare_computed_pitch：客观演唱分析（音准 / 颤音 / 转换 / 异常区段）。
 //
@@ -45,6 +49,7 @@ const ANOMALY_SORT_MODES = Object.freeze(["startBlick", "severity"]);
 const PROVENANCE = Object.freeze({
   pitchSource: "computedPitch",
   pitchBasis: "observed",
+  specialLyrics: "official_v2_manual_enter_notes",
   derivedMetrics: Object.freeze(["summary", "center", "vibrato", "transitions", "anomalySegments"]),
   thresholdBasis: "engineering_heuristic_requires_host_calibration",
   noteVibratoAttributes: "not_used_version1_only_fields",
@@ -197,18 +202,22 @@ function resolveCompareSource(store, contextId, occurrenceId, label) {
 async function runTargetAnalysis(loaded, input, warnings, timer) {
   const { stored, occurrence, series } = loaded;
   const context = stored.context;
-  const spans = buildNoteSpans(occurrence);
-  if (spans.length === 0) {
+  const partition = buildNoteSpanPartition(occurrence);
+  if (partition.inputNoteCount === 0) {
     throw codedError(
       "NOTES_NOT_CAPTURED",
       'compare_to_target needs note fingerprints; re-run sv_snapshot_range with include ["notes","computedPitch"]'
     );
   }
+  if (partition.melodicSpans.length === 0) {
+    throw noMelodicEvidence(partition);
+  }
+  const spans = partition.melodicSpans;
   const params = input.analysis;
   const sampling = buildSamplingBlock(series, context, params, warnings);
 
   const base = await timer.measure("statsMs", async () => {
-    const frameData = buildTargetFrameData(series, spans);
+    const frameData = buildTargetFrameData(series, spans, partition.excludedSpans);
     const cents = frameData.frameCents.filter(Boolean).map((frame) => frame.cents);
     if (cents.length === 0) {
       throw insufficientComputedPitch(series, frameData);
@@ -240,6 +249,9 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
     mode: "compare_to_target",
     contextId: stored.contextId,
     occurrence: publicOccurrence(occurrence),
+    inputNoteCount: partition.inputNoteCount,
+    melodicNoteCount: spans.length,
+    excludedEvents: partition.excludedEvents,
     sampling,
     summary: base.summary,
     ...(input.responseMode === "compact"
@@ -268,21 +280,78 @@ function buildNoteSpans(occurrence) {
         fingerprint.pitch + (fingerprint.detuneCents ?? 0) / 100 + pitchOffset,
       absOnsetBlick: timeOffset + fingerprint.onsetBlick,
       absEndBlick: timeOffset + fingerprint.onsetBlick + fingerprint.durationBlick,
+      durationBlick: fingerprint.durationBlick,
     }))
     .sort((left, right) => left.absOnsetBlick - right.absOnsetBlick);
 }
 
-function buildTargetFrameData(series, spans) {
+function buildNoteSpanPartition(occurrence) {
+  const inputSpans = buildNoteSpans(occurrence);
+  const sequence = analyzeVocalEventSequence(inputSpans);
+  const melodicSpans = sequence.events
+    .filter((event) => event.melodicEligible)
+    .map((event) => event.note);
+  const excludedSpans = sequence.events
+    .filter((event) => !event.melodicEligible)
+    .map((event) => event.note);
+  return {
+    inputNoteCount: inputSpans.length,
+    melodicSpans,
+    excludedSpans,
+    excludedEvents: summarizeExcludedVocalEvents(sequence.events),
+  };
+}
+
+function buildExcludedFrameMask(series, spans) {
+  const frameCount = series.frames ?? series.values?.length ?? 0;
+  const mask = new Uint8Array(frameCount);
+  let count = 0;
+  for (const span of spans) {
+    const start = Math.max(
+      0,
+      Math.ceil((span.absOnsetBlick - series.startBlick) / series.intervalBlick)
+    );
+    const end = Math.min(
+      frameCount,
+      Math.ceil((span.absEndBlick - series.startBlick) / series.intervalBlick)
+    );
+    for (let index = start; index < end; index += 1) {
+      if (mask[index] === 1) continue;
+      mask[index] = 1;
+      count += 1;
+    }
+  }
+  return { mask, count };
+}
+
+function buildTargetFrameData(series, spans, excludedSpans = []) {
   const perSpan = spans.map(() => []);
   const frameCents = new Array(series.values.length).fill(null);
   let finiteFrames = 0;
+  let excludedFiniteFrameCount = 0;
   let framesOutsideNotes = 0;
+  let excludedFrameCount = 0;
   // 帧与 span 都按时间单调，单指针扫描；组内音符不重叠（官方编辑器语义）。
   let cursor = 0;
+  let excludedCursor = 0;
   for (let index = 0; index < series.values.length; index += 1) {
     const blick = series.startBlick + index * series.intervalBlick;
     const value = series.values[index];
     const finite = Number.isFinite(value);
+    while (
+      excludedCursor < excludedSpans.length &&
+      blick >= excludedSpans[excludedCursor].absEndBlick
+    ) {
+      excludedCursor += 1;
+    }
+    if (
+      excludedCursor < excludedSpans.length &&
+      blick >= excludedSpans[excludedCursor].absOnsetBlick
+    ) {
+      excludedFrameCount += 1;
+      if (finite) excludedFiniteFrameCount += 1;
+      continue;
+    }
     if (finite) finiteFrames += 1;
     while (cursor < spans.length && blick >= spans[cursor].absEndBlick) cursor += 1;
     const inSpan = cursor < spans.length && blick >= spans[cursor].absOnsetBlick;
@@ -295,16 +364,29 @@ function buildTargetFrameData(series, spans) {
       framesOutsideNotes += 1;
     }
   }
-  return { perSpan, frameCents, finiteFrames, framesOutsideNotes };
+  return {
+    perSpan,
+    frameCents,
+    finiteFrames,
+    excludedFiniteFrameCount,
+    framesOutsideNotes,
+    excludedFrameCount,
+    eligibleFrameCount: Math.max(0, series.values.length - excludedFrameCount),
+  };
 }
 
 function buildTargetSummary(series, frameData, cents) {
   return {
     frameCount: series.values.length,
+    eligibleFrameCount: frameData.eligibleFrameCount,
+    excludedFrameCount: frameData.excludedFrameCount,
+    excludedFiniteFrameCount: frameData.excludedFiniteFrameCount,
+    rawFiniteFrameCount: frameData.finiteFrames + frameData.excludedFiniteFrameCount,
     finiteFrameCount: frameData.finiteFrames,
     validFrameCount: cents.length,
     framesOutsideNotes: frameData.framesOutsideNotes,
-    coverage: series.values.length > 0 ? cents.length / series.values.length : 0,
+    coverage:
+      frameData.eligibleFrameCount > 0 ? cents.length / frameData.eligibleFrameCount : 0,
     ...summarizeCents(cents),
   };
 }
@@ -471,6 +553,18 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
   const context = after.stored.context;
   const series = after.series;
   const params = input.analysis;
+  const beforePartition = buildNoteSpanPartition(before.occurrence);
+  const afterPartition = buildNoteSpanPartition(after.occurrence);
+  if (beforePartition.inputNoteCount > 0 && beforePartition.melodicSpans.length === 0) {
+    throw noMelodicEvidence(beforePartition, "before");
+  }
+  if (afterPartition.inputNoteCount > 0 && afterPartition.melodicSpans.length === 0) {
+    throw noMelodicEvidence(afterPartition, "after");
+  }
+  const excludedFrameMask = buildExcludedFrameMask(series, [
+    ...beforePartition.excludedSpans,
+    ...afterPartition.excludedSpans,
+  ]);
   const sampling = {
     ...buildSamplingBlock(series, context, params, warnings),
     nullFrames: {
@@ -483,6 +577,7 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     const frameCents = new Array(series.frames).fill(null);
     const deltasSemitone = [];
     for (let index = 0; index < series.frames; index += 1) {
+      if (excludedFrameMask.mask[index] === 1) continue;
       const beforeValue = before.series.values[index];
       const afterValue = after.series.values[index];
       if (!Number.isFinite(beforeValue) || !Number.isFinite(afterValue)) continue;
@@ -508,12 +603,20 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
       : null;
     if (input.responseMode === "compact") return { anomalies };
     const perNote = input.metrics.perNote
-      ? buildContextsPerNote(before, after, params, input.metrics.vibrato, warnings)
+      ? buildContextsPerNote(
+          before,
+          after,
+          params,
+          input.metrics.vibrato,
+          warnings,
+          afterPartition.melodicSpans
+        )
       : null;
     return { anomalies, perNote };
   });
 
-  const coverage = series.frames > 0 ? base.deltasSemitone.length / series.frames : 0;
+  const eligibleFrameCount = Math.max(0, series.frames - excludedFrameMask.count);
+  const coverage = eligibleFrameCount > 0 ? base.deltasSemitone.length / eligibleFrameCount : 0;
   warnLowCoverage(coverage, params, warnings);
   return {
     ok: true,
@@ -521,9 +624,25 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     mode: "compare_contexts",
     before: publicSide(before),
     after: publicSide(after),
+    noteCounts: {
+      before: {
+        inputNoteCount: beforePartition.inputNoteCount,
+        melodicNoteCount: beforePartition.melodicSpans.length,
+      },
+      after: {
+        inputNoteCount: afterPartition.inputNoteCount,
+        melodicNoteCount: afterPartition.melodicSpans.length,
+      },
+    },
+    excludedEvents: {
+      before: beforePartition.excludedEvents,
+      after: afterPartition.excludedEvents,
+    },
     sampling,
     summary: {
       frameCount: series.frames,
+      eligibleFrameCount,
+      excludedFrameCount: excludedFrameMask.count,
       validFrameCount: base.deltasSemitone.length,
       coverage,
       orientation: "after_minus_before",
@@ -563,8 +682,8 @@ function buildSemitoneDelta(deltas) {
   };
 }
 
-function buildContextsPerNote(before, after, params, wantVibrato, warnings) {
-  const spans = buildNoteSpans(after.occurrence);
+function buildContextsPerNote(before, after, params, wantVibrato, warnings, melodicSpans = null) {
+  const spans = melodicSpans ?? buildNoteSpanPartition(after.occurrence).melodicSpans;
   if (spans.length === 0) {
     warnings.push({
       code: "NOTES_NOT_CAPTURED",
@@ -989,6 +1108,20 @@ function insufficientComputedPitch(series, frameData) {
     frameCount: series.values?.length ?? series.frames,
     finiteFrames: frameData.finiteFrames,
     framesOutsideNotes: frameData.framesOutsideNotes,
+  };
+  return error;
+}
+
+function noMelodicEvidence(partition, side = "request") {
+  const error = codedError(
+    "NO_MELODIC_EVIDENCE",
+    `${side} occurrence contains note fingerprints, but every event is excluded from melodic computed-pitch analysis.`
+  );
+  error.details = {
+    side,
+    inputNoteCount: partition.inputNoteCount,
+    melodicNoteCount: 0,
+    excludedEvents: partition.excludedEvents,
   };
   return error;
 }

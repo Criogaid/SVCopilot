@@ -97,6 +97,73 @@ test("breath check flags overrides and unusually long breaths", async () => {
   assert.equal(long.severity, "info");
 });
 
+test("specialLyricChains reports orphan continuations with stable structured codes", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, lyrics: "+" },
+      { onsetBlick: Q, durationBlick: Q, lyrics: "br" },
+      { onsetBlick: 2 * Q, durationBlick: Q, lyrics: "-" },
+    ],
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["specialLyricChains"],
+  });
+
+  assert.equal(result.summary.byKind.orphan_plus, 1);
+  assert.equal(result.summary.byKind.orphan_phonation_continuation, 1);
+  assert.deepEqual(
+    result.issues.map((issue) => issue.code),
+    ["ORPHAN_PLUS", "ORPHAN_PHONATION_CONTINUATION"]
+  );
+  assert.deepEqual(result.issues[0].noteIds, [`${occurrenceId}:n:0`]);
+  assert.equal(result.issues[0].semanticRole, "syllable_continuation");
+  assert.equal(result.issues[1].startBlick, 2 * Q);
+  assert.equal(result.issues[1].confidence, "official_contract");
+});
+
+test("specialLyricChains accepts a contiguous lexical, '+', '-' chain", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, lyrics: "glory" },
+      { onsetBlick: Q, durationBlick: Q, lyrics: "+" },
+      { onsetBlick: 2 * Q, durationBlick: Q, lyrics: "-" },
+    ],
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["specialLyricChains"],
+  });
+
+  assert.equal(result.summary.clean, true);
+  assert.equal(result.summary.issueCount, 0);
+});
+
+test("specialLyricChains preserves a one-BLICK continuation gap as evidence", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, lyrics: "glory" },
+      { onsetBlick: Q + 1, durationBlick: Q, lyrics: "+" },
+    ],
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["specialLyricChains"],
+  });
+
+  assert.equal(result.summary.byKind.syllable_chain_gap, 1);
+  assert.equal(result.issues[0].code, "SYLLABLE_CHAIN_GAP");
+  assert.equal(result.issues[0].gapBlick, 1);
+  assert.equal(result.issues[0].confidence, "host_observed");
+  assert.deepEqual(result.issues[0].noteIds, [
+    `${occurrenceId}:n:0`,
+    `${occurrenceId}:n:1`,
+  ]);
+});
+
 test("japaneseMora flags multi-mora lyrics and isolated small kana; clean kana pass", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, {
@@ -223,6 +290,41 @@ test("phonemeCoverage flags only melodic words; br and continuations stay legiti
   assert.equal(result.coverage.phonemeCoverage.status, "captured");
   assert.equal(result.coverage.phonemeCoverage.flaggedNotes, 1);
   assert.equal(result.coverage.phonemeCoverage.legitimatelyEmpty, 2);
+});
+
+test("near-miss special lyrics remain lexical across every validator check", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createStoredContext(store, {
+    notes: [{ onsetBlick: 0, durationBlick: Q, lyrics: " br " }],
+    processing: {
+      state: "ready",
+      phonemeCoverage: {
+        indexBase: 0,
+        totalNotes: 1,
+        observedNotes: 1,
+        nonEmptyNotes: 0,
+        emptyNotes: 1,
+        emptyNoteIndices: [0],
+        missingNoteIndices: [],
+      },
+    },
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["specialLyricChains", "phonemeCoverage"],
+  });
+
+  assert.ok(
+    result.issues.some(
+      (issue) => issue.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT"
+    )
+  );
+  const empty = result.issues.find(
+    (issue) => issue.kind === "melodic_note_empty_phonemes"
+  );
+  assert.deepEqual(empty.noteIds, [`${occurrenceId}:n:0`]);
+  assert.equal(result.coverage.phonemeCoverage.flaggedNotes, 1);
+  assert.equal(result.coverage.phonemeCoverage.legitimatelyEmpty, 0);
 });
 
 test("phonemeCoverage and stressAlignment degrade honestly when data was not captured", async () => {

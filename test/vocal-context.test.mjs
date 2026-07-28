@@ -275,6 +275,38 @@ test("prosody issues surface as ranked findings with an actionable next step", a
   );
 });
 
+test("composite preserves special-lyric gap evidence and does not call it clean", async () => {
+  const store = createStore();
+  const { stored, occurrenceId } = createContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, pitch: 69, lyrics: "glory" },
+      { onsetBlick: Q + 1, durationBlick: Q, pitch: 69, lyrics: "+" },
+    ],
+  });
+  const result = await analyzer(store).analyze({
+    contextId: stored.contextId,
+    include: ["prosody"],
+  });
+
+  const issue = result.sections.prosody.issues.find(
+    (item) => item.code === "SYLLABLE_CHAIN_GAP"
+  );
+  assert.ok(issue);
+  assert.equal(issue.gapBlick, 1);
+  const finding = result.topFindings.find((item) => item.code === "SYLLABLE_CHAIN_GAP");
+  assert.ok(finding);
+  assert.equal(finding.gapBlick, 1);
+  assert.equal(finding.semanticRole, "syllable_continuation");
+  assert.deepEqual(finding.noteIds, [
+    `${occurrenceId}:n:0`,
+    `${occurrenceId}:n:1`,
+  ]);
+  assert.ok(
+    result.nextSteps.some((step) => step.reason === "special_lyric_chain_findings_present")
+  );
+  assert.ok(result.nextSteps.every((step) => step.reason !== "no_blocking_finding"));
+});
+
 test("mixed findings preserve prosody identity and sort equal severity by score time", async () => {
   const store = createStore();
   const notes = MELODY.map((note, index) =>
@@ -308,10 +340,11 @@ test("an all-breath range degrades to insufficient_evidence rather than failing 
       { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "br" },
       { onsetBlick: 2 * Q, durationBlick: Q, pitch: 60, lyrics: "br" },
     ],
+    computedPitchValues: [60, 60],
   });
   const result = await analyzer(store).analyze({
     contextId: stored.contextId,
-    include: ["phrase", "prosody"],
+    include: ["phrase", "prosody", "computedPitch"],
   });
 
   assert.equal(result.status, "succeeded");
@@ -320,6 +353,9 @@ test("an all-breath range degrades to insufficient_evidence rather than failing 
   assert.match(result.sections.phrase.remedy, /only breath notes/);
   // 韵律检查对纯换气仍然有效，不被乐句分析的不足拖垮。
   assert.equal(result.sections.prosody.status, "succeeded");
+  assert.equal(result.sections.computedPitch.status, "insufficient_evidence");
+  assert.equal(result.sections.computedPitch.reason.code, "NO_MELODIC_EVIDENCE");
+  assert.ok(result.nextSteps.every((step) => step.tool !== "sv_wait_for_processing"));
 });
 
 test("no usable section reports no evidence rather than no problems", async () => {
@@ -418,6 +454,7 @@ test("with nothing blocking, the next step is a human audition, not a claim of q
   });
   const step = result.nextSteps.find((entry) => entry.tool === "sv_start_audition");
   assert.ok(step);
+  assert.deepEqual(step.arguments, { fromBlick: 0, toBlick: 4 * Q });
   assert.match(step.note, /human_only/);
   // 组合层绝不输出机器听感评分。
   const serialized = JSON.stringify(result);

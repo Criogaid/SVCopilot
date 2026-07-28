@@ -319,7 +319,7 @@ test("a breath between melodic notes contributes its gap as a rest, not an inter
   assert.equal(result.breathEvents.items[0].nominalPitch, 64);
 });
 
-test("uppercase BR and padded ' br ' lyrics are treated as breath events too", async () => {
+test("only exact lowercase br is a breath event; suspicious variants remain melodic", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, {
     notes: [
@@ -330,9 +330,76 @@ test("uppercase BR and padded ' br ' lyrics are treated as breath events too", a
     ],
   });
   const result = await createService(store).analyze({ contextId: stored.contextId });
-  assert.equal(result.noteCount, 2);
-  assert.equal(result.breathCount, 2);
-  assert.ok(result.scaleDegrees.items.every((item) => item.lyrics === "bright" || item.lyrics === "la"));
+  assert.equal(result.inputNoteCount, 4);
+  assert.equal(result.melodicNoteCount, 4);
+  assert.equal(result.noteCount, 4);
+  assert.equal(result.breathCount, 0);
+  assert.equal(result.excludedEvents.count, 0);
+  assert.equal(
+    result.warnings.filter((warning) => warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT")
+      .length,
+    2
+  );
+  assert.equal(result.provenance.breathDetection, "official_documented_special_lyric_br");
+});
+
+test("valid plus/minus continuation chains remain melodic evidence", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "ashame" },
+      { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "+" },
+      { onsetBlick: 2 * Q, durationBlick: Q, pitch: 64, lyrics: "-" },
+      { onsetBlick: 3 * Q, durationBlick: Q, pitch: 65, lyrics: "-" },
+    ],
+  });
+  const result = await createService(store).analyze({
+    contextId: stored.contextId,
+    include: ["statistics"],
+  });
+  assert.equal(result.inputNoteCount, 4);
+  assert.equal(result.melodicNoteCount, 4);
+  assert.equal(result.excludedEvents.count, 0);
+  assert.equal(result.statistics.intervals.count, 3);
+  assert.ok(!result.warnings.some((warning) => warning.code.startsWith("ORPHAN_")));
+});
+
+test("orphan continuations and standalone apostrophe are excluded with structured evidence", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: 0, durationBlick: Q, pitch: 72, lyrics: "+" },
+      { onsetBlick: Q, durationBlick: Q, pitch: 71, lyrics: "-" },
+      { onsetBlick: 2 * Q, durationBlick: Q, pitch: 70, lyrics: "'" },
+      { onsetBlick: 3 * Q, durationBlick: Q, pitch: 60, lyrics: "word" },
+    ],
+  });
+  const result = await createService(store).analyze({
+    contextId: stored.contextId,
+    include: ["statistics"],
+  });
+  assert.equal(result.inputNoteCount, 4);
+  assert.equal(result.melodicNoteCount, 1);
+  assert.equal(result.breathCount, 0);
+  assert.equal(result.excludedEvents.count, 3);
+  assert.deepEqual(result.excludedEvents.byRole, {
+    syllable_continuation: 1,
+    phonation_continuation: 1,
+    unknown_special: 1,
+  });
+  assert.equal(result.statistics.register.minPitch, 60);
+  assert.equal(result.statistics.register.maxPitch, 60);
+  assert.ok(result.warnings.some((warning) => warning.code === "ORPHAN_PLUS"));
+  assert.ok(
+    result.warnings.some(
+      (warning) => warning.code === "ORPHAN_PHONATION_CONTINUATION"
+    )
+  );
+  assert.ok(
+    result.warnings.some(
+      (warning) => warning.code === "STANDALONE_APOSTROPHE_UNCALIBRATED"
+    )
+  );
 });
 
 test("an all-breath range fails with NO_MELODIC_NOTES instead of inventing statistics", async () => {

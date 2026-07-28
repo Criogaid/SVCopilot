@@ -1,7 +1,10 @@
-import { isBreathLyrics } from "./expression-plan.js";
 import { classifyCharacter, countEnglishSyllables, splitKanaMorae } from "./lyric-align.js";
 import { blickToMusical } from "./musical-time.js";
 import { ServiceTiming } from "./service-timing.js";
+import {
+  analyzeVocalEventSequence,
+  isBreathEventLyrics as isBreathLyrics,
+} from "./vocal-event-semantics.js";
 
 // sv_validate_lyrics_prosody：咬字/韵律校验器（黑盒审计 M-02 / 研究提示 Layer C）。
 //
@@ -16,6 +19,7 @@ import { ServiceTiming } from "./service-timing.js";
 //   空音素；context 未捕获 processing 时如实 not_captured，不猜。
 export const PROSODY_CHECKS = Object.freeze([
   "breath",
+  "specialLyricChains",
   "japaneseMora",
   "englishSyllables",
   "languageConsistency",
@@ -34,7 +38,9 @@ const PROVENANCE = Object.freeze({
   englishSyllables: "heuristic_vowel_groups_85_90_percent_literature_range",
   stressModel: "first_syllable_heuristic_no_dictionary",
   strongBeatModel: "downbeat_and_midbar_from_meter_marks",
-  breathDetection: "lyrics_br_host_convention_not_official_api_fact",
+  breathDetection: "official_documented_special_lyric_br",
+  specialLyricRoles: "official_v2_manual_enter_notes",
+  specialLyricChainSpacing: "host_observed_requires_profile_calibration",
   phonemeCoverage: "snapshot_time_processing_state_not_live",
   basis: "derived_not_host_fact",
   perception: "human_only",
@@ -140,6 +146,7 @@ function runChecks(loaded, input, warnings) {
   const issues = [];
   const coverage = {};
   if (input.checks.has("breath")) checkBreath(loaded, issues);
+  if (input.checks.has("specialLyricChains")) checkSpecialLyricChains(loaded, issues);
   if (input.checks.has("japaneseMora")) checkJapaneseMora(loaded, issues);
   if (input.checks.has("englishSyllables")) checkEnglishSyllables(loaded, issues);
   if (input.checks.has("languageConsistency")) checkLanguageConsistency(loaded, issues);
@@ -168,7 +175,40 @@ function pushIssue(issues, note, issue) {
   });
 }
 
-// 1. breath：br 不应带 language/phonemes override（宿主把 br 当特殊事件，override 是可疑残留）；
+function checkSpecialLyricChains(loaded, issues) {
+  const sequence = analyzeVocalEventSequence(
+    loaded.notes.map((note) => ({ ...note, phonemes: note.phonemesOverride }))
+  );
+  for (const issue of sequence.issues) {
+    issues.push({
+      ...issue,
+      kind: issue.code.toLowerCase(),
+      confidence: specialLyricIssueConfidence(issue.code),
+      suggestion: specialLyricIssueSuggestion(issue.code),
+    });
+  }
+}
+
+function specialLyricIssueConfidence(code) {
+  if (code === "SYLLABLE_CHAIN_GAP") return "host_observed";
+  return code === "STANDALONE_APOSTROPHE_UNCALIBRATED" ||
+    code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT" ||
+    code === "SYLLABLE_CHAIN_OVERLAP"
+    ? "heuristic"
+    : "official_contract";
+}
+
+function specialLyricIssueSuggestion(code) {
+  if (code === "ORPHAN_PLUS" || code === "ORPHAN_PHONATION_CONTINUATION") {
+    return "repair the continuation chain with sv_patch_notes or sv_restructure_notes.";
+  }
+  if (code === "SYLLABLE_CHAIN_GAP" || code === "SYLLABLE_CHAIN_OVERLAP") {
+    return "review the two note boundaries, then adjust onset/duration with sv_patch_notes.";
+  }
+  return "review the special lyric spelling and preserve it unless the intended host semantics are known.";
+}
+
+// 1. breath：官方 br 事件不应带 language/phonemes override（override 是可疑残留）；
 //    异常长换气只提示不判错。
 function checkBreath(loaded, issues) {
   for (const note of loaded.notes) {
@@ -183,7 +223,7 @@ function checkBreath(loaded, issues) {
           note.phonemesOverride !== "" ? `phonemesOverride "${note.phonemesOverride}"` : null,
         ]
           .filter(Boolean)
-          .join(" and ")}; breaths are host-convention events and overrides are likely leftovers.`,
+          .join(" and ")}; "br" is an official breath event and overrides are likely leftovers.`,
         suggestion: "clear the override(s) via sv_patch_notes (set languageOverride/phonemesOverride to \"\").",
       });
     }
@@ -203,8 +243,16 @@ function checkBreath(loaded, issues) {
 //    小假名起头的歌词无法独立发音。
 function checkJapaneseMora(loaded, issues) {
   for (const note of loaded.notes) {
-    const lyrics = typeof note.lyrics === "string" ? note.lyrics.trim() : "";
-    if (lyrics.length === 0 || isBreathLyrics(lyrics) || lyrics === "+" || lyrics === "-") continue;
+    const rawLyrics = typeof note.lyrics === "string" ? note.lyrics : "";
+    const lyrics = rawLyrics.trim();
+    if (
+      lyrics.length === 0 ||
+      isBreathLyrics(rawLyrics) ||
+      rawLyrics === "+" ||
+      rawLyrics === "-"
+    ) {
+      continue;
+    }
     const characters = [...lyrics];
     if (!characters.every((character) => classifyCharacter(character) === "kana")) continue;
     if (SMALL_KANA.has(characters[0])) {
@@ -236,14 +284,15 @@ function checkJapaneseMora(loaded, issues) {
 function checkEnglishSyllables(loaded, issues) {
   for (let index = 0; index < loaded.notes.length; index += 1) {
     const note = loaded.notes[index];
-    const lyrics = typeof note.lyrics === "string" ? note.lyrics.trim() : "";
-    if (!/^[A-Za-z][A-Za-z']*$/.test(lyrics) || isBreathLyrics(lyrics)) continue;
+    const rawLyrics = typeof note.lyrics === "string" ? note.lyrics : "";
+    const lyrics = rawLyrics.trim();
+    if (!/^[A-Za-z][A-Za-z']*$/.test(lyrics) || isBreathLyrics(rawLyrics)) continue;
     // 只在语言可判定为英语时检查：显式 english override，或无 override 且词形是纯拉丁多字母。
     if (note.languageOverride !== "" && note.languageOverride !== "english") continue;
     const syllables = countEnglishSyllables(lyrics);
     let continuations = 0;
     for (let next = index + 1; next < loaded.notes.length; next += 1) {
-      if ((loaded.notes[next].lyrics ?? "").trim() === "+") continuations += 1;
+      if (loaded.notes[next].lyrics === "+") continuations += 1;
       else break;
     }
     if (continuations === syllables - 1) continue;
@@ -267,10 +316,11 @@ function checkEnglishSyllables(loaded, issues) {
 // 4. languageConsistency：歌词字符类别与 languageOverride 冲突。
 function checkLanguageConsistency(loaded, issues) {
   for (const note of loaded.notes) {
-    const lyrics = typeof note.lyrics === "string" ? note.lyrics.trim() : "";
+    const rawLyrics = typeof note.lyrics === "string" ? note.lyrics : "";
+    const lyrics = rawLyrics.trim();
     const override = note.languageOverride;
-    if (lyrics.length === 0 || override === "" || isBreathLyrics(lyrics)) continue;
-    if (lyrics === "+" || lyrics === "-") {
+    if (lyrics.length === 0 || override === "" || isBreathLyrics(rawLyrics)) continue;
+    if (rawLyrics === "+" || rawLyrics === "-") {
       // 续拍/延音不承载语言，带 override 属于可疑残留。
       pushIssue(issues, note, {
         kind: "continuation_with_language_override",
@@ -310,8 +360,9 @@ function checkStressAlignment(loaded, issues, warnings) {
   }
   let checkedWords = 0;
   for (const note of loaded.notes) {
-    const lyrics = typeof note.lyrics === "string" ? note.lyrics.trim() : "";
-    if (!/^[A-Za-z][A-Za-z']*$/.test(lyrics) || isBreathLyrics(lyrics)) continue;
+    const rawLyrics = typeof note.lyrics === "string" ? note.lyrics : "";
+    const lyrics = rawLyrics.trim();
+    if (!/^[A-Za-z][A-Za-z']*$/.test(lyrics) || isBreathLyrics(rawLyrics)) continue;
     if (note.languageOverride !== "" && note.languageOverride !== "english") continue;
     if (countEnglishSyllables(lyrics) < 2) continue;
     checkedWords += 1;
@@ -355,9 +406,9 @@ function checkPhonemeCoverage(loaded, issues, warnings) {
   const flagged = [];
   for (const note of loaded.notes) {
     if (!emptyIndices.has(note.indexInGroup)) continue;
-    const lyrics = typeof note.lyrics === "string" ? note.lyrics.trim() : "";
+    const rawLyrics = typeof note.lyrics === "string" ? note.lyrics : "";
     // 合法空音素：呼吸、延音、续拍。
-    if (isBreathLyrics(lyrics) || lyrics === "-" || lyrics === "+") continue;
+    if (isBreathLyrics(rawLyrics) || rawLyrics === "-" || rawLyrics === "+") continue;
     flagged.push(note);
   }
   for (const note of flagged) {

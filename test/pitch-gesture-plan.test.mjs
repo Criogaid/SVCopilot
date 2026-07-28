@@ -214,6 +214,117 @@ test("depth clamping to constraints is reported as a warning", async () => {
   for (const point of points) assert.ok(Math.abs(point.pitchFromAnchorSemitone) <= 0.5 + 1e-9);
 });
 
+test("breath targets default to warn-and-skip with a zero-write no-change plan", async () => {
+  const { snapshots, planner } = createFixture({
+    notes: [{ onset: 0, duration: Q, pitch: 59, lyrics: "br" }],
+  });
+  const snapshot = await snapshotNotes(snapshots);
+  const result = await planner.plan({
+    contextId: snapshot.contextId,
+    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+  });
+
+  assert.equal(result.status, "no_change");
+  assert.equal(result.apply, null);
+  assert.deepEqual(result.applyRequests, []);
+  assert.equal(result.summary.requestedGestureCount, 1);
+  assert.equal(result.summary.gestureCount, 0);
+  assert.equal(result.summary.skippedGestureCount, 1);
+  assert.equal(result.summary.operationCount, 0);
+  assert.equal(result.summary.applyCallCount, 0);
+  assert.equal(result.summary.expectedUserUndoSteps, 0);
+  assert.equal(result.summary.excludedEvents.byRole.breath_event, 1);
+  const warning = result.warnings.find(
+    (item) => item.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
+  );
+  assert.equal(warning.noteId, nid(snapshot, 0));
+  assert.equal(warning.semanticRole, "breath_event");
+  assert.equal(warning.evidence, "official_documented_special_lyric_br");
+});
+
+test("breath targets require explicit include, while low-level dry-run remains available", async () => {
+  const { model, snapshots, planner, patch } = createFixture({
+    notes: [{ onset: 0, duration: Q, pitch: 59, lyrics: "br" }],
+  });
+  const snapshot = await snapshotNotes(snapshots);
+  const result = await planner.plan({
+    contextId: snapshot.contextId,
+    specialEventPolicy: "include",
+    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+  });
+
+  assert.equal(result.status, "planned");
+  assert.equal(result.gestures[0].anchor.groupRelativeSemitone, 59);
+  assert.equal(result.summary.skippedGestureCount, 0);
+  const dryRun = await patch.patch(result.apply.arguments);
+  assert.equal(dryRun.status, "dry_run");
+  assert.equal(model.undoCount, 0);
+  assert.equal(model.controls.length, 0);
+});
+
+test("near-miss breath spelling stays melodic but carries the shared semantic warning", async () => {
+  const { snapshots, planner } = createFixture({
+    notes: [{ onset: 0, duration: Q, pitch: 59, lyrics: "BR" }],
+  });
+  const snapshot = await snapshotNotes(snapshots);
+  const result = await planner.plan({
+    contextId: snapshot.contextId,
+    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+  });
+
+  assert.equal(result.status, "planned");
+  assert.equal(result.summary.skippedGestureCount, 0);
+  assert.equal(result.summary.excludedEvents.count, 0);
+  assert.ok(
+    result.warnings.some(
+      (warning) =>
+        warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT" &&
+        warning.noteIds.includes(nid(snapshot, 0))
+    )
+  );
+});
+
+test("special-event error policy rejects the whole pitch plan before compilation", async () => {
+  const { snapshots, planner } = createFixture({
+    notes: [
+      { onset: 0, duration: Q, pitch: 60, lyrics: "a" },
+      { onset: Q, duration: Q, pitch: 59, lyrics: "br" },
+    ],
+  });
+  const snapshot = await snapshotNotes(snapshots);
+  await assert.rejects(
+    planner.plan({
+      contextId: snapshot.contextId,
+      specialEventPolicy: "error",
+      gestures: [
+        { type: "attack", noteId: nid(snapshot, 0) },
+        { type: "release", noteId: nid(snapshot, 1) },
+      ],
+    }),
+    (error) => {
+      assert.equal(error.code, "NON_MELODIC_SPECIAL_EVENT_TARGETED");
+      assert.equal(error.details.noteId, nid(snapshot, 1));
+      assert.equal(error.details.semanticRole, "breath_event");
+      return true;
+    }
+  );
+});
+
+test("release auto direction never infers melody from a following breath event", async () => {
+  const { snapshots, planner } = createFixture({
+    notes: [
+      { onset: 0, duration: Q, pitch: 60, lyrics: "a" },
+      { onset: Q, duration: Q, pitch: 72, lyrics: "br" },
+    ],
+  });
+  const snapshot = await snapshotNotes(snapshots);
+  const result = await planner.plan({
+    contextId: snapshot.contextId,
+    gestures: [{ type: "release", noteId: nid(snapshot, 0), direction: "auto" }],
+  });
+  assert.equal(result.gestures[0].params.direction, "down");
+});
+
 test("the planner never touches the host", async () => {
   const { model, snapshots, planner } = createFixture();
   const snapshot = await snapshotNotes(snapshots);

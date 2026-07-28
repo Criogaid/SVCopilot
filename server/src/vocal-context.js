@@ -61,6 +61,7 @@ const NOT_CAPTURED_CODES = new Set([
 ]);
 const INSUFFICIENT_EVIDENCE_CODES = new Set([
   "INSUFFICIENT_COMPUTED_PITCH",
+  "NO_MELODIC_EVIDENCE",
   "NO_MELODIC_NOTES",
   "NOT_ENOUGH_NOTES",
   "INSUFFICIENT_PITCH_VARIETY",
@@ -285,6 +286,9 @@ function remedyFor(section, code) {
   if (code === "INSUFFICIENT_COMPUTED_PITCH") {
     return "Not enough usable pitch frames to analyze — this is NOT zero error. Run sv_wait_for_processing (kind computedPitch), then re-snapshot and re-analyze.";
   }
+  if (code === "NO_MELODIC_EVIDENCE") {
+    return "The range has no event eligible for melodic computed-pitch analysis; widen it to include sung notes.";
+  }
   if (code === "NO_MELODIC_NOTES") {
     return "The range holds only breath notes; widen the range to include sung notes.";
   }
@@ -406,15 +410,10 @@ function collectFindings(sections, input) {
   if (prosody?.status === "succeeded") {
     for (const issue of prosody.issues ?? []) {
       findings.push({
+        ...issue,
         source: "prosody",
         authority: "sv_validate_lyrics_prosody",
-        severity: issue.severity,
-        kind: issue.kind,
-        confidence: issue.confidence,
-        message: issue.message,
         ...(Array.isArray(issue.noteIds) ? { noteIds: [...issue.noteIds] } : {}),
-        ...(Number.isSafeInteger(issue.startBlick) ? { startBlick: issue.startBlick } : {}),
-        ...(issue.suggestion ? { suggestion: issue.suggestion } : {}),
       });
     }
   }
@@ -487,7 +486,10 @@ function nextSteps(sections, findings, target) {
       then: "Use the new contextId and occurrenceId with sv_analyze_vocal_context.",
       note: "Missing computed pitch means NOT ENOUGH DATA TO ANALYZE — never report it as zero error.",
     });
-  } else if (pitch?.status === "insufficient_evidence") {
+  } else if (
+    pitch?.status === "insufficient_evidence" &&
+    pitch.reason?.code !== "NO_MELODIC_EVIDENCE"
+  ) {
     steps.push({
       reason: pitch.reason?.code ?? "computed_pitch_unavailable",
       tool: "sv_wait_for_processing",
@@ -503,6 +505,13 @@ function nextSteps(sections, findings, target) {
   const prosodyErrors = findings.filter(
     (finding) => finding.source === "prosody" && finding.severity === "error"
   );
+  const specialLyricChainFindings = findings.filter(
+    (finding) =>
+      finding.source === "prosody" &&
+      ["ORPHAN_PLUS", "ORPHAN_PHONATION_CONTINUATION", "SYLLABLE_CHAIN_GAP", "SYLLABLE_CHAIN_OVERLAP"].includes(
+        finding.code
+      )
+  );
   if (prosodyErrors.length > 0) {
     steps.push({
       reason: "prosody_errors_present",
@@ -510,6 +519,20 @@ function nextSteps(sections, findings, target) {
       arguments: { contextId: target.contextId, occurrenceId: target.occurrenceId, lyrics: "<replacement lyric text>" },
       then: "Review the plan, dry-run apply.arguments, then commit.",
       note: `${prosodyErrors.length} error-severity lyric issue(s); sv_patch_notes or sv_restructure_notes may fit better for targeted fixes.`,
+    });
+  }
+  if (specialLyricChainFindings.some((finding) => finding.severity !== "error")) {
+    steps.push({
+      reason: "special_lyric_chain_findings_present",
+      tool: "sv_validate_lyrics_prosody",
+      arguments: {
+        contextId: target.contextId,
+        occurrenceId: target.occurrenceId,
+        checks: ["specialLyricChains"],
+        responseMode: "verbose",
+      },
+      then: "Use code plus gapBlick/overlapBlick to choose a targeted sv_patch_notes or sv_restructure_notes edit.",
+      note: "A continuation gap or overlap is an actionable score-structure finding, not a clean result.",
     });
   }
   if (pitch?.status === "succeeded" && (pitch.anomalySegments?.length ?? 0) > 0) {
@@ -522,11 +545,12 @@ function nextSteps(sections, findings, target) {
     });
   }
   if (steps.length === 0) {
+    const range = snapshotBlickRange(target.captureRange);
     steps.push({
       reason: "no_blocking_finding",
       tool: "sv_start_audition",
-      arguments: { fromBlick: 0, toBlick: 1 },
-      then: "Set fromBlick/toBlick from the range context, then let a human listen.",
+      arguments: range,
+      then: "Let a human listen over the analyzed range.",
       note: "No analyzer finding requires an edit. Whether it sounds right is human_only.",
     });
   }
@@ -548,6 +572,23 @@ function snapshotMusicalPoint(point) {
           beat: isRecord(point.beat) ? { ...point.beat } : point.beat,
         }),
   };
+}
+
+function snapshotBlickRange(range) {
+  const fromBlick = range?.from?.blick;
+  const toBlick = range?.to?.blick;
+  if (
+    !Number.isSafeInteger(fromBlick) ||
+    fromBlick < 0 ||
+    !Number.isSafeInteger(toBlick) ||
+    toBlick <= fromBlick
+  ) {
+    throw codedError(
+      "INVALID_CONTEXT",
+      "range context is missing the BLICK boundaries needed for audition"
+    );
+  }
+  return { fromBlick, toBlick };
 }
 
 // ---------- 预算 ----------

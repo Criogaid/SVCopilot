@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { ServiceTiming } from "./service-timing.js";
 import { MAX_PATCHES } from "./note-patch.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
+import {
+  analyzeVocalEventSequence,
+  classifyVocalEvent,
+} from "./vocal-event-semantics.js";
 
 // sv_align_lyrics：无副作用咬字/铺词规划器（HANDOFF §7 P2 定位）。
 //
@@ -14,8 +18,8 @@ import { buildApplyEnvelope } from "./plan-envelope.js";
 //   促音/拨音/长音各占一拍）；英语音节数是元音簇启发式（文献准确率 ~85-90%，只影响
 //   "+" 续拍数量）；汉字读音不可知（无 G2P），mora/音节数未知，按 1 音符规划并标
 //   needs_review；不承诺与宿主内部 G2P 一致。
-// - "+"（下一音节）/"-"（延音）/"br"（换气）是宿主/社区约定，不是官方 API 文档事实，
-//   provenance 中如实标注。
+// - 精确拼写的 "+"（下一音节）/"-"（延音）/"br"（换气）及前缀 "'"（插入 cl）来自
+//   Synthesizer V Studio 2 官方文档；近似拼写保持词面原样并发出警告。
 export const ALIGN_LANGUAGES = Object.freeze([
   "auto",
   "japanese",
@@ -29,7 +33,9 @@ const PROVENANCE = Object.freeze({
   japaneseKana: "deterministic_mora_rules",
   englishSyllables: "heuristic_vowel_groups_85_90_percent_literature_range",
   kanjiReading: "unknown_no_g2p_available",
-  plusMinusBreath: "host_convention_not_official_api_fact",
+  plusMinusBreath: "official_documented_exact_ascii_special_lyrics",
+  apostrophePrefix: "official_documented_prefix_inserts_cl_phoneme",
+  standaloneApostrophe: "not_documented_requires_human_review",
   g2pParity: "not_guaranteed",
   perception: "human_only",
 });
@@ -168,6 +174,7 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
       noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       onsetBlick: fingerprint.onsetBlick,
+      durationBlick: fingerprint.durationBlick,
       lyrics: fingerprint.lyrics,
       languageOverride: fingerprint.languageOverride ?? "",
     }))
@@ -263,11 +270,18 @@ function tokenizeLyrics(text, language, warnings) {
   const hasKana = runs.some((run) => run.kind === "kana");
   const tokens = [];
   let skippedCharacters = 0;
-  for (const run of runs) {
+  for (let runIndex = 0; runIndex < runs.length; runIndex += 1) {
+    const run = runs[runIndex];
     if (run.kind === "separator") continue;
+    const nextRun = runs[runIndex + 1];
+    if (run.kind === "latin" && run.text === "'" && nextRun?.kind === "kana") {
+      appendKanaTokens(tokens, nextRun.text, language, warnings, "'");
+      runIndex += 1;
+      continue;
+    }
     if (run.kind === "latin") {
       for (const word of run.text.split(/[^A-Za-z'+-]+/).filter(Boolean)) {
-        if (word.toLowerCase() === "br") {
+        if (word === "br") {
           tokens.push({ kind: "breath", text: "br", language: null, confidence: "deterministic_rule" });
         } else if (word === "+" || word === "-") {
           tokens.push({
@@ -300,15 +314,7 @@ function tokenizeLyrics(text, language, warnings) {
         }
       }
     } else if (run.kind === "kana") {
-      if (language !== "auto" && language !== "japanese") {
-        appendOnce(warnings, {
-          code: "KANA_FORCED_JAPANESE",
-          message: "kana characters are always tokenized as Japanese morae regardless of the requested language.",
-        });
-      }
-      for (const mora of splitKanaMorae(run.text)) {
-        tokens.push({ kind: "mora", text: mora, language: "japanese", confidence: "deterministic_rule" });
-      }
+      appendKanaTokens(tokens, run.text, language, warnings);
     } else if (run.kind === "cjk") {
       for (const character of [...run.text]) {
         if (language === "mandarin" || language === "cantonese") {
@@ -356,7 +362,43 @@ function tokenizeLyrics(text, language, warnings) {
   if (tokens.length === 0) {
     throw codedError("EMPTY_LYRICS", "lyrics contained no alignable tokens");
   }
-  return tokens.map((token, index) => ({ ...token, index }));
+  return tokens.map((token, index) => {
+    const semantics = classifyVocalEvent({ lyrics: token.text });
+    for (const warning of semantics.warnings) {
+      appendOnce(warnings, { ...warning, tokenIndex: index, lyrics: token.text });
+    }
+    const needsReview = token.needsReview || semantics.role === "unknown_special";
+    return {
+      ...token,
+      index,
+      semanticRole: semantics.role,
+      semanticEvidence: semantics.evidenceCode,
+      ...(needsReview
+        ? {
+            needsReview: true,
+            ...(semantics.role === "unknown_special" ? { confidence: "needs_review" } : {}),
+          }
+        : {}),
+    };
+  });
+}
+
+function appendKanaTokens(tokens, text, language, warnings, firstMoraPrefix = "") {
+  if (language !== "auto" && language !== "japanese") {
+    appendOnce(warnings, {
+      code: "KANA_FORCED_JAPANESE",
+      message: "kana characters are always tokenized as Japanese morae regardless of the requested language.",
+    });
+  }
+  const morae = splitKanaMorae(text);
+  for (let index = 0; index < morae.length; index += 1) {
+    tokens.push({
+      kind: "mora",
+      text: `${index === 0 ? firstMoraPrefix : ""}${morae[index]}`,
+      language: "japanese",
+      confidence: "deterministic_rule",
+    });
+  }
 }
 
 function splitRuns(text) {
@@ -415,13 +457,17 @@ export function countEnglishSyllables(word) {
 // ---------- 铺排 ----------
 
 function mapUnitsToNotes(tokens, loaded, input, warnings) {
-  // token → 音符单元：英语多音节词 = 词 + (n-1) 个 "+"（SynthV 由词自动分配后续音节）。
+  // 紧随词头的显式 +/- 链代表调用方已经完成铺排，不能再叠加启发式 "+"。
   const units = [];
-  for (const token of tokens) {
-    units.push({ token, text: token.text, role: token.kind === "word" ? "word" : token.kind });
-    if (token.kind === "word") {
+  for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+    const token = tokens[tokenIndex];
+    units.push(createLyricUnit(token, token.text, token.kind === "word" ? "word" : token.kind));
+    const nextRole = tokens[tokenIndex + 1]?.semanticRole;
+    const hasExplicitContinuation =
+      nextRole === "syllable_continuation" || nextRole === "phonation_continuation";
+    if (token.kind === "word" && !hasExplicitContinuation) {
       for (let extra = 1; extra < token.syllables; extra += 1) {
-        units.push({ token, text: "+", role: "continuation" });
+        units.push(createLyricUnit(token, "+", "continuation"));
       }
     }
   }
@@ -435,8 +481,7 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
     // breath 与续拍不设 languageOverride；其余按 token 语言（仅当确定）设置。
     const plannedLanguage =
       input.setLanguageOverride &&
-      unit.role !== "continuation" &&
-      unit.token.kind !== "breath" &&
+      (unit.semanticRole === "lexical_head" || unit.semanticRole === "glottal_onset") &&
       typeof unit.token.language === "string"
         ? unit.token.language
         : null;
@@ -448,6 +493,8 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
       unit: {
         tokenIndex: unit.token.index,
         role: unit.role,
+        semanticRole: unit.semanticRole,
+        semanticEvidence: unit.semanticEvidence,
         ...(unit.token.kind === "word" ? { word: unit.token.text, syllables: unit.token.syllables } : {}),
       },
       languageOverride: {
@@ -461,10 +508,36 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
         (plannedLanguage !== null && plannedLanguage !== note.languageOverride),
     });
   }
+  const sequence = analyzeVocalEventSequence(
+    perNote.map((item, index) => {
+      const note = loaded.notes[loaded.startIndex + index];
+      return {
+        noteId: item.noteId,
+        onsetBlick: note.onsetBlick,
+        durationBlick: note.durationBlick,
+        lyrics: item.plannedLyrics,
+      };
+    })
+  );
+  const eventsByNoteId = new Map(sequence.events.map((event) => [event.noteId, event]));
+  const reviewNoteIds = new Set(sequence.issues.flatMap((issue) => issue.noteIds ?? []));
+  for (const item of perNote) {
+    const event = eventsByNoteId.get(item.noteId);
+    if (!event) continue;
+    item.unit.semanticRole = event.semanticRole;
+    item.unit.semanticEvidence = event.semanticEvidence;
+    item.unit.chainHeadNoteId = event.chainHeadNoteId;
+    item.unit.syllableOrdinal = event.syllableOrdinal;
+    item.unit.continuationValid = event.continuationValid;
+    if (reviewNoteIds.has(item.noteId)) item.needsReview = true;
+  }
+  for (const issue of sequence.issues) appendOnce(warnings, issue);
   const unassignedUnits = units.slice(assignedCount).map((unit) => ({
     tokenIndex: unit.token.index,
     text: unit.text,
     role: unit.role,
+    semanticRole: unit.semanticRole,
+    semanticEvidence: unit.semanticEvidence,
   }));
   if (unassignedUnits.length > 0) {
     warnings.push({
@@ -483,6 +556,17 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
     });
   }
   return { units, perNote, unassignedUnits, unfilledNotes, assignedCount };
+}
+
+function createLyricUnit(token, text, role) {
+  const semantics = classifyVocalEvent({ lyrics: text });
+  return {
+    token,
+    text,
+    role,
+    semanticRole: semantics.role,
+    semanticEvidence: semantics.evidenceCode,
+  };
 }
 
 // ---------- 响应组装 ----------
@@ -550,6 +634,11 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
     .digest("hex")
     .slice(0, 16)}`;
   const needsReviewCount = mapped.perNote.filter((item) => item.needsReview).length;
+  const semanticRoles = { total: mapped.units.length, byRole: {} };
+  for (const unit of mapped.units) {
+    semanticRoles.byRole[unit.semanticRole] =
+      (semanticRoles.byRole[unit.semanticRole] ?? 0) + 1;
+  }
   // 共享 target 的写入会同时改变所有 occurrence；规划阶段就如实声明，不留给提交时才发现。
   const requiresSharedTargetConfirmation =
     (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1;
@@ -594,6 +683,7 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
       assignedCount: mapped.assignedCount,
       changedCount: changed.length,
       needsReviewCount,
+      semanticRoles,
       complete: mapped.unassignedUnits.length === 0,
     },
     ...(input.responseMode === "compact"
@@ -604,6 +694,8 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
             text: token.text,
             kind: token.kind,
             language: token.language,
+            semanticRole: token.semanticRole,
+            semanticEvidence: token.semanticEvidence,
             ...(token.syllables !== undefined ? { syllables: token.syllables } : {}),
             confidence: token.confidence,
             ...(token.needsReview ? { needsReview: true } : {}),
