@@ -1,27 +1,43 @@
-// 共享的 PitchControl 假宿主模型。忠实模拟官方语义：
-//   - NoteGroup 内 PitchControl 始终按 anchor position 升序；addPitchControl 返回 1-based
-//     插入索引；removePitchControl(index) 之后对象脱离 parent（getIndexInParent 返回 0）。
+// 共享的 PitchControl 假宿主模型。默认语义是确定性测试替身，不等同于真机保证：
+//   - 排序、插入索引、remove 后状态、clone 和数值存储可由 Host Profile 校准。
+//   - 未确认语义在宽松模式标记为 simulator_default，严格模式直接拒绝使用。
 //   - PitchControlPoint 没有 getPoints/getValueAt/setPoints（调用即抛 "no such method"，
 //     与真实宿主经 classifyHostError 后的 UNKNOWN_METHOD 一致）；PitchControlCurve 有。
-//   - clone() 深拷贝 points 与 scriptData 到一个新的 detached 对象。
-//   - scriptData 按 key round-trip；getScriptData 缺键返回 undefined（线上为 null）。
 // 供 pitch-control(读)、pitch-control-patch(写)、bake-computed-pitch 三个测试文件复用。
 // 支持逐方法故障注入（failures: [{method, code, message, remainingSkips}]）与 Undo 计数。
+
+import {
+  hostModelDefaultsFromProfile,
+  validateHostBehaviorProfile,
+} from "../../tools/lib/host-behavior-profile.mjs";
 
 const DEFAULT_Q = 705600000;
 
 export function createPitchHostModel(options = {}) {
+  const hostProfile = options.hostProfile
+    ? validateHostBehaviorProfile(options.hostProfile)
+    : null;
+  const profileDefaults = hostProfile
+    ? hostModelDefaultsFromProfile(hostProfile)
+    : {};
+  const evidencePolicy = options.evidencePolicy ?? "allow-simulator-default";
+  if (!["allow-simulator-default", "require-confirmed"].includes(evidencePolicy)) {
+    throw new TypeError("evidencePolicy must be allow-simulator-default or require-confirmed");
+  }
   const {
     uuid = "uuid-group-1",
     timeOffsetBlick = 0,
     pitchOffsetSemitone = 0,
+    referenceOnsetBlick = null,
+    referenceEndBlick = null,
     notes = null,
     controls = [],
     computedPitchValues = null,
-    quarterBlick = DEFAULT_Q,
+    quarterBlick = profileDefaults.quarterBlick ?? DEFAULT_Q,
     // shared-target：第二个 NoteGroupReference 指向同一 group，但 offset 不同。
     secondReference = null,
   } = options;
+  const hostVersion = profileDefaults.hostVersion ?? "2.2.1";
 
   let nextHandle = 1000;
   const handle = (type) => ({ __handle__: nextHandle++, __type__: type, __epoch__: 1 });
@@ -58,10 +74,55 @@ export function createPitchHostModel(options = {}) {
     failures: [],
     ignoreSetters: new Set(),
   };
+  const semanticCoverage = new Map();
+  const useSemantic = (key, simulatorDefault) => {
+    const fact = hostProfile?.semantics?.[key];
+    if (fact?.status === "confirmed") {
+      semanticCoverage.set(key, { key, source: "live_profile", status: "confirmed" });
+      return fact.value;
+    }
+    const status = fact?.status ?? "missing";
+    if (evidencePolicy === "require-confirmed") {
+      semanticCoverage.set(key, { key, source: "unconfirmed", status });
+      const error = new Error(`host semantic ${key} is ${status}; live confirmation is required`);
+      error.code = "UNCONFIRMED_HOST_SEMANTIC";
+      error.semanticKey = key;
+      error.semanticStatus = status;
+      throw error;
+    }
+    semanticCoverage.set(key, { key, source: "simulator_default", status });
+    return simulatorDefault;
+  };
+  const requireReferenceBoundary = (explicit, derived, label) => {
+    if (explicit !== null && explicit !== undefined) return explicit;
+    const independent = useSemantic(
+      "occurrence.referenceBoundsIndependentOfNoteBounds",
+      false
+    );
+    if (independent === true) {
+      const error = new Error(
+        `${label} must be supplied because the live profile confirms independent reference bounds`
+      );
+      error.code = "HOST_SCENARIO_REQUIRED";
+      error.scenarioField = label;
+      throw error;
+    }
+    return derived;
+  };
 
   const sortControls = () => {
-    // 稳定排序：相同 anchor position 保持插入先后（官方未规定 tie-break，Phase 0 待真机确认）。
-    model.controls.sort((a, b) => a.state.position - b.state.position || a.seq - b.seq);
+    const ordering = useSemantic("pitchControl.ordering", "position_ascending");
+    const equalAnchor = useSemantic(
+      "pitchControl.equalAnchorTieBreak",
+      "insertion_stable"
+    );
+    if (ordering === "insertion_order") return;
+    const direction = ordering === "position_descending" ? -1 : 1;
+    model.controls.sort(
+      (a, b) =>
+        direction * (a.state.position - b.state.position) ||
+        (equalAnchor === "insertion_stable" ? a.seq - b.seq : b.seq - a.seq)
+    );
   };
 
   let seq = 0;
@@ -105,7 +166,9 @@ export function createPitchHostModel(options = {}) {
     if (method === "getPitch") return state.pitch;
     if (method === "getIndexInParent") {
       const idx = model.controls.indexOf(floating);
-      return idx < 0 ? 0 : idx + 1;
+      return idx < 0
+        ? useSemantic("pitchControl.remove.indexAfterRemove", 0)
+        : idx + 1;
     }
     if (method === "getPoints") {
       if (!isCurve) unknownMethod(method);
@@ -116,23 +179,30 @@ export function createPitchHostModel(options = {}) {
       return interpolate(state, args[0]);
     }
     if (method === "clone") {
-      // clone(detached) 在真实宿主上预期失败（无 parent 的对象不能深拷贝）——Phase 0 真机确认项。
-      if (floating.detached) {
+      const sourceAllowed = floating.detached
+        ? useSemantic("pitchControl.clone.detachedSourceAllowed", false)
+        : useSemantic("pitchControl.clone.attachedAllowed", true);
+      if (!sourceAllowed) {
         const error = new Error("cannot clone a detached pitch control");
         error.code = "HOST_CALL_FAILED";
         throw error;
       }
+      const deepPoints = useSemantic("pitchControl.clone.deepPoints", true);
+      const copiesScriptData = useSemantic(
+        "pitchControl.clone.copiesScriptData",
+        true
+      );
       const copy = {
         id: handle(state.kind === "curve" ? "PitchControlCurve" : "PitchControlPoint").__handle__,
         state: makeControlState({
           kind: state.kind,
           position: state.position,
           pitch: state.pitch,
-          points: state.points ?? [],
-          scriptData: state.scriptData,
+          points: deepPoints ? state.points ?? [] : [],
+          scriptData: copiesScriptData ? state.scriptData : {},
         }),
         seq: seq++,
-        detached: true,
+        detached: useSemantic("pitchControl.clone.detached", true),
       };
       model.floating = model.floating ?? new Map();
       model.floating.set(copy.id, copy);
@@ -140,22 +210,43 @@ export function createPitchHostModel(options = {}) {
     }
     if (method === "getScriptDataKeys") return Object.keys(state.scriptData);
     if (method === "getScriptData") {
-      return Object.hasOwn(state.scriptData, args[0]) ? state.scriptData[args[0]] : undefined;
+      if (Object.hasOwn(state.scriptData, args[0])) return state.scriptData[args[0]];
+      const missing = useSemantic(
+        "pitchControl.scriptData.missingValue",
+        "undefined"
+      );
+      return missing === "null" ? null : undefined;
     }
     if (method === "hasScriptData") return Object.hasOwn(state.scriptData, args[0]);
     if (model.ignoreSetters.has(method)) return null;
     if (method === "setPosition") {
       state.position = args[0];
-      if (!floating.detached) sortControls();
+      if (
+        !floating.detached &&
+        useSemantic("pitchControl.attachedSet.reorders", true)
+      ) {
+        sortControls();
+      }
       return null;
     }
     if (method === "setPitch") {
-      state.pitch = args[0];
+      const numericStorage = useSemantic(
+        "pitchControl.numericStorage",
+        "double"
+      );
+      state.pitch = numericStorage === "float32" ? Math.fround(args[0]) : args[0];
       return null;
     }
     if (method === "setPoints") {
       if (!isCurve) unknownMethod(method);
-      state.points = (args[0] ?? []).map((point) => [point[0], point[1]]);
+      const numericStorage = useSemantic(
+        "pitchControl.numericStorage",
+        "double"
+      );
+      state.points = (args[0] ?? []).map((point) => [
+        point[0],
+        numericStorage === "float32" ? Math.fround(point[1]) : point[1],
+      ]);
       return null;
     }
     if (method === "setScriptData") {
@@ -209,6 +300,7 @@ export function createPitchHostModel(options = {}) {
       const id = target?.__handle__;
       if (target === undefined || target === null) {
         if (method === "create") {
+          useSemantic("pitchControl.numericStorage", "double");
           // SV.create 收官方类型名；内部状态机用 "curve"/"point" 判别。
           const kind = args[0] === "PitchControlCurve" ? "curve" : "point";
           const created = newControlHandle(kind);
@@ -216,15 +308,27 @@ export function createPitchHostModel(options = {}) {
           model.floating.set(created.id, created);
           return { __handle__: created.id, __type__: args[0], __epoch__: 1 };
         }
-        if (method === "getHostInfo") return { hostVersion: "2.2.1" };
+        if (method === "getHostInfo") return { hostVersion };
       }
       if (id === h.sv.__handle__) {
         // getComputedPitchForGroup 是对 SV 根对象调用的（不是 undefined target）。
         if (method === "getComputedPitchForGroup") {
           const frames = args[3];
-          return Array.from({ length: frames }, (_, index) =>
+          const result = Array.from({ length: frames }, (_, index) =>
             Array.isArray(computedPitchValues) ? computedPitchValues[index] ?? null : 60 + index / 100
           );
+          if (result.some(Number.isFinite)) {
+            useSemantic(
+              "computedPitch.coordinateSpace",
+              "occurrence_absolute_blick"
+            );
+          } else {
+            useSemantic(
+              "computedPitch.pendingRepresentation",
+              "requested_length_null_array"
+            );
+          }
+          return result;
         }
         if (method === "getPhonemesForGroup") return noteList.map((note) => note.state.lyrics || "");
         if (method === "getComputedAttributesForGroup") return noteList.map(() => ({}));
@@ -252,8 +356,20 @@ export function createPitchHostModel(options = {}) {
         if (method === "getIndexInParent") return 1;
       }
       if (id === h.reference.__handle__) {
-        if (method === "getOnset") return timeOffsetBlick + (noteList[0]?.state.onset ?? 0);
-        if (method === "getEnd") return timeOffsetBlick + 4 * quarterBlick;
+        if (method === "getOnset") {
+          return requireReferenceBoundary(
+            referenceOnsetBlick,
+            timeOffsetBlick + (noteList[0]?.state.onset ?? 0),
+            "referenceOnsetBlick"
+          );
+        }
+        if (method === "getEnd") {
+          return requireReferenceBoundary(
+            referenceEndBlick,
+            timeOffsetBlick + 4 * quarterBlick,
+            "referenceEndBlick"
+          );
+        }
         if (method === "isInstrumental") return false;
         if (method === "isMain") return true;
         if (method === "getTimeOffset") return timeOffsetBlick;
@@ -265,8 +381,20 @@ export function createPitchHostModel(options = {}) {
       if (h.reference2 && id === h.reference2.__handle__) {
         const offset = secondReference.timeOffsetBlick ?? 0;
         const pitchOffset = secondReference.pitchOffsetSemitone ?? 0;
-        if (method === "getOnset") return offset + (noteList[0]?.state.onset ?? 0);
-        if (method === "getEnd") return offset + 4 * quarterBlick;
+        if (method === "getOnset") {
+          return requireReferenceBoundary(
+            secondReference.referenceOnsetBlick,
+            offset + (noteList[0]?.state.onset ?? 0),
+            "secondReference.referenceOnsetBlick"
+          );
+        }
+        if (method === "getEnd") {
+          return requireReferenceBoundary(
+            secondReference.referenceEndBlick,
+            offset + 4 * quarterBlick,
+            "secondReference.referenceEndBlick"
+          );
+        }
         if (method === "isInstrumental") return false;
         if (method === "isMain") return false;
         if (method === "getTimeOffset") return offset;
@@ -295,7 +423,11 @@ export function createPitchHostModel(options = {}) {
           floating.detached = false;
           model.controls.push(floating);
           sortControls();
-          return liveIndex(floating);
+          const indexBase = useSemantic(
+            "pitchControl.add.returnIndexBase",
+            1
+          );
+          return liveIndex(floating) - (indexBase === 0 ? 1 : 0);
         }
         if (method === "removePitchControl") {
           const removed = model.controls.splice(args[0] - 1, 1)[0];
@@ -359,5 +491,20 @@ export function createPitchHostModel(options = {}) {
       points: entry.state.points ? entry.state.points.map((point) => [point[0], point[1]]) : null,
       scriptData: { ...entry.state.scriptData },
     }));
+  model.semanticEvidence = (key) => hostProfile?.semantics?.[key] ?? null;
+  model.semanticCoverage = () => [...semanticCoverage.values()];
+  model.assertNoUnconfirmedSemantics = () => {
+    const unconfirmed = [...semanticCoverage.values()].filter(
+      (item) => item.source !== "live_profile"
+    );
+    if (unconfirmed.length > 0) {
+      const error = new Error(
+        `fake host used ${unconfirmed.length} unconfirmed semantics`
+      );
+      error.code = "UNCONFIRMED_HOST_SEMANTICS_USED";
+      error.semantics = unconfirmed;
+      throw error;
+    }
+  };
   return model;
 }

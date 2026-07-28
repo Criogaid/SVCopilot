@@ -18,6 +18,9 @@ MCP client
 - 结果编码：默认保留旧格式；高层读取可请求 `typed-v2`，无损区分空数组、稀疏数组、map、`nil`、特殊数字和 handle。
 - 已验证：Node 模块与 Relay 测试、真实 Lua 5.4 + Windows named pipe dispatcher，以及完整 MCP 客户端高层编辑闭环。
 - 待验证：在 SynthV 2.2.1 宿主中长时间运行、自动试听停止的 p95、跨类型乐句事务的真实宿主故障注入，以及 Relay hang 情况。
+- 宿主校准：独立只读 SV Live Probe 可生成脱敏、版本化 Host Profile；离线 fake host
+  显式区分 `live_profile` 与 `simulator_default`。流程见
+  [HOST_PROFILE_WORKFLOW.md](docs/HOST_PROFILE_WORKFLOW.md)。
 
 旧版 [server/src/transport.js](server/src/transport.js) 和 [test/raw_client.py](test/raw_client.py) 仅作为 file IPC 历史参考；`src/index.js` 不再导入或启用它们。
 
