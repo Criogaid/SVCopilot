@@ -8,9 +8,8 @@
 - 来源：https://github.com/Hrauroras/SV2-Script
 - 研究提交：`f0ba9509d490007ef5956864366e5f73ad308bc9`
 - 许可证：MIT License, Copyright (c) 2026 ResonantPsyche
-- 采用方式：**clean-room 重写，未复制任何代码或常量**。依据 P1-C GOAL
-  （`docs/P1C_PITCH_CONTROL_EXECUTION_GOAL.md` §6）的实施政策，仅把以下作为**行为与数学需求
-  的参考样本**，接口与实现均由本项目独立设计：
+- 采用方式：**clean-room 重写，未复制任何代码或常量**。依据本项目的 clean-room 实施政策，
+  仅把以下作为**行为与数学需求的参考样本**，接口与实现均由本项目独立设计：
   - `ManualMode.js`：transition/attack/release/vibrato 的参数模型、用 TimeAxis 把秒/Hz 转为
     BLICK、相邻音符边界思路 → 启发 `server/src/pitch-gesture-plan.js`（有界不超调插值，独立实现）。
   - `PitchFixBrush.js`：computed pitch → PitchControlCurve 的数据流与创建/插入/清理的 API
@@ -21,7 +20,7 @@
     `server/src/harmony-plan.js` 的音阶目录与广义 interval。音程集合由标准乐理独立给出；
     外部脚本的朴素音阶成员计数/自动调性检测**未被采用**（本项目沿用 Krumhansl-Schmuckler，
     且显式 scale 只接受调用者批准）。
-- 未采用（GOAL 明确禁止继承）：SidePanel UI、WidgetValue 状态管理、模式切换批量删除、
+- 未采用（本项目明确禁止继承）：SidePanel UI、WidgetValue 状态管理、模式切换批量删除、
   任意改写重叠对象、未限幅三次插值、朴素自动调性检测、同组复制和声、主观"避免不和谐"规则。
-- 由于未复制具有表达性的代码或大量常量，依据 GOAL §6.2 无需在本项目分发其许可证文本；
+- 由于未复制具有表达性的代码或大量常量，依据上述政策无需在本项目分发其许可证文本；
   此处记录来源以备审计。若未来复制其表达性代码或常量，必须在此附完整 MIT 许可证与版权通知。

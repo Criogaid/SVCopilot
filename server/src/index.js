@@ -62,7 +62,7 @@ import { VoiceProfileService } from "./voice-profile.js";
 import { WorkflowExecutor } from "./workflow.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
-// 避免升级时漏改其中一处（维护规则见 docs/MCP_MUSIC_WORKFLOW_MASTER_PLAN.md §10）。
+// 避免升级时漏改其中一处。
 const INTERFACE_VERSION = "0.9.0";
 
 const bridge = new PipeRelay();
