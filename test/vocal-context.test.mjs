@@ -112,6 +112,39 @@ test("one call returns every requested section from a single range context", asy
   assert.equal(result.summary.perception, "human_only");
 });
 
+test("composite style summary preserves the standalone style evidence", async () => {
+  const store = createStore();
+  const notes = [
+    { onsetBlick: 0, durationBlick: Q, pitch: 69, lyrics: "ひ" },
+    { onsetBlick: Q, durationBlick: Q, pitch: 71, lyrics: "か" },
+    { onsetBlick: 2 * Q, durationBlick: Q, pitch: 72, lyrics: "り" },
+    { onsetBlick: 3 * Q, durationBlick: Q, pitch: 60, lyrics: "br" },
+  ];
+  const { stored, occurrenceId } = createContext(store, { notes });
+  const service = analyzer(store);
+  const standalone = await service.style.profile({
+    targets: [{ contextId: stored.contextId, occurrenceId }],
+    responseMode: "standard",
+  });
+  const composite = await service.analyze({
+    contextId: stored.contextId,
+    occurrenceId,
+    include: ["style"],
+  });
+  const target = standalone.targets[0];
+  const summary = composite.sections.style.summary;
+
+  assert.equal(standalone.targetCount, 1);
+  assert.equal(target.noteCount, 3);
+  assert.equal(target.breathCount, 1);
+  assert.equal(composite.sections.style.status, "succeeded");
+  assert.equal(summary.targetCount, standalone.targetCount);
+  assert.ok(Object.keys(summary.sectionStatus).length > 0);
+  assert.deepEqual(summary.rhythm, target.sections.rhythm);
+  assert.deepEqual(summary.languages, target.sections.languages);
+  assert.deepEqual(summary.breaths, target.sections.breaths);
+});
+
 test("the service never touches the host or the coordinator", async () => {
   const store = createStore();
   const { stored } = createContext(store, { notes: MELODY });

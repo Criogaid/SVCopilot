@@ -10,6 +10,7 @@ import AjvModule from "../server/node_modules/ajv/dist/ajv.js";
 import { ExpressionPlanService } from "../server/src/expression-plan.js";
 import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { LyricAlignService } from "../server/src/lyric-align.js";
+import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
 import { QuantizePlanService } from "../server/src/quantize-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 
@@ -251,12 +252,30 @@ async function buildPlans() {
     legacyField: "restructureRequest",
   });
 
+  const gestureStore = new SnapshotStore({ now: () => 1000 });
+  const gestureCtx = createStoredContext(gestureStore, [
+    { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
+    { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "i" },
+    { onsetBlick: 2 * Q, durationBlick: 4 * Q, pitch: 64, lyrics: "u" },
+  ]);
+  plans.push({
+    planner: "sv_plan_pitch_gesture",
+    plan: await new PitchGesturePlanService({ store: gestureStore, now: () => 2000 }).plan({
+      contextId: gestureCtx.stored.contextId,
+      gestures: [
+        { type: "attack", noteId: `${gestureCtx.occurrenceId}:n:0`, depthSemitone: 0.3 },
+        { type: "transition", fromNoteId: `${gestureCtx.occurrenceId}:n:0`, toNoteId: `${gestureCtx.occurrenceId}:n:1`, width: { quarters: 0.5 } },
+      ],
+    }),
+    legacyField: "applyRequests",
+  });
+
   return plans;
 }
 
-test("all four planners share one apply envelope a generic consumer can submit", async () => {
+test("all five planners share one apply envelope a generic consumer can submit", async () => {
   const plans = await buildPlans();
-  assert.equal(plans.length, 4);
+  assert.equal(plans.length, 5);
 
   const toolNames = [
     ...new Set(
@@ -368,4 +387,30 @@ test("a no-op plan returns apply:null instead of an empty request", async () => 
   assert.equal(plan.status, "no_change");
   assert.equal(plan.apply, null);
   assert.equal(plan.patchRequest, null);
+});
+
+test("generalized harmony input validates against the served sv_generate_harmony schema", async () => {
+  const schemas = await fetchServedSchemas(["sv_generate_harmony"]);
+  const validate = compile(schemas.sv_generate_harmony);
+  // 广义 interval 对象 + 显式 scale 必须通过服务端 inputSchema。
+  assertValid(validate, {
+    contextId: "ctx_SCHEMA",
+    sourceOccurrenceId: "ctx_SCHEMA:t:0:r:0",
+    targetOccurrenceId: "ctx_SCHEMA:t:1:r:0",
+    harmony: {
+      interval: { degree: 3, direction: "above", octaveOffset: 1 },
+      key: { tonic: "D", mode: "minor", scale: "dorian" },
+    },
+  }, "generalized interval + explicit scale");
+  assertValid(validate, {
+    contextId: "ctx_SCHEMA",
+    targetOccurrenceId: "ctx_SCHEMA:t:1:r:0",
+    harmony: { interval: { degree: 1, direction: "below" } },
+  }, "unison below without key");
+  // 旧的字符串 interval 仍然合法（向后兼容）。
+  assertValid(validate, {
+    contextId: "ctx_SCHEMA",
+    targetOccurrenceId: "ctx_SCHEMA:t:1:r:0",
+    harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+  }, "legacy string interval");
 });

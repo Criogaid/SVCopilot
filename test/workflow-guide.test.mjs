@@ -30,6 +30,7 @@ const REQUIRED_RECIPES = [
   "analyze_vocal_phrase",
   "align_and_commit_lyrics",
   "plan_and_commit_expression",
+  "plan_and_commit_pitch",
   "quantize_notes",
   "generate_harmony",
   "verify_after_edit",
@@ -274,6 +275,7 @@ test("every write recipe names the shared-target gate and the non-retryable outc
   const writeRecipes = [
     "align_and_commit_lyrics",
     "plan_and_commit_expression",
+    "plan_and_commit_pitch",
     "quantize_notes",
     "generate_harmony",
   ];

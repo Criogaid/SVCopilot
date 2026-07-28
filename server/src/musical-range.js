@@ -9,6 +9,11 @@ import {
 } from "./musical-time.js";
 import { readAutomationSnapshot } from "./parameter-curve.js";
 import { analyzePhonemeResult } from "./phoneme-state.js";
+import {
+  PITCH_CONTROL_LIMITS,
+  finalizeControlId,
+  readPitchControlsForGroup,
+} from "./pitch-control.js";
 import { ServiceTiming } from "./service-timing.js";
 import { SnapshotStore, createHostScope } from "./snapshot.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
@@ -17,6 +22,8 @@ export const RANGE_CAPTURE_LIMITS = Object.freeze({
   notes: 2_000,
   automationPoints: 20_000,
   computedPitchFrames: 20_000,
+  pitchControls: PITCH_CONTROL_LIMITS.controlsPerSnapshot,
+  pitchControlCurvePoints: PITCH_CONTROL_LIMITS.curvePointsPerControl,
 });
 export const RANGE_REQUEST_LIMITS = Object.freeze({
   automationParameters: 16,
@@ -28,6 +35,7 @@ export const RANGE_PAGE_LIMITS = Object.freeze({
     attributes: 200,
     automationPoints: 2_000,
     computedPitchFrames: 2_000,
+    pitchControls: 100,
     bytes: 48 * 1024,
   }),
   maximums: Object.freeze({
@@ -35,15 +43,18 @@ export const RANGE_PAGE_LIMITS = Object.freeze({
     attributes: 2_000,
     automationPoints: 20_000,
     computedPitchFrames: 20_000,
+    pitchControls: 1_000,
     bytes: 60 * 1024,
   }),
 });
 const MAX_CAPTURED_NOTES = RANGE_CAPTURE_LIMITS.notes;
 const MAX_CAPTURED_AUTOMATION_POINTS = RANGE_CAPTURE_LIMITS.automationPoints;
 const MAX_CAPTURED_COMPUTED_PITCH_FRAMES = RANGE_CAPTURE_LIMITS.computedPitchFrames;
+const MAX_CAPTURED_PITCH_CONTROLS = RANGE_CAPTURE_LIMITS.pitchControls;
 const DEFAULT_AUTOMATION_PARAMETERS = ["pitchDelta", "tension", "loudness", "breathiness"];
 const DEFAULT_BUDGETS = RANGE_PAGE_LIMITS.defaults;
 const RESPONSE_ENVELOPE_RESERVE_BYTES = 4 * 1024;
+const PITCH_CONTROL_POINTS_PER_FRAGMENT = 200;
 const SUPPORTED_INCLUDES = new Set([
   "notes",
   "tempoMap",
@@ -52,6 +63,7 @@ const SUPPORTED_INCLUDES = new Set([
   "voiceParameters",
   "automation",
   "computedPitch",
+  "pitchControls",
   "attributes",
   "processing",
 ]);
@@ -76,6 +88,7 @@ export class RangeSnapshotService {
         captureLimits.automationPoints ?? MAX_CAPTURED_AUTOMATION_POINTS,
       computedPitchFrames:
         captureLimits.computedPitchFrames ?? MAX_CAPTURED_COMPUTED_PITCH_FRAMES,
+      pitchControls: captureLimits.pitchControls ?? MAX_CAPTURED_PITCH_CONTROLS,
     };
   }
 
@@ -132,6 +145,7 @@ export class RangeSnapshotService {
                 attributes: 0,
                 automationPoints: 0,
                 computedPitchFrames: 0,
+                pitchControls: 0,
               },
             },
             warnings,
@@ -209,9 +223,11 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
   const attributes = [];
   const automation = [];
   const computedPitch = [];
+  const pitchControls = [];
   const occurrences = [];
   let capturedAutomationPoints = 0;
   let capturedComputedPitchFrames = 0;
+  let capturedPitchControls = 0;
   for (const trackIndex of trackIndices) {
     const trackHandle = await capture.call(roots.project, "getTrack", [trackIndex + 1], {
       inferredType: "Track",
@@ -351,6 +367,27 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
             });
           }
         }
+        if (input.include.has("pitchControls")) {
+          const remaining = captureLimits.pitchControls - capturedPitchControls;
+          const result = await readPitchControlsForGroup(
+            capture,
+            {
+              group: target,
+              groupUuid: group.uuid,
+              timeOffsetBlick: group.timeOffsetBlick,
+              pitchOffsetSemitone: group.pitchOffsetSemitone,
+            },
+            { maxControls: remaining, maxCurvePoints: RANGE_CAPTURE_LIMITS.pitchControlCurvePoints }
+          );
+          capturedPitchControls += result.controls.length;
+          for (const control of result.controls) {
+            pitchControls.push({ occurrenceKey, ...control });
+          }
+          // 全组 fingerprint 同时进 data.tracks[].groups[]（客户端读取）与 stored occurrence
+          // （sv_patch_pitch_controls 的 target.expectedPitchControlFingerprint 守卫）。
+          group.pitchControlGroupFingerprint = result.groupFingerprint;
+          occurrence.pitchControlsCaptured = true;
+        }
         if (input.include.has("computedPitch")) {
           const sampling = computedPitchSampling(input.computedPitchSampling, {
             fromBlick,
@@ -414,6 +451,7 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
     ...(input.include.has("attributes") ? { attributes } : {}),
     ...(input.include.has("automation") ? { automation } : {}),
     ...(input.include.has("computedPitch") ? { computedPitch } : {}),
+    ...(input.include.has("pitchControls") ? { pitchControls } : {}),
     ...(input.include.has("tempoMap") ? { tempoMap: tempoMarks } : {}),
     ...(input.include.has("meterMap")
       ? {
@@ -480,15 +518,29 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
       ...(occurrence.group?.processing !== undefined
         ? { processing: occurrence.group.processing }
         : {}),
+      // pitchControls 捕获到时：per-occurrence 全组 fingerprint 是 sv_patch_pitch_controls
+      // 的 target.expectedPitchControlFingerprint 来源（任何增删/重排/单对象变化都会改变它）。
+      ...(occurrence.pitchControlsCaptured === true
+        ? { pitchControlGroupFingerprint: occurrence.group?.pitchControlGroupFingerprint }
+        : {}),
     });
   }
-  for (const collectionName of ["notes", "attributes", "automation", "computedPitch"]) {
+  for (const collectionName of ["notes", "attributes", "automation", "computedPitch", "pitchControls"]) {
     for (const item of captured.data[collectionName] ?? []) {
       const occurrence = occurrenceByKey.get(item.occurrenceKey);
       item.occurrenceId = occurrence.occurrenceId;
-      if (Number.isSafeInteger(item.indexInGroup)) {
+      if (
+        (collectionName === "notes" || collectionName === "attributes") &&
+        Number.isSafeInteger(item.indexInGroup)
+      ) {
         item.noteId = `${occurrence.occurrenceId}:n:${item.indexInGroup}`;
         if (collectionName === "notes") item.id = item.noteId;
+      }
+      if (collectionName === "pitchControls") {
+        // 最终 controlId：SVCopilot 自有对象用持久 scriptData ID，外部/无标签对象用
+        // context-scoped <occurrenceId>:pc:<index>。fingerprint 才是真正身份，index 只是提示。
+        item.controlId = finalizeControlId(item, occurrence.occurrenceId);
+        delete item.ownedControlId;
       }
       delete item.occurrenceKey;
     }
@@ -524,6 +576,17 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
   }
   stored.context.automationByOccurrence = automationByOccurrence;
   stored.context.automationCaptured = input.include.has("automation");
+  // 为 pitchControls 的缓存分页/verbose detail 留存未分页的逐 occurrence 读模型（引用不复制）。
+  // include 未含 pitchControls 时保持空 map；消费方以 Object.hasOwn 区分"未捕获该 occurrence"。
+  const pitchControlsByOccurrence = Object.create(null);
+  for (const item of captured.data.pitchControls ?? []) {
+    if (typeof item.occurrenceId !== "string") continue;
+    const list = pitchControlsByOccurrence[item.occurrenceId] ?? [];
+    list.push(item);
+    pitchControlsByOccurrence[item.occurrenceId] = list;
+  }
+  stored.context.pitchControlsByOccurrence = pitchControlsByOccurrence;
+  stored.context.pitchControlsCaptured = input.include.has("pitchControls");
   stored.context.range = captured.data.range;
   stored.context.quarterBlick = captured.quarterBlick;
   stored.context.meterMarks = captured.meterMarks;
@@ -569,6 +632,7 @@ function formatStoredRangePage(stored, page, { changedSinceToken = false, timing
 function compactRangePage(data, stored) {
   const automation = data.automation ?? [];
   const computedPitch = data.computedPitch ?? [];
+  const pitchControls = data.pitchControls ?? [];
   return {
     data: {
       ...rangeBaseData(data),
@@ -588,6 +652,15 @@ function compactRangePage(data, stored) {
             0
           ),
         },
+        pitchControls: {
+          count: pitchControls.length,
+          points: pitchControls.reduce(
+            (sum, item) => sum + (Array.isArray(item.points) ? item.points.length : 0),
+            0
+          ),
+          curves: pitchControls.filter((item) => item.kind === "curve").length,
+          svcopilotOwned: pitchControls.filter((item) => item.ownership?.owner === "svcopilot").length,
+        },
       },
       snapshotComplete: true,
     },
@@ -595,7 +668,13 @@ function compactRangePage(data, stored) {
       complete: true,
       nextCursor: null,
       detailCursor: stored.storeCursor ?? null,
-      returned: { notes: 0, attributes: 0, automationPoints: 0, computedPitchFrames: 0 },
+      returned: {
+        notes: 0,
+        attributes: 0,
+        automationPoints: 0,
+        computedPitchFrames: 0,
+        pitchControls: 0,
+      },
     },
   };
 }
@@ -624,12 +703,14 @@ function buildRangePages(data, initialBudgets, stored) {
       attributes: Math.max(1, Math.floor(budgets.attributes / 2)),
       automationPoints: Math.max(1, Math.floor(budgets.automationPoints / 2)),
       computedPitchFrames: Math.max(1, Math.floor(budgets.computedPitchFrames / 2)),
+      pitchControls: Math.max(1, Math.floor(budgets.pitchControls / 2)),
     };
     if (
       next.notes === budgets.notes &&
       next.attributes === budgets.attributes &&
       next.automationPoints === budgets.automationPoints &&
-      next.computedPitchFrames === budgets.computedPitchFrames
+      next.computedPitchFrames === budgets.computedPitchFrames &&
+      next.pitchControls === budgets.pitchControls
     ) {
       throw codedError(
         "SNAPSHOT_RESPONSE_BUDGET_TOO_SMALL",
@@ -643,6 +724,7 @@ function buildRangePages(data, initialBudgets, stored) {
 function paginateRangeData(data, budgets) {
   const notes = data.notes ?? [];
   const attributes = data.attributes ?? [];
+  const pitchControls = fragmentPitchControls(data.pitchControls ?? []);
   const emptyAutomation = (data.automation ?? [])
     .filter((item) => item.points.length === 0)
     .map((item) => ({ ...item, offset: 0, points: [] }));
@@ -656,7 +738,8 @@ function paginateRangeData(data, budgets) {
     Math.ceil(notes.length / budgets.notes),
     Math.ceil(attributes.length / budgets.attributes),
     Math.ceil(automation.length / budgets.automationPoints),
-    Math.ceil(computedPitch.length / budgets.computedPitchFrames)
+    Math.ceil(computedPitch.length / budgets.computedPitchFrames),
+    Math.ceil(pitchControls.length / budgets.pitchControls)
   );
   const pages = [];
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
@@ -665,6 +748,10 @@ function paginateRangeData(data, budgets) {
       pageIndex * budgets.attributes,
       (pageIndex + 1) * budgets.attributes
     );
+    const pagePitchControls = markPitchControlPageContinuity(pitchControls.slice(
+      pageIndex * budgets.pitchControls,
+      (pageIndex + 1) * budgets.pitchControls
+    ));
     const pageAutomation = groupSeries(
       automation.slice(
         pageIndex * budgets.automationPoints,
@@ -688,6 +775,7 @@ function paginateRangeData(data, budgets) {
         ...(Object.hasOwn(data, "attributes") ? { attributes: pageAttributes } : {}),
         ...(Object.hasOwn(data, "automation") ? { automation: pageAutomation } : {}),
         ...(Object.hasOwn(data, "computedPitch") ? { computedPitch: pageComputedPitch } : {}),
+        ...(Object.hasOwn(data, "pitchControls") ? { pitchControls: pagePitchControls } : {}),
         snapshotComplete: false,
       },
       page: {
@@ -699,6 +787,7 @@ function paginateRangeData(data, budgets) {
           attributes: pageAttributes.length,
           automationPoints: pageAutomation.reduce((sum, item) => sum + item.points.length, 0),
           computedPitchFrames: pageComputedPitch.reduce((sum, item) => sum + item.values.length, 0),
+          pitchControls: pagePitchControls.length,
         },
       },
     });
@@ -706,8 +795,52 @@ function paginateRangeData(data, budgets) {
   return pages;
 }
 
+function fragmentPitchControls(items) {
+  const fragments = [];
+  for (const item of items) {
+    if (item.kind !== "curve" || !Array.isArray(item.points)) {
+      fragments.push(item);
+      continue;
+    }
+    if (item.points.length <= PITCH_CONTROL_POINTS_PER_FRAGMENT) {
+      fragments.push(item);
+      continue;
+    }
+    const fragmentCount = Math.ceil(item.points.length / PITCH_CONTROL_POINTS_PER_FRAGMENT);
+    for (let fragmentIndex = 0; fragmentIndex < fragmentCount; fragmentIndex += 1) {
+      const pointOffset = fragmentIndex * PITCH_CONTROL_POINTS_PER_FRAGMENT;
+      fragments.push({
+        ...item,
+        points: item.points.slice(pointOffset, pointOffset + PITCH_CONTROL_POINTS_PER_FRAGMENT),
+        fragment: true,
+        fragmentIndex,
+        fragmentCount,
+        pointOffset,
+      });
+    }
+  }
+  return fragments;
+}
+
+function markPitchControlPageContinuity(items) {
+  return items.map((item, index) => {
+    if (item.fragment !== true) return item;
+    const previous = items[index - 1];
+    const next = items[index + 1];
+    return {
+      ...item,
+      continuedFromPreviousPage:
+        item.fragmentIndex > 0 &&
+        !(previous?.controlId === item.controlId && previous.fragmentIndex === item.fragmentIndex - 1),
+      continuesOnNextPage:
+        item.fragmentIndex + 1 < item.fragmentCount &&
+        !(next?.controlId === item.controlId && next.fragmentIndex === item.fragmentIndex + 1),
+    };
+  });
+}
+
 function rangeBaseData(data) {
-  const { notes, attributes, automation, computedPitch, snapshotComplete, ...base } = data;
+  const { notes, attributes, automation, computedPitch, pitchControls, snapshotComplete, ...base } = data;
   return base;
 }
 
@@ -1008,7 +1141,7 @@ function validateRangeRequestShape(request) {
   if (isRecord(request.budgets)) {
     assertKnownKeys(
       request.budgets,
-      ["notes", "attributes", "automationPoints", "computedPitchFrames", "bytes"],
+      ["notes", "attributes", "automationPoints", "computedPitchFrames", "pitchControls", "bytes"],
       "budgets"
     );
   }
@@ -1101,6 +1234,13 @@ function normalizeBudgets(value) {
       RANGE_PAGE_LIMITS.maximums.computedPitchFrames,
       DEFAULT_BUDGETS.computedPitchFrames,
       "budgets.computedPitchFrames"
+    ),
+    pitchControls: clampInteger(
+      source.pitchControls,
+      1,
+      RANGE_PAGE_LIMITS.maximums.pitchControls,
+      DEFAULT_BUDGETS.pitchControls,
+      "budgets.pitchControls"
     ),
     bytes: clampInteger(
       source.bytes,

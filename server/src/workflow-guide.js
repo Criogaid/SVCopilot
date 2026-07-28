@@ -509,6 +509,141 @@ const RECIPES = [
     ],
   },
   {
+    id: "plan_and_commit_pitch",
+    title: "Plan a pitch gesture and commit it as PitchControl curves",
+    goal:
+      "Turn a pitch intention (slide, attack, release, vibrato) into reviewable, unit-explicit PitchControl curves and commit them in one Undo; optionally bake the host's computed pitch into a curve.",
+    requiredCapabilities: ["pitchControls"],
+    expectedCalls: { min: 3, max: 6 },
+    humanGates: ["Whether the tuning sounds right is human_only — end with an audition."],
+    captureTemplate: captureTemplate(["notes", "pitchControls", "computedPitch"]),
+    preconditions: [
+      "PitchControl write is SynthV 2.1+ and host-gated: offline transaction semantics are verified, but insertion/ordering/clone/remove/scriptData behavior must be confirmed on the real host before release (see tools/pitch-control-probe.mjs).",
+    ],
+    steps: [
+      {
+        n: 1,
+        tool: "sv_snapshot_range",
+        purpose:
+          "Capture notes (required to anchor gestures), existing pitchControls (to see ownership/fingerprints), and computedPitch (if you may bake).",
+        arguments: {
+          scope: { kind: "range", from: { bar: 1 }, to: { bar: 9 } },
+          include: ["notes", "pitchControls", "computedPitch"],
+        },
+        requiredInclude: ["notes", "pitchControls"],
+        acceptable: ["status captured"],
+        readingRules: [
+          "pitchControls entries carry kind (point/curve), group-local AND occurrence-absolute coordinates, ownership, and a content fingerprint. indexInGroup is only a hint — the host re-sorts on every add/remove, so identity is the fingerprint, never the index.",
+          "pitch values are group-relative semitones and times are group-local integer BLICK; the occurrence-absolute fields add timeOffset/pitchOffset. Never mix these with pitchDelta cents.",
+        ],
+      },
+      {
+        n: 2,
+        tool: "sv_plan_pitch_gesture",
+        purpose:
+          "Compile an explicit gesture into a bounded apply envelope. Pure in-memory; writes nothing.",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          gestures: [
+            { type: "attack", noteId: EXAMPLE.noteId, depthSemitone: 0.3, direction: "up" },
+          ],
+        },
+        acceptable: ["ok", "status planned"],
+        readingRules: [
+          "apply.arguments.operations are add-only curve definitions in group-local coordinates; the planner never deletes or overwrites existing pitch controls.",
+          "apply.arguments.target carries expectedNotes/expectedTimeOffsetBlick/expectedPitchOffsetSemitone drift guards — submit them, do not strip them.",
+          "Depth/frequency/phase are bounded; a CONSTRAINT_CLAMPED warning means a value was clamped to the configured budget.",
+        ],
+      },
+      {
+        n: 3,
+        tool: "sv_patch_pitch_controls",
+        purpose: "Dry-run the planned operations; read the planned operations before writing.",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          occurrenceId: EXAMPLE.occurrenceId,
+          operations: [
+            {
+              op: "add",
+              control: {
+                kind: "curve",
+                anchorPositionBlick: 0,
+                anchorPitchSemitone: 60,
+                points: [
+                  { timeFromAnchorBlick: 0, pitchFromAnchorSemitone: -0.3 },
+                  { timeFromAnchorBlick: 705600000, pitchFromAnchorSemitone: 0 },
+                ],
+              },
+            },
+          ],
+          dryRun: true,
+        },
+        note: "In practice submit apply.arguments from step 2 verbatim plus dryRun:true.",
+        acceptable: ["status dry_run"],
+      },
+      {
+        n: 4,
+        tool: "sv_patch_pitch_controls",
+        purpose: "Commit the identical arguments with dryRun removed. One Undo interval for all operations.",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          occurrenceId: EXAMPLE.occurrenceId,
+          operations: [
+            {
+              op: "add",
+              control: {
+                kind: "curve",
+                anchorPositionBlick: 0,
+                anchorPitchSemitone: 60,
+                points: [
+                  { timeFromAnchorBlick: 0, pitchFromAnchorSemitone: -0.3 },
+                  { timeFromAnchorBlick: 705600000, pitchFromAnchorSemitone: 0 },
+                ],
+              },
+            },
+          ],
+          atomic: true,
+        },
+        acceptable: ["succeeded", "no_change"],
+        needsHumanDecision: ["SHARED_TARGET_REQUIRES_CONFIRMATION"],
+        nonRetryable: [
+          "STALE_CONTEXT / UNKNOWN_CONTROL / TARGET_CONFLICT — the group or an anchored note changed after the snapshot; re-snapshot and RE-PLAN, do not resubmit",
+          "AMBIGUOUS_CONTROL — identical duplicates cannot be addressed; re-snapshot and disambiguate, never first-match",
+          "outcome_unknown — re-snapshot and compare before any further action",
+        ],
+        afterSuccess:
+          "This contextId is deleted. New controls carry the svcopilot.* ownership namespace; re-snapshot with include:[\"pitchControls\"] to read back the written curves.",
+      },
+      {
+        n: 5,
+        tool: "sv_bake_computed_pitch",
+        purpose:
+          "Optional: freeze the host's computed pitch into ONE owned curve when coverage is sufficient (all-null or below-threshold writes nothing).",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          occurrenceId: EXAMPLE.occurrenceId,
+          dryRun: true,
+        },
+        optional: true,
+        acceptable: ["dry_run", "INSUFFICIENT_COMPUTED_PITCH (zero write; wait for processing and re-snapshot)"],
+        readingRules: [
+          "All-null or empty computed pitch means NOT ENOUGH DATA — never zero error and never bakeable data.",
+          "Existing pitchDelta automation is preserved; clearing it is not supported in this version. Audit for double-counting if pitchDelta drove the computed pitch.",
+          "Commit with dryRun:false to write inside one Undo; the curve is svcopilot-owned so a later replace_owned bake can replace it cleanly.",
+        ],
+      },
+    ],
+    nextRecipes: ["verify_after_edit", "audition_for_human"],
+    reportingRules: [
+      "Distinguish a verified write (host read-back) from 'the tuning sounds right' (human_only).",
+      "PitchControl has no host UUID — refer to controls by controlId + fingerprint, never by a remembered index.",
+      "Never claim a bake or gesture improved the intonation; report objective evidence and offer an audition.",
+    ],
+    capabilityBlockedBranches: [
+      "Asked to hear the result → MCP has no audio input; use audition_for_human so a person listens.",
+    ],
+  },
+  {
     id: "quantize_notes",
     title: "Snap note onsets to a grid deterministically",
     goal: "Plan and commit grid-aligned onsets without reordering notes or guessing.",
@@ -913,6 +1048,13 @@ const TOOL_SELECTION = {
     { need: "Edit note fields", tool: "sv_patch_notes" },
     { need: "Insert / delete / split / merge notes", tool: "sv_restructure_notes" },
     { need: "Write Automation curves", tool: "sv_patch_parameter_curves" },
+    { need: "Read / write PitchControl points & curves", tool: "sv_patch_pitch_controls" },
+    { need: "Plan a pitch gesture (slide/vibrato/attack)", tool: "sv_plan_pitch_gesture" },
+    {
+      need: "Freeze host computed pitch into a curve",
+      tool: "sv_bake_computed_pitch",
+      note: "Writes nothing when coverage is insufficient or all-null; null is never zero pitch.",
+    },
     { need: "Several edit kinds in ONE Undo", tool: "sv_edit_phrase" },
     { need: "Read observable voice parameters", tool: "sv_get_voice_profile" },
     { need: "Let a human listen", tool: "sv_start_audition" },

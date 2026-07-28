@@ -84,7 +84,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.8.0");
+  assert.equal(client.getServerVersion()?.version, "0.9.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: childEnv,
@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 37);
+  assert.equal(listed.tools.length, 40);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -181,6 +181,7 @@ try {
   assert.ok(phraseTool.inputSchema.properties.voicePatch);
   assert.match(phraseTool.description, /does not allow changing an existing reference target/);
   assert.ok(rangeTool.inputSchema.properties.budgets.properties.automationPoints);
+  assert.ok(rangeTool.inputSchema.properties.budgets.properties.pitchControls);
   assert.ok(rangeTool.inputSchema.properties.computedPitchSampling);
   assert.equal(rangeTool.inputSchema.additionalProperties, false);
   assert.equal(rangeTool.inputSchema.anyOf, undefined);
@@ -293,13 +294,17 @@ try {
     capabilities.interfaces.guide.recipeTemplate,
     "svcopilot://guide/music-workflows/{recipe}"
   );
-  assert.equal(capabilities.interfaceVersion, "0.8.0");
+  assert.equal(capabilities.interfaceVersion, "0.9.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
     automationPoints: 20000,
     computedPitchFrames: 20000,
+    pitchControls: 4000,
+    pitchControlCurvePoints: 2000,
   });
+  assert.equal(capabilities.limits.pitchControl.controlsPerGroup, 512);
+  assert.equal(capabilities.limits.pitchControl.operationsPerRequest, 32);
   assert.equal(capabilities.limits.rangeRequest.computedPitchFramesPerGroup, 2000);
   assert.equal(capabilities.limits.rangePage.defaults.computedPitchFrames, 2000);
   assert.equal(capabilities.limits.rangePage.maximums.computedPitchFrames, 20000);
@@ -312,6 +317,9 @@ try {
     workflowSchemaIndex.tools.map((tool) => tool.name),
     [
       "sv_patch_parameter_curves",
+      "sv_patch_pitch_controls",
+      "sv_plan_pitch_gesture",
+      "sv_bake_computed_pitch",
       "sv_edit_phrase",
       "sv_compare_computed_pitch",
       "sv_plan_expression",
@@ -536,12 +544,16 @@ try {
   });
   assert.ok(harmonyResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
   const harmonySchema = parseResource(harmonyResource).inputSchema;
-  assert.deepEqual(harmonySchema.properties.harmony.properties.interval.enum, [
+  const harmonyInterval = harmonySchema.properties.harmony.properties.interval;
+  // v0.9.0：interval 接受旧字符串名或广义 {degree,direction,octaveOffset} 对象。
+  assert.deepEqual(harmonyInterval.anyOf[0].enum, [
     "third_below",
     "third_above",
     "sixth_below",
     "sixth_above",
   ]);
+  assert.deepEqual(harmonyInterval.anyOf[1].properties.degree.enum, [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(harmonyInterval.anyOf[1].properties.direction.enum, ["above", "below"]);
   assert.deepEqual(harmonySchema.properties.lyricsMode.enum, ["copy", "sustain"]);
   const harmonyUnknownContext = parseToolError(
     await client.callTool({
@@ -592,7 +604,7 @@ try {
   const guide = parseResource(guideResource);
   console.log("[client] workflow guide index chars", guideResource.contents[0].text.length);
   assert.ok(guideResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
-  assert.equal(guide.interfaceVersion, "0.8.0");
+  assert.equal(guide.interfaceVersion, "0.9.0");
   assert.ok(guide.recipes.length >= 8);
   const toolNames = new Set(listed.tools.map((tool) => tool.name));
   for (const summary of guide.recipes) {

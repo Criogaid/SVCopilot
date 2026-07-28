@@ -26,17 +26,42 @@ export const HARMONY_INTERVALS = Object.freeze([
 ]);
 export const HARMONY_LYRICS_MODES = Object.freeze(["copy", "sustain"]);
 
-const INTERVAL_STEPS = Object.freeze({
-  third_below: -2,
-  third_above: 2,
-  sixth_below: -5,
-  sixth_above: 5,
+// 显式音阶目录（主计划 P1-C Phase 5）：七种调式 + harmonic/melodic minor + major/minor
+// pentatonic + blues + whole-tone + chromatic。音程集合由标准乐理独立给出；外部样本
+// （Hrauroras/SV2-Script，MIT）仅作目录存在性的佐证，不作为正确性来源。
+export const HARMONY_SCALE_TYPES = Object.freeze({
+  ionian: Object.freeze([0, 2, 4, 5, 7, 9, 11]),
+  dorian: Object.freeze([0, 2, 3, 5, 7, 9, 10]),
+  phrygian: Object.freeze([0, 1, 3, 5, 7, 8, 10]),
+  lydian: Object.freeze([0, 2, 4, 6, 7, 9, 11]),
+  mixolydian: Object.freeze([0, 2, 4, 5, 7, 9, 10]),
+  aeolian: Object.freeze([0, 2, 3, 5, 7, 8, 10]),
+  locrian: Object.freeze([0, 1, 3, 5, 6, 8, 10]),
+  harmonic_minor: Object.freeze([0, 2, 3, 5, 7, 8, 11]),
+  melodic_minor: Object.freeze([0, 2, 3, 5, 7, 9, 11]),
+  major_pentatonic: Object.freeze([0, 2, 4, 7, 9]),
+  minor_pentatonic: Object.freeze([0, 3, 5, 7, 10]),
+  blues: Object.freeze([0, 3, 5, 6, 7, 10]),
+  whole_tone: Object.freeze([0, 2, 4, 6, 8, 10]),
+  chromatic: Object.freeze([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
 });
+export const HARMONY_SCALE_NAMES = Object.freeze(Object.keys(HARMONY_SCALE_TYPES));
+export const HARMONY_INTERVAL_DEGREES = Object.freeze([1, 2, 3, 4, 5, 6, 7]);
+export const HARMONY_INTERVAL_DIRECTIONS = Object.freeze(["above", "below"]);
+
+// 旧命名 interval -> 广义 {degree, direction} 映射。sixth ≡ third 的转位（±5 级）。
+const LEGACY_INTERVAL_STEPS = Object.freeze({
+  third_below: { degree: 3, direction: "below" },
+  third_above: { degree: 3, direction: "above" },
+  sixth_below: { degree: 6, direction: "below" },
+  sixth_above: { degree: 6, direction: "above" },
+});
+const MODE_TO_SCALE = Object.freeze({ major: "ionian", minor: "aeolian" });
 const PITCH_CLASS_NAMES = Object.freeze([
   "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ]);
-const MAJOR_SCALE = Object.freeze([0, 2, 4, 5, 7, 9, 11]);
-const NATURAL_MINOR_SCALE = Object.freeze([0, 2, 3, 5, 7, 8, 10]);
+const MAJOR_SCALE = HARMONY_SCALE_TYPES.ionian;
+const NATURAL_MINOR_SCALE = HARMONY_SCALE_TYPES.aeolian;
 // K-S margin 低于此值时调性歧义警告（工程默认，未经真机校准）。
 const KEY_AMBIGUITY_MARGIN = 0.05;
 const MAX_LIST_ITEMS = 100;
@@ -46,6 +71,8 @@ const PROVENANCE = Object.freeze({
   planner: "diatonic_interval_mapper",
   keyMethod: "krumhansl_schmuckler_duration_weighted_pearson",
   keyAmbiguityMargin: "engineering_default_requires_host_calibration",
+  scaleCatalog: "explicit_caller_approved_14_types_ks_detects_major_minor_only",
+  intervalModel: "generalized_scale_degree_direction_octave",
   nonDiatonicMapping: "nearest_scale_tone_semitone_offset_needs_review",
   trackAndGroupCreation: "not_provided_use_sv_clone_track_from_template_first",
   breathNotes: "skipped_breaths_need_no_harmony",
@@ -288,6 +315,9 @@ function mapHarmony(loaded, input, warnings) {
       tonicPitchClass: PITCH_CLASS_NAMES.indexOf(input.harmony.key.tonic),
       tonic: input.harmony.key.tonic,
       mode: input.harmony.key.mode,
+      // 显式 scale（七模式/harmonic/melodic minor/pentatonic/blues/whole-tone/chromatic）
+      // 优先于 mode 推导；缺省 mode→ionian/aeolian（保持旧行为）。
+      scale: input.harmony.key.scale ?? MODE_TO_SCALE[input.harmony.key.mode],
       source: "explicit",
     };
   } else {
@@ -302,6 +332,8 @@ function mapHarmony(loaded, input, warnings) {
       tonicPitchClass: detected.bestCandidate.tonicPitchClass,
       tonic: detected.bestCandidate.tonic,
       mode: detected.bestCandidate.mode,
+      // K-S 只检测 major/minor：scale 沿用 mode 推导，绝不假装检测出扩展调式。
+      scale: MODE_TO_SCALE[detected.bestCandidate.mode],
       source: "detected",
       marginFromNext: detected.marginFromNext,
       runnerUp: {
@@ -317,8 +349,8 @@ function mapHarmony(loaded, input, warnings) {
       });
     }
   }
-  const scale = key.mode === "major" ? MAJOR_SCALE : NATURAL_MINOR_SCALE;
-  const steps = INTERVAL_STEPS[input.harmony.interval];
+  const scale = HARMONY_SCALE_TYPES[key.scale];
+  const steps = intervalSteps(input.intervalSpec, scale.length);
   const below = steps < 0;
 
   const items = [];
@@ -359,9 +391,10 @@ function mapHarmony(loaded, input, warnings) {
       const mappedNearest = nearestPitch - nearestOffset + octaveShift * 12 + scale[wrapped];
       harmonyPitch = note.pitch + (mappedNearest - nearestPitch);
       item.needsReview = true;
+      item.outOfScale = true;
       appendOnce(warnings, {
         code: "NON_DIATONIC_SOURCE_APPROXIMATED",
-        message: `one or more source notes are outside ${key.tonic} ${key.mode}; their harmony pitches use the nearest scale tone's semitone offset and are flagged needsReview.`,
+        message: `one or more source notes are outside ${key.tonic} ${key.scale}; their harmony pitches use the nearest scale tone's semitone offset and are flagged needsReview.`,
       });
     }
     // 音域守卫：越界先尝试一次八度位移。
@@ -390,7 +423,11 @@ function mapHarmony(loaded, input, warnings) {
       continue;
     }
     // 声部交叉守卫：below 变体必须低于源音，above 必须高于（八度位移可能破坏它）。
-    if ((below && harmonyPitch >= note.pitch) || (!below && harmonyPitch <= note.pitch)) {
+    // unison（degree 1）本就是同度/八度 doubling，不会"交叉"——跳过此守卫，否则同度永被误杀。
+    if (
+      input.intervalSpec.degree !== 1 &&
+      ((below && harmonyPitch >= note.pitch) || (!below && harmonyPitch <= note.pitch))
+    ) {
       item.status = "skipped";
       item.skipReason = "voice_crossing";
       appendOnce(warnings, {
@@ -546,6 +583,7 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
     conflicts: planned.conflicts.length,
     skipped: planned.items.filter((item) => item.status === "skipped").length,
     needsReview: planned.items.filter((item) => item.needsReview).length,
+    outOfScale: planned.items.filter((item) => item.outOfScale).length,
     octaveShifted: planned.items.filter((item) => item.octaveShifted).length,
   };
   const cap = input.responseMode === "verbose" ? planned.items.length : MAX_LIST_ITEMS;
@@ -605,6 +643,13 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
     key: planned.key,
     harmony: {
       interval: input.harmony.interval,
+      intervalSpec: {
+        degree: input.intervalSpec.degree,
+        direction: input.intervalSpec.direction,
+        octaveOffset: input.intervalSpec.octaveOffset,
+        scaleSteps: intervalSteps(input.intervalSpec, HARMONY_SCALE_TYPES[planned.key.scale].length),
+      },
+      scale: planned.key.scale,
       lyricsMode: input.lyricsMode,
       ...(input.register ? { register: input.register } : {}),
     },
@@ -684,15 +729,13 @@ function normalizeHarmonyRequest(request) {
   }
   if (!isRecord(request.harmony)) throw codedError("INVALID_ARGUMENTS", "harmony must be an object");
   assertKnownKeys(request.harmony, ["interval", "key"], "harmony");
-  if (!HARMONY_INTERVALS.includes(request.harmony.interval)) {
-    throw codedError("INVALID_ARGUMENTS", `harmony.interval must be one of ${HARMONY_INTERVALS.join(", ")}`);
-  }
+  const intervalSpec = normalizeInterval(request.harmony.interval);
   let key;
   if (request.harmony.key !== undefined) {
     if (!isRecord(request.harmony.key)) {
       throw codedError("INVALID_ARGUMENTS", "harmony.key must be an object");
     }
-    assertKnownKeys(request.harmony.key, ["tonic", "mode"], "harmony.key");
+    assertKnownKeys(request.harmony.key, ["tonic", "mode", "scale"], "harmony.key");
     if (!PITCH_CLASS_NAMES.includes(request.harmony.key.tonic)) {
       throw codedError(
         "INVALID_ARGUMENTS",
@@ -702,7 +745,20 @@ function normalizeHarmonyRequest(request) {
     if (!["major", "minor"].includes(request.harmony.key.mode)) {
       throw codedError("INVALID_ARGUMENTS", "harmony.key.mode must be major or minor");
     }
-    key = { tonic: request.harmony.key.tonic, mode: request.harmony.key.mode };
+    if (
+      request.harmony.key.scale !== undefined &&
+      !HARMONY_SCALE_NAMES.includes(request.harmony.key.scale)
+    ) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `harmony.key.scale must be one of ${HARMONY_SCALE_NAMES.join(", ")}`
+      );
+    }
+    key = {
+      tonic: request.harmony.key.tonic,
+      mode: request.harmony.key.mode,
+      ...(request.harmony.key.scale ? { scale: request.harmony.key.scale } : {}),
+    };
   }
   let register;
   if (request.register !== undefined) {
@@ -747,11 +803,63 @@ function normalizeHarmonyRequest(request) {
     sourceOccurrenceId: request.sourceOccurrenceId,
     targetOccurrenceId: request.targetOccurrenceId,
     harmony: { interval: request.harmony.interval, ...(key ? { key } : {}) },
+    intervalSpec,
     register,
     lyricsMode,
     noteIds: request.noteIds,
     responseMode,
   };
+}
+
+// 归一化 interval：旧命名（third_below 等）映射到广义 {degree, direction}；对象形式
+// {degree, direction, octaveOffset} 直接表达 1-7 度、above/below、八度位移。
+function normalizeInterval(interval) {
+  if (typeof interval === "string") {
+    const legacy = LEGACY_INTERVAL_STEPS[interval];
+    if (!legacy) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `harmony.interval must be one of ${HARMONY_INTERVALS.join(", ")}, or {degree,direction,octaveOffset?}`
+      );
+    }
+    return { degree: legacy.degree, direction: legacy.direction, octaveOffset: 0, label: interval };
+  }
+  if (!isRecord(interval)) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "harmony.interval must be a legacy name or {degree,direction,octaveOffset?}"
+    );
+  }
+  assertKnownKeys(interval, ["degree", "direction", "octaveOffset"], "harmony.interval");
+  if (!HARMONY_INTERVAL_DEGREES.includes(interval.degree)) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `harmony.interval.degree must be one of ${HARMONY_INTERVAL_DEGREES.join(", ")}`
+    );
+  }
+  if (!HARMONY_INTERVAL_DIRECTIONS.includes(interval.direction)) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `harmony.interval.direction must be ${HARMONY_INTERVAL_DIRECTIONS.join(" or ")}`
+    );
+  }
+  const octaveOffset = interval.octaveOffset ?? 0;
+  if (!Number.isSafeInteger(octaveOffset) || Math.abs(octaveOffset) > 3) {
+    throw codedError("INVALID_ARGUMENTS", "harmony.interval.octaveOffset must be an integer in [-3, 3]");
+  }
+  return {
+    degree: interval.degree,
+    direction: interval.direction,
+    octaveOffset,
+    label: `${interval.degree}_${interval.direction}${octaveOffset !== 0 ? `_oct${octaveOffset > 0 ? "+" : ""}${octaveOffset}` : ""}`,
+  };
+}
+
+// 广义音程 -> 自然音阶级步数（含八度位移）。degree N 上方 = +(N-1) 级，下方 = -(N-1) 级；
+// octaveOffset 按 scale 度数回绕八度（pentatonic=5、whole-tone=6、heptatonic=7、chromatic=12）。
+function intervalSteps(spec, scaleLength) {
+  const signed = (spec.degree - 1) * (spec.direction === "below" ? -1 : 1);
+  return signed + spec.octaveOffset * scaleLength;
 }
 
 // ---------- 小工具 ----------

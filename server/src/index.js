@@ -22,6 +22,7 @@ import {
 import { HostSession } from "./host-session.js";
 import { AuditionCompareService } from "./audition-compare.js";
 import { AuditionService } from "./audition.js";
+import { BakeComputedPitchService } from "./bake-computed-pitch.js";
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
 import { ExpressionPlanService } from "./expression-plan.js";
 import { HarmonyPlanService } from "./harmony-plan.js";
@@ -40,6 +41,9 @@ import {
   BUILTIN_AUTOMATION_PARAMETERS,
   ParameterCurveService,
 } from "./parameter-curve.js";
+import { PITCH_CONTROL_LIMITS } from "./pitch-control.js";
+import { PitchControlPatchService } from "./pitch-control-patch.js";
+import { PitchGesturePlanService } from "./pitch-gesture-plan.js";
 import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
 import {
   musicWorkflowGuideIndex,
@@ -59,7 +63,7 @@ import { WorkflowExecutor } from "./workflow.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处（维护规则见 docs/MCP_MUSIC_WORKFLOW_MASTER_PLAN.md §10）。
-const INTERFACE_VERSION = "0.8.0";
+const INTERFACE_VERSION = "0.9.0";
 
 const bridge = new PipeRelay();
 const hostSession = new HostSession(bridge);
@@ -71,6 +75,12 @@ const notePatchService = new NotePatchService(hostSession, snapshotService);
 const rangeSnapshotService = new RangeSnapshotService(hostSession, { snapshotService });
 const parameterCurveService = new ParameterCurveService(hostSession, { snapshotService });
 const noteStructureService = new NoteStructureService(hostSession, snapshotService);
+const pitchControlPatchService = new PitchControlPatchService(hostSession, snapshotService);
+const bakeComputedPitchService = new BakeComputedPitchService(
+  hostSession,
+  snapshotService,
+  pitchControlPatchService
+);
 const auditionService = new AuditionService(hostSession);
 const auditionCompareService = new AuditionCompareService(auditionService);
 const voiceProfileService = new VoiceProfileService(hostSession);
@@ -87,6 +97,7 @@ const lyricProsodyService = new LyricProsodyService({ store: snapshotService.sto
 const quantizePlanService = new QuantizePlanService({ store: snapshotService.store });
 const harmonyPlanService = new HarmonyPlanService({ store: snapshotService.store });
 const vocalContextService = new VocalContextAnalysisService({ store: snapshotService.store });
+const pitchGesturePlanService = new PitchGesturePlanService({ store: snapshotService.store });
 const selectionService = new SelectionService(hostSession, { snapshotService });
 
 const HANDLE_SCHEMA = {
@@ -202,6 +213,88 @@ const CURVE_TARGET_SCHEMA = {
           "detuneCents",
         ],
       },
+    },
+  },
+};
+// sv_patch_pitch_controls 的共享子 schema。单位纪律（GOAL §5.4）：position 是 group-local
+// 整数 BLICK，pitch 是 group-relative semitone，Curve 点相对 curve anchor，三者字段名都带
+// 单位后缀，绝不与 pitchDelta(cents)/Note.detune(cents) 混用。
+const PITCH_CONTROL_CURVE_POINT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    timeFromAnchorBlick: {
+      type: "integer",
+      description: "Point time in integer BLICK relative to the curve anchor position.",
+    },
+    pitchFromAnchorSemitone: {
+      type: "number",
+      description: "Point pitch offset in semitones relative to the curve anchor pitch.",
+    },
+  },
+  required: ["timeFromAnchorBlick", "pitchFromAnchorSemitone"],
+};
+const PITCH_CONTROL_POINT_SPEC_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { const: "point" },
+    positionBlick: {
+      type: "integer",
+      description: "Anchor position in integer BLICK, group-local (NOT occurrence-absolute).",
+    },
+    pitchSemitone: {
+      type: "number",
+      description: "Pitch in semitones, group-relative (NOT cents, NOT occurrence-absolute).",
+    },
+    generator: { type: "string", minLength: 1, maxLength: 100 },
+  },
+  required: ["kind", "positionBlick", "pitchSemitone"],
+};
+const PITCH_CONTROL_CURVE_SPEC_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { const: "curve" },
+    anchorPositionBlick: {
+      type: "integer",
+      description: "Anchor position in integer BLICK, group-local (NOT occurrence-absolute).",
+    },
+    anchorPitchSemitone: {
+      type: "number",
+      description: "Anchor pitch in semitones, group-relative (NOT cents, NOT occurrence-absolute).",
+    },
+    points: {
+      type: "array",
+      minItems: 1,
+      maxItems: 2000,
+      items: PITCH_CONTROL_CURVE_POINT_SCHEMA,
+      description: "Ordered points relative to the anchor; times must be strictly increasing.",
+    },
+    generator: { type: "string", minLength: 1, maxLength: 100 },
+  },
+  required: ["kind", "anchorPositionBlick", "anchorPitchSemitone", "points"],
+};
+const PITCH_CONTROL_SPEC_SCHEMA = {
+  discriminator: { propertyName: "kind" },
+  oneOf: [PITCH_CONTROL_POINT_SPEC_SCHEMA, PITCH_CONTROL_CURVE_SPEC_SCHEMA],
+};
+const PITCH_CONTROL_SET_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  minProperties: 1,
+  description:
+    "Fields to change. A point accepts positionBlick/pitchSemitone; a curve accepts anchorPositionBlick/anchorPitchSemitone/points. Cross-kind fields are rejected.",
+  properties: {
+    positionBlick: { type: "integer" },
+    pitchSemitone: { type: "number" },
+    anchorPositionBlick: { type: "integer" },
+    anchorPitchSemitone: { type: "number" },
+    points: {
+      type: "array",
+      minItems: 1,
+      maxItems: 2000,
+      items: PITCH_CONTROL_CURVE_POINT_SCHEMA,
     },
   },
 };
@@ -748,13 +841,14 @@ const TOOLS = [
               "voiceParameters",
               "automation",
               "computedPitch",
+              "pitchControls",
               "attributes",
               "processing",
               "retakes",
             ],
           },
           description:
-            "Defaults to notes, tempoMap, meterMap. retakes is capability-blocked and produces an UNSUPPORTED_INCLUDE warning.",
+            "Defaults to notes, tempoMap, meterMap. pitchControls reads Point/Curve with dual coordinates, ownership, and fingerprints (SynthV 2.1+). retakes is capability-blocked and produces an UNSUPPORTED_INCLUDE warning.",
         },
         automationParameters: {
           type: "array",
@@ -798,6 +892,11 @@ const TOOLS = [
               type: "integer",
               minimum: 1,
               maximum: RANGE_PAGE_LIMITS.maximums.computedPitchFrames,
+            },
+            pitchControls: {
+              type: "integer",
+              minimum: 1,
+              maximum: RANGE_PAGE_LIMITS.maximums.pitchControls,
             },
             bytes: { type: "integer", minimum: 8192, maximum: RANGE_PAGE_LIMITS.maximums.bytes },
           },
@@ -1409,7 +1508,23 @@ const TOOLS = [
           type: "object",
           additionalProperties: false,
           properties: {
-            interval: { enum: ["third_below", "third_above", "sixth_below", "sixth_above"] },
+            interval: {
+              description:
+                "Legacy name (third/sixth below/above) or a generalized {degree,direction,octaveOffset?} object (degrees 1-7 incl. unison, above/below, octave displacement).",
+              anyOf: [
+                { enum: ["third_below", "third_above", "sixth_below", "sixth_above"] },
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    degree: { enum: [1, 2, 3, 4, 5, 6, 7] },
+                    direction: { enum: ["above", "below"] },
+                    octaveOffset: { type: "integer", minimum: -3, maximum: 3, default: 0 },
+                  },
+                  required: ["degree", "direction"],
+                },
+              ],
+            },
             key: {
               type: "object",
               additionalProperties: false,
@@ -1418,6 +1533,26 @@ const TOOLS = [
                   enum: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"],
                 },
                 mode: { enum: ["major", "minor"] },
+                scale: {
+                  enum: [
+                    "ionian",
+                    "dorian",
+                    "phrygian",
+                    "lydian",
+                    "mixolydian",
+                    "aeolian",
+                    "locrian",
+                    "harmonic_minor",
+                    "melodic_minor",
+                    "major_pentatonic",
+                    "minor_pentatonic",
+                    "blues",
+                    "whole_tone",
+                    "chromatic",
+                  ],
+                  description:
+                    "Optional explicit scale (caller-approved). Defaults to ionian/aeolian from mode; K-S detection never invents an extended scale.",
+                },
               },
               required: ["tonic", "mode"],
               description: "Optional explicit key (sharps-only spelling); omitted keys use K-S detection.",
@@ -1616,6 +1751,306 @@ const TOOLS = [
         },
       },
       required: ["target", "curves"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_patch_pitch_controls",
+    description:
+      "Atomically add, update, or delete PitchControlPoint/PitchControlCurve objects on one note group occurrence (SynthV 2.1+). Every operation resolves its target by expectedFingerprint (never by stale index — the host re-sorts on every add/remove), re-reads the group UUID and the live group fingerprint before writing, opens one host Undo interval, writes in place, then verifies by host read-back (pitch within 1e-4 semitone, BLICK/point-count exact). New objects are tagged with the svcopilot.* ownership namespace; external objects keep their scriptData. On any failure after the first write, every touched control is restored in reverse order with read-back (verified compensation, not ACID). Units are explicit and must not be mixed: position=group-local integer BLICK, pitch=group-relative semitone, curve points relative to the curve anchor — never cents. dryRun and no_change perform zero host writes and create zero Undo. Requires a range context from sv_snapshot_range include:[\"pitchControls\"]; shared targets need allowSharedTargetMutation:true. If a client collapses the nested operation/kind types to unknown, read svcopilot://schemas/sv_patch_pitch_controls for the exact validated input schema.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: { type: "string", minLength: 1 },
+        occurrenceId: { type: "string", minLength: 1 },
+        target: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            expectedGroupUuid: { type: "string", minLength: 1 },
+            expectedPitchControlFingerprint: {
+              type: "string",
+              minLength: 1,
+              description:
+                "Whole-group guard from the occurrence's pitchControlGroupFingerprint; any add/remove/reorder/field change since snapshot conflicts before any write.",
+            },
+            expectedTimeOffsetBlick: {
+              type: "integer",
+              description: "Optional drift guard: the occurrence timeOffsetBlick at snapshot time.",
+            },
+            expectedPitchOffsetSemitone: {
+              type: "number",
+              description: "Optional drift guard: the occurrence pitchOffsetSemitone at snapshot time.",
+            },
+            expectedNotes: {
+              type: "array",
+              minItems: 1,
+              maxItems: 256,
+              description:
+                "Optional note-anchor drift guard (emitted by sv_plan_pitch_gesture): full snapshot fingerprints of the notes the gesture curves are anchored to. Each is compared field-by-field against the live host before any write; a moved/edited note fails STALE_CONTEXT with effects none instead of writing curves at the note's old position.",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  noteId: { type: "string", minLength: 1 },
+                  indexInGroup: { type: "integer", minimum: 0 },
+                  onsetBlick: { type: "integer", minimum: 0 },
+                  durationBlick: { type: "integer", minimum: 0 },
+                  pitch: { type: "integer" },
+                  lyrics: { type: ["string", "null"] },
+                  phonemesOverride: { type: ["string", "null"] },
+                  languageOverride: { type: ["string", "null"] },
+                  detuneCents: { type: "number" },
+                },
+                required: [
+                  "indexInGroup",
+                  "onsetBlick",
+                  "durationBlick",
+                  "pitch",
+                  "lyrics",
+                  "phonemesOverride",
+                  "languageOverride",
+                  "detuneCents",
+                ],
+              },
+            },
+            allowSharedTargetMutation: { type: "boolean", default: false },
+          },
+        },
+        operations: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: {
+            discriminator: { propertyName: "op" },
+            oneOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  op: { const: "add" },
+                  control: PITCH_CONTROL_SPEC_SCHEMA,
+                },
+                required: ["op", "control"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  op: { const: "update" },
+                  controlId: { type: "string", minLength: 1 },
+                  expectedFingerprint: {
+                    type: "string",
+                    minLength: 1,
+                    description: "The control's fingerprint from sv_snapshot_range; the write-time identity guard.",
+                  },
+                  set: PITCH_CONTROL_SET_SCHEMA,
+                },
+                required: ["op", "controlId", "expectedFingerprint", "set"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  op: { const: "delete" },
+                  controlId: { type: "string", minLength: 1 },
+                  expectedFingerprint: { type: "string", minLength: 1 },
+                },
+                required: ["op", "controlId", "expectedFingerprint"],
+              },
+            ],
+          },
+        },
+        dryRun: { type: "boolean", default: false },
+        atomic: {
+          type: "boolean",
+          const: true,
+          default: true,
+          description: "Only atomic:true is supported; atomic:false is rejected, never silently ignored.",
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        waitFor: {
+          enum: ["none", "computedPitch"],
+          default: "none",
+          description: "Post-commit observation only; a failure here never reclassifies a verified write.",
+        },
+        timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+        pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
+      },
+      required: ["contextId", "occurrenceId", "operations"],
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "sv_plan_pitch_gesture",
+    description:
+      "Compile explicit pitch gestures (transition, attack, release, vibrato) anchored to snapshot notes into a reviewable apply envelope for sv_patch_pitch_controls. Pure in-memory and deterministic: it reads only the range context (notes/tempo/quarter) and never touches the host. Intent durations may be expressed in seconds (converted via the tempo map), quarters, or noteRatio; all output coordinates are group-local integer BLICK and group-relative semitones (NOT cents). Every generated curve is a new svcopilot-owned object with bounded, non-overshooting shapes and explicit clamp warnings; the planner only ADDS curves and never deletes or overwrites existing pitch controls. apply.arguments carries expectedNotes/expectedTimeOffsetBlick/expectedPitchOffsetSemitone drift guards — submit it verbatim to sv_patch_pitch_controls with dryRun:true first. If a client collapses the nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: { type: "string", minLength: 1 },
+        occurrenceId: { type: "string", minLength: 1 },
+        gestures: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: {
+            discriminator: { propertyName: "type" },
+            oneOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  type: { const: "transition" },
+                  fromNoteId: { type: "string", minLength: 1 },
+                  toNoteId: { type: "string", minLength: 1 },
+                  width: { $ref: "#/definitions/duration" },
+                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
+                  shape: { enum: ["linear", "smoothstep", "cosine"] },
+                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
+                },
+                required: ["type", "fromNoteId", "toNoteId"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  type: { const: "attack" },
+                  noteId: { type: "string", minLength: 1 },
+                  direction: { enum: ["up", "down", "auto"] },
+                  length: { $ref: "#/definitions/duration" },
+                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
+                  shape: { enum: ["linear", "smoothstep", "cosine"] },
+                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
+                },
+                required: ["type", "noteId"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  type: { const: "release" },
+                  noteId: { type: "string", minLength: 1 },
+                  direction: { enum: ["up", "down", "auto"] },
+                  length: { $ref: "#/definitions/duration" },
+                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
+                  shape: { enum: ["linear", "smoothstep", "cosine"] },
+                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
+                },
+                required: ["type", "noteId"],
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  type: { const: "vibrato" },
+                  noteId: { type: "string", minLength: 1 },
+                  startSeconds: { type: "number", minimum: 0, maximum: 30 },
+                  fadeInSeconds: { type: "number", minimum: 0, maximum: 30 },
+                  fadeOutSeconds: { type: "number", minimum: 0, maximum: 30 },
+                  rateHz: { type: "number", minimum: 0.5, maximum: 12 },
+                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
+                  phase: { type: "number", minimum: -6.2832, maximum: 6.2832 },
+                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
+                },
+                required: ["type", "noteId"],
+              },
+            ],
+          },
+        },
+        constraints: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            maxAbsDepthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
+            maxTotalPoints: { type: "integer", minimum: 16, maximum: 4000 },
+            maxPointsPerCurve: { type: "integer", minimum: 2, maximum: 2000 },
+            minVibratoQuarter: { type: "number", minimum: 0.25, maximum: 8 },
+          },
+        },
+        sampling: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pointsPerQuarter: { type: "integer", minimum: 2, maximum: 32 },
+            vibratoPointsPerCycle: { type: "integer", minimum: 4, maximum: 16 },
+          },
+        },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId", "gestures"],
+      definitions: {
+        duration: {
+          type: "object",
+          additionalProperties: false,
+          description: "Exactly one of seconds (converted via the tempo map), quarters, or noteRatio.",
+          properties: {
+            seconds: { type: "number", minimum: 0.001, maximum: 30 },
+            quarters: { type: "number", minimum: 0.01, maximum: 16 },
+            noteRatio: { type: "number", minimum: 0.01, maximum: 1 },
+          },
+        },
+      },
+    },
+    outputSchema: { type: "object", additionalProperties: true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_bake_computed_pitch",
+    description:
+      "Bake the host's computed pitch into ONE new svcopilot-owned PitchControlCurve on a note group occurrence (SynthV 2.1+). Absolute (sounding) MIDI is converted to group-relative semitones and absolute BLICK to group-local; a bounded Ramer-Douglas-Peucker simplification preserves endpoints and keeps max fit error within toleranceSemitone. All-null, empty, processing-incomplete, or below-threshold coverage writes NOTHING (INSUFFICIENT_COMPUTED_PITCH) — null is never treated as zero pitch. The write itself is delegated to the sv_patch_pitch_controls transaction (one Undo, host read-back, reverse compensation). Strategies: preserve_existing (add only), replace_owned (replace svcopilot-owned controls in range), replace_explicit (replace only caller-confirmed controls). Existing pitchDelta automation is preserved (clearing is not supported in this version and is rejected, never silently ignored). Reports sourceSampling, finiteFrames, nullFrames, coverage, fitError, and the modified range. If a client collapses nested types to unknown, read svcopilot://schemas/sv_bake_computed_pitch for the exact validated input schema.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: { type: "string", minLength: 1 },
+        occurrenceId: { type: "string", minLength: 1 },
+        sampling: {
+          type: "object",
+          additionalProperties: false,
+          description: "Optional explicit sampling (startBlick/intervalBlick/frames, absolute BLICK). Omit to inherit the snapshot's captured computed pitch.",
+          properties: {
+            startBlick: { type: "integer", minimum: 0 },
+            intervalBlick: { type: "integer", minimum: 1 },
+            frames: { type: "integer", minimum: 1 },
+          },
+          required: ["startBlick", "intervalBlick", "frames"],
+        },
+        strategy: {
+          enum: ["preserve_existing", "replace_owned", "replace_explicit"],
+          default: "preserve_existing",
+        },
+        explicitTargets: {
+          type: "array",
+          minItems: 1,
+          description: "replace_explicit only: caller-confirmed controls to replace.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              controlId: { type: "string", minLength: 1 },
+              expectedFingerprint: { type: "string", minLength: 1 },
+            },
+            required: ["controlId", "expectedFingerprint"],
+          },
+        },
+        coverageThreshold: { type: "number", minimum: 0.01, maximum: 1, default: 0.8 },
+        toleranceSemitone: { type: "number", minimum: 0.001, maximum: 2, default: 0.05 },
+        maxPoints: { type: "integer", minimum: 8, maximum: 400 },
+        pitchDeltaHandling: {
+          enum: ["preserve"],
+          default: "preserve",
+          description: "Only preserve is supported; clearing pitchDelta requires a cross-type transaction this version does not implement.",
+        },
+        allowSharedTargetMutation: { type: "boolean", default: false },
+        dryRun: { type: "boolean", default: false },
+        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+      },
+      required: ["contextId"],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -2198,6 +2633,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       mimeType: "application/json",
     },
     {
+      uri: "svcopilot://schemas/sv_patch_pitch_controls",
+      name: "sv_patch_pitch_controls input schema",
+      description: "Exact JSON input schema used to validate sv_patch_pitch_controls.",
+      mimeType: "application/json",
+    },
+    {
       uri: "svcopilot://schemas/sv_edit_phrase",
       name: "sv_edit_phrase input schema",
       description: "Exact JSON input schema used to validate sv_edit_phrase.",
@@ -2213,6 +2654,18 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://schemas/sv_plan_expression",
       name: "sv_plan_expression input schema",
       description: "Exact JSON input schema used to validate sv_plan_expression.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_plan_pitch_gesture",
+      name: "sv_plan_pitch_gesture input schema",
+      description: "Exact JSON input schema used to validate sv_plan_pitch_gesture.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://schemas/sv_bake_computed_pitch",
+      name: "sv_bake_computed_pitch input schema",
+      description: "Exact JSON input schema used to validate sv_bake_computed_pitch.",
       mimeType: "application/json",
     },
     {
@@ -2409,6 +2862,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_restructure_notes":
         result = await noteStructureService.restructureNotes(args);
         break;
+      case "sv_patch_pitch_controls":
+        result = await pitchControlPatchService.patch(args);
+        break;
+      case "sv_plan_pitch_gesture":
+        result = await pitchGesturePlanService.plan(args);
+        break;
+      case "sv_bake_computed_pitch":
+        result = await bakeComputedPitchService.bake(args);
+        break;
       case "sv_start_audition":
         result = await auditionService.start(args);
         break;
@@ -2601,6 +3063,7 @@ function capabilities() {
       rangeCapture: RANGE_CAPTURE_LIMITS,
       rangeRequest: RANGE_REQUEST_LIMITS,
       rangePage: RANGE_PAGE_LIMITS,
+      pitchControl: PITCH_CONTROL_LIMITS,
       snapshotContextTtlMs: snapshotService.store.ttlMs,
       singleInFlight: true,
     },
@@ -2614,6 +3077,9 @@ function capabilities() {
         "sv_get_parameter_curve",
         "sv_patch_parameter_curve",
         "sv_patch_parameter_curves",
+        "sv_patch_pitch_controls",
+        "sv_plan_pitch_gesture",
+        "sv_bake_computed_pitch",
         "sv_edit_phrase",
         "sv_compare_computed_pitch",
         "sv_plan_expression",
@@ -2661,9 +3127,12 @@ function capabilities() {
         sv_get_parameter_curve: ["range", "direct_target"],
         sv_patch_parameter_curve: ["range", "direct_target"],
         sv_patch_parameter_curves: ["range", "direct_target"],
+        sv_patch_pitch_controls: ["range"],
         sv_edit_phrase: ["range"],
         sv_compare_computed_pitch: ["range"],
         sv_plan_expression: ["range"],
+        sv_plan_pitch_gesture: ["range"],
+        sv_bake_computed_pitch: ["range"],
         sv_align_lyrics: ["range"],
         sv_analyze_phrase: ["range"],
         sv_style_profile: ["range"],
@@ -2677,6 +3146,8 @@ function capabilities() {
         "sv_restructure_notes",
         "sv_patch_parameter_curve",
         "sv_patch_parameter_curves",
+        "sv_patch_pitch_controls",
+        "sv_bake_computed_pitch",
         "sv_edit_phrase",
       ],
     },
@@ -2707,6 +3178,9 @@ function capabilities() {
 function musicWorkflowSchemaIndex() {
   const names = [
     "sv_patch_parameter_curves",
+    "sv_patch_pitch_controls",
+    "sv_plan_pitch_gesture",
+    "sv_bake_computed_pitch",
     "sv_edit_phrase",
     "sv_compare_computed_pitch",
     "sv_plan_expression",
@@ -2735,6 +3209,9 @@ function toolInputSchema(name) {
       candidate.name === name &&
       [
         "sv_patch_parameter_curves",
+        "sv_patch_pitch_controls",
+        "sv_plan_pitch_gesture",
+        "sv_bake_computed_pitch",
         "sv_edit_phrase",
         "sv_compare_computed_pitch",
         "sv_plan_expression",

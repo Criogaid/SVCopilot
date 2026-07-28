@@ -339,8 +339,18 @@ function summarizeProsody(result, input) {
 }
 
 function summarizeStyle(result) {
-  const profile = result.profiles?.[0] ?? null;
-  const profileSections = profile?.sections ?? {};
+  if (
+    !Array.isArray(result.targets) ||
+    result.targets.length === 0 ||
+    result.targetCount !== result.targets.length
+  ) {
+    throw codedError(
+      "ANALYSIS_CONTRACT_MISMATCH",
+      "sv_style_profile returned an inconsistent target summary"
+    );
+  }
+  const profile = result.targets[0];
+  const profileSections = profile.sections ?? {};
   // not_captured 如实透出，绝不折叠成 0。null section 表示该维度无旋律样本。
   const sectionStatus = Object.fromEntries(
     Object.entries(profileSections).map(([key, value]) => [
@@ -350,7 +360,7 @@ function summarizeStyle(result) {
   );
   return {
     summary: {
-      targetCount: result.profiles?.length ?? 0,
+      targetCount: result.targetCount,
       sectionStatus,
       rhythm: profileSections.rhythm ?? null,
       languages: profileSections.languages ?? null,
