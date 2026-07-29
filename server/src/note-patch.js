@@ -6,6 +6,7 @@ import {
   parseContextNoteId,
   resolveContextTarget,
 } from "./context-target.js";
+import { createOperationDiagnostics } from "./operation-diagnostics.js";
 import { waitForProcessing } from "./processing.js";
 
 // 字段表同时决定确定性写入顺序：先时间/音高结构，再文本，再表达属性。
@@ -43,6 +44,10 @@ export class NotePatchService {
   }
 
   async patchNotes(request) {
+    const diagnostics = createOperationDiagnostics({
+      enabled: request?.diagnostics === true,
+      now: this.now,
+    });
     let resolvedRequest = request;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
@@ -59,8 +64,15 @@ export class NotePatchService {
       });
       resolvedRequest = resolved.mutationRequest;
     }
+    if (diagnostics && resolvedRequest !== request) {
+      resolvedRequest = { ...resolvedRequest, diagnostics: true };
+    }
     const input = normalizeRequest(resolvedRequest);
-    return this.session.withExclusive(async (host) => {
+    diagnostics?.markValidationComplete();
+    diagnostics?.markCoordinatorRequested();
+    const result = await this.session.withExclusive(async (hostLease) => {
+      diagnostics?.markCoordinatorAcquired();
+      const host = diagnostics ? diagnostics.instrumentHost(hostLease) : hostLease;
       let resolved;
       let boundaryCalls = 0;
       let writeAttempted = false;
@@ -69,26 +81,54 @@ export class NotePatchService {
       const startedAt = this.now();
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
-        const stored = this.snapshotService.getContext(input.contextId, host.epoch());
+        const stored = diagnostics
+          ? diagnostics.measureSync("contextRestoreMs", () =>
+              this.snapshotService.getContext(input.contextId, host.epoch())
+            )
+          : this.snapshotService.getContext(input.contextId, host.epoch());
         resolved = await resolveContextTarget(host, stored, {
           verify: true,
           acceptRange: true,
           occurrenceId:
             input.occurrenceId ??
             deriveRangeOccurrenceId(stored, input.patches.map((patch) => patch.noteId)),
+          noteIds: input.patches.map((patch) => patch.noteId),
+          noteIndicesInGroup: input.patches.map((patch) => patch.noteIndexInGroup),
+          diagnostics,
         });
         const targets = resolveNoteTargets(input, resolved);
         const targetByPosition = new Map(targets.map((target) => [target.position, target]));
 
         // 写入前读取每个将被 set/expected 触碰的字段当前值：既做冲突检查，也是补偿日志。
-        for (const target of targets) {
-          target.current = {};
-          for (const field of target.touchedFields) {
-            target.current[field] = await readField(host, target.note, FIELD_BY_NAME.get(field));
+        const readPreflight = async () => {
+          for (const target of targets) {
+            target.current = {};
+            for (const field of target.touchedFields) {
+              // 指纹刚在同一 host lease 中完成 live 校验；attributes 不在指纹中，仍需单独读取。
+              target.current[field] =
+                field === "attributes"
+                  ? await readField(host, target.note, FIELD_BY_NAME.get(field))
+                  : target.fingerprint[field];
+            }
           }
+        };
+        if (diagnostics) {
+          await diagnostics.measure("preflightReadMs", readPreflight);
+        } else {
+          await readPreflight();
         }
 
-        const expectedMismatches = collectExpectedMismatches(targets);
+        let expectedMismatches;
+        let plannedDiff;
+        if (diagnostics) {
+          diagnostics.measureSync("planningMs", () => {
+            expectedMismatches = collectExpectedMismatches(targets);
+            plannedDiff = expectedMismatches.length === 0 ? buildPlannedDiff(targets) : [];
+          });
+        } else {
+          expectedMismatches = collectExpectedMismatches(targets);
+          plannedDiff = expectedMismatches.length === 0 ? buildPlannedDiff(targets) : [];
+        }
         if (expectedMismatches.length > 0) {
           return {
             ...failed(
@@ -109,7 +149,6 @@ export class NotePatchService {
           };
         }
 
-        const plannedDiff = buildPlannedDiff(targets);
         const plannedChangedNotes = new Set(plannedDiff.map((entry) => entry.noteId)).size;
         if (plannedDiff.some((entry) => entry.field === "onsetBlick")) {
           warnings.push({
@@ -175,16 +214,23 @@ export class NotePatchService {
 
         let applyError = null;
         try {
-          for (const entry of plannedDiff) {
-            const spec = FIELD_BY_NAME.get(entry.field);
-            const target = targetByPosition.get(entry.position);
-            writeAttempted = true;
-            await host.call({
-              handle: target.note,
-              method: spec.setter,
-              args: [entry.writeValue],
-            });
-            appliedDiff.push(entry);
+          const applyWrites = async () => {
+            for (const entry of plannedDiff) {
+              const spec = FIELD_BY_NAME.get(entry.field);
+              const target = targetByPosition.get(entry.targetPosition);
+              writeAttempted = true;
+              await host.call({
+                handle: target.note,
+                method: spec.setter,
+                args: [entry.writeValue],
+              });
+              appliedDiff.push(entry);
+            }
+          };
+          if (diagnostics) {
+            await diagnostics.measure("writeMs", applyWrites);
+          } else {
+            await applyWrites();
           }
         } catch (error) {
           applyError = error;
@@ -197,7 +243,11 @@ export class NotePatchService {
         let verificationPassed = null;
         if (!applyError) {
           try {
-            const verified = await this._verifyReadBack(host, targetByPosition, plannedDiff);
+            const verified = diagnostics
+              ? await diagnostics.measure("verificationMs", () =>
+                  this._verifyReadBack(host, targetByPosition, plannedDiff)
+                )
+              : await this._verifyReadBack(host, targetByPosition, plannedDiff);
             verificationEvidence = verified.evidence;
             verificationPassed = verified.passed;
           } catch (error) {
@@ -252,7 +302,11 @@ export class NotePatchService {
               timing: { elapsedMs: this.now() - startedAt },
             };
           }
-          const rollback = await this._rollback(host, targetByPosition, appliedDiff);
+          const rollback = diagnostics
+            ? await diagnostics.measure("rollbackMs", () =>
+                this._rollback(host, targetByPosition, appliedDiff)
+              )
+            : await this._rollback(host, targetByPosition, appliedDiff);
           await this._closeUndoBoundary(host, resolved, warnings, () => (boundaryCalls += 1));
           return {
             ...failed(
@@ -298,19 +352,23 @@ export class NotePatchService {
           // 提交与逐字段读回已完成、Undo 边界已关闭；处理观测只是后续附加信息。
           // 观测失败绝不能把已验证成功的写入降级为 outcome_unknown/partial（对齐 phrase-edit）。
           try {
-            processing = await waitForProcessing(host, {
-              roots: resolved.roots,
-              group: resolved.group,
-              kind: input.waitFor,
-              expectedNotes: contextGroupNoteCount(
-                stored,
-                resolved.targetNoteCount ?? resolved.notes.length
-              ),
-              timeoutMs: input.timeoutMs,
-              pollIntervalMs: input.pollIntervalMs,
-              sleepFn: this.sleep,
-              now: this.now,
-            });
+            const observeProcessing = () =>
+              waitForProcessing(host, {
+                roots: resolved.roots,
+                group: resolved.group,
+                kind: input.waitFor,
+                expectedNotes: contextGroupNoteCount(
+                  stored,
+                  resolved.targetNoteCount ?? resolved.notes.length
+                ),
+                timeoutMs: input.timeoutMs,
+                pollIntervalMs: input.pollIntervalMs,
+                sleepFn: this.sleep,
+                now: this.now,
+              });
+            processing = diagnostics
+              ? await diagnostics.measure("processingMs", observeProcessing)
+              : await observeProcessing();
             warnings.push(...processing.warnings);
           } catch (error) {
             processing = {
@@ -394,13 +452,14 @@ export class NotePatchService {
         await resolved?.scope.releaseAll();
       }
     });
+    return diagnostics ? { ...result, diagnostics: diagnostics.finish() } : result;
   }
 
   async _verifyReadBack(host, targetByPosition, plannedDiff) {
     const observed = {};
     let passed = true;
     for (const entry of plannedDiff) {
-      const target = targetByPosition.get(entry.position);
+      const target = targetByPosition.get(entry.targetPosition);
       const spec = FIELD_BY_NAME.get(entry.field);
       const value = await readField(host, target.note, spec);
       observed[entry.noteId] = observed[entry.noteId] ?? {};
@@ -419,7 +478,7 @@ export class NotePatchService {
       const spec = FIELD_BY_NAME.get(entry.field);
       try {
         await host.call({
-          handle: targetByPosition.get(entry.position).note,
+          handle: targetByPosition.get(entry.targetPosition).note,
           method: spec.setter,
           args: [entry.rollbackValue],
         });
@@ -451,7 +510,7 @@ export class NotePatchService {
     try {
       for (const entry of appliedDiff) {
         const spec = FIELD_BY_NAME.get(entry.field);
-        const value = await readField(host, targetByPosition.get(entry.position).note, spec);
+        const value = await readField(host, targetByPosition.get(entry.targetPosition).note, spec);
         evidence.restored[entry.noteId] = evidence.restored[entry.noteId] ?? {};
         evidence.restored[entry.noteId][entry.field] = value;
         // 回滚后比较完整旧值；官方部分更新无法删除新增 key，此时如实报告未恢复。
@@ -508,9 +567,12 @@ function resolveNoteTargets(input, resolved) {
   const seen = new Set();
   const targets = [];
   for (const patch of input.patches) {
-    const position = parseContextNoteId(patch.noteId, input.contextId, resolved);
+    const { noteId, position, outputPosition } = resolvePatchReference(patch, input, resolved);
     if (seen.has(position)) {
-      throw codedError("DUPLICATE_NOTE_ID", `noteId appears more than once: ${patch.noteId}`);
+      throw codedError(
+        "DUPLICATE_NOTE_ID",
+        `the same note appears more than once: ${patch.noteId ?? patch.noteIndexInGroup}`
+      );
     }
     seen.add(position);
     const touchedFields = new Set([
@@ -518,9 +580,12 @@ function resolveNoteTargets(input, resolved) {
       ...Object.keys(patch.expected ?? {}),
     ]);
     targets.push({
-      noteId: patch.noteId,
+      noteId,
+      compactReference: patch.noteIndexInGroup !== undefined,
       position,
+      outputPosition,
       note: resolved.notes[position],
+      fingerprint: resolved.fingerprints[position],
       indexInGroup: resolved.fingerprints[position].indexInGroup,
       set: patch.set,
       expected: patch.expected ?? {},
@@ -531,6 +596,46 @@ function resolveNoteTargets(input, resolved) {
   targets.sort((a, b) => a.position - b.position);
   targets.forEach((target, index) => (target.order = index));
   return targets;
+}
+
+function resolvePatchReference(patch, input, resolved) {
+  if (patch.noteId !== undefined) {
+    const position = parseContextNoteId(patch.noteId, input.contextId, resolved);
+    return {
+      noteId: patch.noteId,
+      position,
+      outputPosition:
+        resolved.contextKind === "range"
+          ? resolved.contextPositionByNoteId.get(patch.noteId)
+          : position,
+    };
+  }
+  const position = resolved.fingerprints.findIndex(
+    (fingerprint) => fingerprint.indexInGroup === patch.noteIndexInGroup
+  );
+  if (position < 0) {
+    throw codedError(
+      "NOTE_INDEX_OUT_OF_RANGE",
+      `noteIndexInGroup ${patch.noteIndexInGroup} is not part of the resolved occurrence`
+    );
+  }
+  if (resolved.contextKind === "range") {
+    const noteId = resolved.occurrence.noteFingerprints.find(
+      (fingerprint) => fingerprint.indexInGroup === patch.noteIndexInGroup
+    )?.noteId;
+    if (typeof noteId !== "string") {
+      throw codedError(
+        "UNKNOWN_NOTE_ID",
+        `noteIndexInGroup ${patch.noteIndexInGroup} has no identity in the range context`
+      );
+    }
+    return {
+      noteId,
+      position,
+      outputPosition: resolved.contextPositionByIndexInGroup.get(patch.noteIndexInGroup),
+    };
+  }
+  return { noteId: `${input.contextId}:n:${position}`, position, outputPosition: position };
 }
 
 function collectExpectedMismatches(targets) {
@@ -569,7 +674,9 @@ function buildPlannedDiff(targets) {
       if (fieldMatches(spec, to, from)) continue;
       diff.push({
         noteId: target.noteId,
-        position: target.position,
+        compactReference: target.compactReference,
+        targetPosition: target.position,
+        position: target.outputPosition,
         indexInGroup: target.indexInGroup,
         field: spec.field,
         from,
@@ -667,7 +774,16 @@ function patchResultData(targets, plannedDiff, appliedDiff, remainingChangedNote
 }
 
 function publicDiff(diff) {
-  return diff.map(({ writeValue: _writeValue, rollbackValue: _rollbackValue, ...entry }) => entry);
+  return diff.map(
+    ({
+      writeValue: _writeValue,
+      rollbackValue: _rollbackValue,
+      targetPosition: _targetPosition,
+      compactReference,
+      noteId,
+      ...entry
+    }) => (compactReference ? entry : { noteId, ...entry })
+  );
 }
 
 function pickAttributeValues(source, keys) {
@@ -704,8 +820,25 @@ function normalizeRequest(request) {
   }
   const patches = request.patches.map((patch, index) => {
     if (!isRecord(patch)) throw codedError("INVALID_ARGUMENTS", `patches[${index}] must be an object`);
-    if (typeof patch.noteId !== "string" || !patch.noteId) {
-      throw codedError("INVALID_ARGUMENTS", `patches[${index}].noteId must be a string`);
+    const hasNoteId = patch.noteId !== undefined;
+    const hasIndex = patch.noteIndexInGroup !== undefined;
+    if (hasNoteId === hasIndex) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `patches[${index}] must provide exactly one of noteId or noteIndexInGroup`
+      );
+    }
+    if (hasNoteId && (typeof patch.noteId !== "string" || !patch.noteId)) {
+      throw codedError("INVALID_ARGUMENTS", `patches[${index}].noteId must be a non-empty string`);
+    }
+    if (
+      hasIndex &&
+      (!Number.isSafeInteger(patch.noteIndexInGroup) || patch.noteIndexInGroup < 0)
+    ) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `patches[${index}].noteIndexInGroup must be a non-negative safe integer`
+      );
     }
     if (!isRecord(patch.set) || Object.keys(patch.set).length === 0) {
       throw codedError("INVALID_ARGUMENTS", `patches[${index}].set must set at least one field`);
@@ -717,7 +850,12 @@ function normalizeRequest(request) {
       }
       validateFieldObject(patch.expected, `patches[${index}].expected`, false);
     }
-    return { noteId: patch.noteId, set: patch.set, expected: patch.expected };
+    return {
+      noteId: patch.noteId,
+      noteIndexInGroup: patch.noteIndexInGroup,
+      set: patch.set,
+      expected: patch.expected,
+    };
   });
   const waitFor = request.waitFor ?? "phonemes";
   if (!["none", "phonemes", "computedAttributes"].includes(waitFor)) {
@@ -728,6 +866,9 @@ function normalizeRequest(request) {
   }
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
+  }
+  if (request.diagnostics !== undefined && typeof request.diagnostics !== "boolean") {
+    throw codedError("INVALID_ARGUMENTS", "diagnostics must be a boolean");
   }
   if (
     request.occurrenceId !== undefined &&
@@ -748,6 +889,7 @@ function normalizeRequest(request) {
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
     dryRun: request.dryRun === true,
     atomic: request.atomic !== false,
+    diagnostics: request.diagnostics === true,
     waitFor,
     timeoutMs: clampInteger(request.timeoutMs, 0, 30_000, 10_000),
     pollIntervalMs: clampInteger(request.pollIntervalMs, 20, 2_000, 100),

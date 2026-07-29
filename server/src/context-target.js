@@ -1,12 +1,20 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { scanTargetOccurrences } from "./parameter-curve.js";
+import { measureDiagnosticPhase } from "./operation-diagnostics.js";
 import { createHostScope } from "./snapshot.js";
 
 export async function resolveContextTarget(
   host,
   stored,
-  { verify = true, acceptRange = false, occurrenceId } = {}
+  {
+    verify = true,
+    acceptRange = false,
+    occurrenceId,
+    noteIds,
+    noteIndicesInGroup,
+    diagnostics = null,
+  } = {}
 ) {
   if (stored?.context?.kind === "range") {
     if (!acceptRange) {
@@ -15,7 +23,13 @@ export async function resolveContextTarget(
         "sv_set_lyrics only accepts group or selection contexts from sv_snapshot; for range contexts use sv_patch_notes for per-note lyrics or sv_edit_phrase for atomic phrase edits"
       );
     }
-    return resolveRangeContextTarget(host, stored, { verify, occurrenceId });
+    return resolveRangeContextTarget(host, stored, {
+      verify,
+      occurrenceId,
+      noteIds,
+      noteIndicesInGroup,
+      diagnostics,
+    });
   }
   if (!stored?.context || !["selection", "group"].includes(stored.context.kind)) {
     throw codedError("INVALID_CONTEXT", "context does not identify an editable note group");
@@ -28,34 +42,42 @@ export async function resolveContextTarget(
   }
   const scope = createHostScope(host);
   try {
-    const roots = await scope.roots();
-    const track = await scope.call(roots.project, "getTrack", [stored.context.trackIndex + 1], {
-      inferredType: "Track",
-    });
-    const group = await scope.call(track, "getGroupReference", [stored.context.groupIndex + 1], {
-      inferredType: "NoteGroupReference",
-    });
-    const target = await scope.call(group, "getTarget", [], { inferredType: "NoteGroup" });
-    const expectedGroupUuid =
-      stored.baseData.group?.uuid ?? stored.baseData.tracks?.[0]?.groups?.[0]?.uuid ?? null;
-    if (expectedGroupUuid !== null) {
-      const currentGroupUuid = await scope.call(target, "getUUID");
-      if (currentGroupUuid !== expectedGroupUuid) {
-        throw codedError("STALE_CONTEXT", "the target note group changed after snapshot capture");
+    let roots;
+    let track;
+    let group;
+    let target;
+    await measureDiagnosticPhase(diagnostics, "targetResolutionMs", async () => {
+      roots = await scope.roots();
+      track = await scope.call(roots.project, "getTrack", [stored.context.trackIndex + 1], {
+        inferredType: "Track",
+      });
+      group = await scope.call(track, "getGroupReference", [stored.context.groupIndex + 1], {
+        inferredType: "NoteGroupReference",
+      });
+      target = await scope.call(group, "getTarget", [], { inferredType: "NoteGroup" });
+      const expectedGroupUuid =
+        stored.baseData.group?.uuid ?? stored.baseData.tracks?.[0]?.groups?.[0]?.uuid ?? null;
+      if (expectedGroupUuid !== null) {
+        const currentGroupUuid = await scope.call(target, "getUUID");
+        if (currentGroupUuid !== expectedGroupUuid) {
+          throw codedError("STALE_CONTEXT", "the target note group changed after snapshot capture");
+        }
       }
-    }
+    });
     const notes = [];
     const fingerprints = [];
-    for (const index of stored.context.noteIndices) {
-      const note = await scope.call(target, "getNote", [index + 1], { inferredType: "Note" });
-      if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${index} no longer exists`);
-      notes.push(note);
-      fingerprints.push(await readFingerprint(scope, note));
-    }
+    await measureDiagnosticPhase(diagnostics, "fingerprintVerificationMs", async () => {
+      for (const index of stored.context.noteIndices) {
+        const note = await scope.call(target, "getNote", [index + 1], { inferredType: "Note" });
+        if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${index} no longer exists`);
+        notes.push(note);
+        fingerprints.push(await readFingerprint(scope, note));
+      }
 
-    if (verify && !isDeepStrictEqual(fingerprints, stored.context.fingerprints)) {
-      throw codedError("STALE_CONTEXT", "notes changed after the snapshot was captured");
-    }
+      if (verify && !isDeepStrictEqual(fingerprints, stored.context.fingerprints)) {
+        throw codedError("STALE_CONTEXT", "notes changed after the snapshot was captured");
+      }
+    });
     return { scope, roots, track, group, target, notes, fingerprints, contextKind: stored.context.kind };
   } catch (error) {
     await scope.releaseAll();
@@ -69,7 +91,11 @@ export async function resolveContextTarget(
 
 // range context 的可编辑解析：语义与 sv_edit_phrase 的 resolveTarget 一致 ——
 // 按 occurrence 定位 reference/target、比对 target UUID、逐音符校验指纹（含 detuneCents）。
-async function resolveRangeContextTarget(host, stored, { verify, occurrenceId }) {
+async function resolveRangeContextTarget(
+  host,
+  stored,
+  { verify, occurrenceId, noteIds, noteIndicesInGroup, diagnostics }
+) {
   const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
   const vocal = occurrences.filter(
     (item) => typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0
@@ -99,46 +125,69 @@ async function resolveRangeContextTarget(host, stored, { verify, occurrenceId })
 
   const scope = createHostScope(host);
   try {
-    const roots = await scope.roots();
-    const track = await scope.call(roots.project, "getTrack", [occurrence.trackIndex + 1], {
-      inferredType: "Track",
+    let roots;
+    let track;
+    let group;
+    let target;
+    let targetNoteCount;
+    await measureDiagnosticPhase(diagnostics, "targetResolutionMs", async () => {
+      roots = await scope.roots();
+      track = await scope.call(roots.project, "getTrack", [occurrence.trackIndex + 1], {
+        inferredType: "Track",
+      });
+      group = await scope.call(track, "getGroupReference", [occurrence.groupIndex + 1], {
+        inferredType: "NoteGroupReference",
+      });
+      if (await scope.call(group, "isInstrumental")) {
+        throw codedError("INVALID_TARGET", "instrumental occurrences cannot be edited as note groups");
+      }
+      target = await scope.call(group, "getTarget", [], { inferredType: "NoteGroup" });
+      const currentGroupUuid = await scope.call(target, "getUUID");
+      if (currentGroupUuid !== occurrence.targetGroupUuid) {
+        throw codedError("STALE_CONTEXT", "the target note group changed after snapshot capture");
+      }
+      targetNoteCount = await scope.call(target, "getNumNotes");
     });
-    const group = await scope.call(track, "getGroupReference", [occurrence.groupIndex + 1], {
-      inferredType: "NoteGroupReference",
-    });
-    if (await scope.call(group, "isInstrumental")) {
-      throw codedError("INVALID_TARGET", "instrumental occurrences cannot be edited as note groups");
-    }
-    const target = await scope.call(group, "getTarget", [], { inferredType: "NoteGroup" });
-    const currentGroupUuid = await scope.call(target, "getUUID");
-    if (currentGroupUuid !== occurrence.targetGroupUuid) {
-      throw codedError("STALE_CONTEXT", "the target note group changed after snapshot capture");
-    }
-    const targetNoteCount = await scope.call(target, "getNumNotes");
     const notes = [];
     const fingerprints = [];
     const positionByNoteId = new Map();
-    for (const expected of occurrence.noteFingerprints ?? []) {
-      if (!Number.isSafeInteger(expected.indexInGroup) || expected.indexInGroup >= targetNoteCount) {
-        throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
-      }
-      const note = await scope.call(target, "getNote", [expected.indexInGroup + 1], {
-        inferredType: "Note",
-      });
-      if (!note?.__handle__) {
-        throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
-      }
-      const observed = await readRangeFingerprint(scope, note);
-      if (verify && !isDeepStrictEqual(observed, pickRangeFingerprint(expected))) {
-        throw codedError(
-          "STALE_CONTEXT",
-          `note ${expected.noteId} changed after the snapshot was captured`
+    const contextPositionByNoteId = new Map();
+    const contextPositionByIndexInGroup = new Map();
+    const expectedFingerprints = selectRangeFingerprints(occurrence, {
+      noteIds,
+      noteIndicesInGroup,
+    });
+    const allContextPositions = new Map(
+      (occurrence.noteFingerprints ?? []).map((fingerprint, index) => [fingerprint.noteId, index])
+    );
+    await measureDiagnosticPhase(diagnostics, "fingerprintVerificationMs", async () => {
+      for (const expected of expectedFingerprints) {
+        if (!Number.isSafeInteger(expected.indexInGroup) || expected.indexInGroup >= targetNoteCount) {
+          throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
+        }
+        const note = await scope.call(target, "getNote", [expected.indexInGroup + 1], {
+          inferredType: "Note",
+        });
+        if (!note?.__handle__) {
+          throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
+        }
+        const observed = await readRangeFingerprint(scope, note);
+        if (verify && !isDeepStrictEqual(observed, pickRangeFingerprint(expected))) {
+          throw codedError(
+            "STALE_CONTEXT",
+            `note ${expected.noteId} changed after the snapshot was captured`
+          );
+        }
+        positionByNoteId.set(expected.noteId, notes.length);
+        contextPositionByNoteId.set(expected.noteId, allContextPositions.get(expected.noteId));
+        contextPositionByIndexInGroup.set(
+          expected.indexInGroup,
+          allContextPositions.get(expected.noteId)
         );
+        notes.push(note);
+        fingerprints.push(observed);
       }
-      positionByNoteId.set(expected.noteId, notes.length);
-      notes.push(note);
-      fingerprints.push(observed);
-    }
+    });
     return {
       scope,
       roots,
@@ -150,6 +199,8 @@ async function resolveRangeContextTarget(host, stored, { verify, occurrenceId })
       contextKind: "range",
       occurrence,
       positionByNoteId,
+      contextPositionByNoteId,
+      contextPositionByIndexInGroup,
       targetNoteCount,
     };
   } catch (error) {
@@ -160,6 +211,19 @@ async function resolveRangeContextTarget(host, stored, { verify, occurrenceId })
       `could not resolve snapshot target: ${error instanceof Error ? error.message : String(error)}`
     );
   }
+}
+
+function selectRangeFingerprints(occurrence, { noteIds, noteIndicesInGroup }) {
+  const all = occurrence.noteFingerprints ?? [];
+  const requestedIds = new Set((noteIds ?? []).filter((value) => typeof value === "string"));
+  const requestedIndices = new Set(
+    (noteIndicesInGroup ?? []).filter((value) => Number.isSafeInteger(value))
+  );
+  if (requestedIds.size === 0 && requestedIndices.size === 0) return all;
+  return all.filter(
+    (fingerprint) =>
+      requestedIds.has(fingerprint.noteId) || requestedIndices.has(fingerprint.indexInGroup)
+  );
 }
 
 // 从 noteId 集合推导 range occurrenceId。range noteId 形如 <contextId>:t:X:r:Y:n:Z，

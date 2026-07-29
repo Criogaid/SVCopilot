@@ -872,7 +872,7 @@ export const TOOLS = [
   {
     name: "sv_patch_notes",
     description:
-      'Patch fields of existing notes identified by snapshot noteIds. Accepts group/selection contexts from sv_snapshot (noteId form ctx_...:n:4) and range contexts from sv_snapshot_range (noteId form ctx_...:t:0:r:1:n:4; the occurrence is derived from the noteIds, or pass occurrenceId). For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
+      'Patch fields of existing notes identified by snapshot noteIds or a scoped noteIndexInGroup. The compact index form requires an occurrenceId when a range has multiple vocal occurrences and avoids repeating long context-prefixed ids. For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. diagnostics:true adds phase timings and aggregate host method counts without logging musical values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -902,6 +902,12 @@ export const TOOLS = [
               noteId: {
                 type: "string",
                 description: "Note id from the same snapshot context, e.g. ctx_...:n:4.",
+              },
+              noteIndexInGroup: {
+                type: "integer",
+                minimum: 0,
+                description:
+                  "0-based index within the resolved target NoteGroup. Provide occurrenceId when the range context has multiple vocal occurrences.",
               },
               expected: {
                 type: "object",
@@ -939,7 +945,8 @@ export const TOOLS = [
                 },
               },
             },
-            required: ["noteId", "set"],
+            required: ["set"],
+            oneOf: [{ required: ["noteId"] }, { required: ["noteIndexInGroup"] }],
           },
         },
         dryRun: {
@@ -952,6 +959,12 @@ export const TOOLS = [
           default: true,
           description:
             "On failure after writes began, restore journaled previous values in reverse order and verify the restoration (compensation, not a database transaction).",
+        },
+        diagnostics: {
+          type: "boolean",
+          default: false,
+          description:
+            "Add phase timings and aggregate host method counts. Does not log arguments or musical values and does not change write/Undo behavior.",
         },
         waitFor: { enum: ["none", "phonemes", "computedAttributes"] },
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },

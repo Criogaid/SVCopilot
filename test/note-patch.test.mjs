@@ -520,8 +520,8 @@ test("sv_patch_notes normalizes a typed empty attribute table before writing", a
 
 test("sv_patch_notes atomic mode rolls back when the read-back getter throws", async () => {
   const { model, service, snapshot } = await createFixture();
-  // 注入发生在快照之后：resolve 指纹 3 次 + 写前 current 读 1 次，第 5 次才是读回验证。
-  injectFailure(model, "getLyrics", { skip: 4, code: "UNKNOWN_HANDLE", message: "getter exploded" });
+  // 注入发生在快照之后：resolve 指纹 3 次，第 4 次才是写后读回验证。
+  injectFailure(model, "getLyrics", { skip: 3, code: "UNKNOWN_HANDLE", message: "getter exploded" });
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
@@ -778,7 +778,7 @@ test("sv_patch_notes range context rejects foreign and mixed noteIds", async () 
 
 test("sv_patch_notes range context detects stale fingerprints before writing", async () => {
   const { model, service, contextId, occurrenceId } = createRangeFixture();
-  model.notes[2].lyrics = "changed-behind-context";
+  model.notes[0].lyrics = "changed-behind-context";
   const result = await service.patchNotes({
     contextId,
     patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
@@ -787,6 +787,163 @@ test("sv_patch_notes range context detects stale fingerprints before writing", a
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "STALE_CONTEXT");
   assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_notes range preflight ignores unrelated note drift", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture();
+  model.notes[2].lyrics = "unrelated-change";
+  const result = await service.patchNotes({
+    contextId,
+    occurrenceId,
+    patches: [{ noteIndexInGroup: 0, expected: { lyrics: "a" }, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+  });
+
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.data.plannedChangedNotes, 1);
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_patch_notes accepts scoped note indices and keeps compact diffs free of repeated noteIds", async () => {
+  const { model, service, contextId, occurrenceId } = createRangeFixture();
+  const result = await service.patchNotes({
+    contextId,
+    occurrenceId,
+    patches: [{ noteIndexInGroup: 1, expected: { lyrics: "i" }, set: { lyrics: "ne" } }],
+    dryRun: true,
+    waitFor: "none",
+  });
+
+  assert.equal(result.status, "dry_run");
+  assert.equal(model.notes[1].lyrics, "i");
+  assert.deepEqual(result.data.plannedDiff, [
+    {
+      position: 1,
+      indexInGroup: 1,
+      field: "lyrics",
+      from: "i",
+      to: "ne",
+    },
+  ]);
+  assert.equal("noteId" in result.data.plannedDiff[0], false);
+});
+
+test("sv_patch_notes requires exactly one note reference form per patch", async () => {
+  const { service, contextId, occurrenceId } = createRangeFixture();
+  await assert.rejects(
+    service.patchNotes({
+      contextId,
+      occurrenceId,
+      patches: [{ set: { lyrics: "x" } }],
+      dryRun: true,
+      waitFor: "none",
+    }),
+    { code: "INVALID_ARGUMENTS" }
+  );
+
+  await assert.rejects(
+    service.patchNotes({
+      contextId,
+      occurrenceId,
+      patches: [
+        {
+          noteId: `${occurrenceId}:n:0`,
+          noteIndexInGroup: 0,
+          set: { lyrics: "x" },
+        },
+      ],
+      dryRun: true,
+      waitFor: "none",
+    }),
+    { code: "INVALID_ARGUMENTS" }
+  );
+});
+
+test("sv_patch_notes diagnostics expose phases and method aggregates only when requested", async () => {
+  const plainFixture = createRangeFixture();
+  const plain = await plainFixture.service.patchNotes({
+    contextId: plainFixture.contextId,
+    occurrenceId: plainFixture.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+  });
+  assert.equal("diagnostics" in plain, false);
+
+  const diagnosticFixture = createRangeFixture();
+  const diagnosed = await diagnosticFixture.service.patchNotes({
+    contextId: diagnosticFixture.contextId,
+    occurrenceId: diagnosticFixture.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+    diagnostics: true,
+  });
+
+  assert.equal(diagnosed.status, "dry_run");
+  assert.equal(diagnosed.diagnostics.timings.dispatcherQueueMs, null);
+  assert.equal(typeof diagnosed.diagnostics.timings.targetResolutionMs, "number");
+  assert.equal(typeof diagnosed.diagnostics.timings.fingerprintVerificationMs, "number");
+  assert.equal(diagnosed.diagnostics.hostCalls.byMethod.getNote.count, 1);
+  assert.equal(diagnosed.diagnostics.hostCalls.byMethod.getLyrics.count, 1);
+  assert.ok(diagnosed.diagnostics.hostCalls.total > 0);
+  assert.deepEqual(Object.keys(diagnosed.diagnostics.hostCalls.byMethod.getLyrics).sort(), [
+    "count",
+    "failed",
+    "totalMs",
+  ]);
+});
+
+test("sv_patch_notes reuses verified fingerprints for expected checks", async () => {
+  const fixture = createRangeFixture();
+  const result = await fixture.service.patchNotes({
+    contextId: fixture.contextId,
+    occurrenceId: fixture.occurrenceId,
+    patches: [
+      {
+        noteIndexInGroup: 0,
+        expected: { lyrics: "wrong" },
+        set: { lyrics: "x" },
+      },
+    ],
+    dryRun: true,
+    waitFor: "none",
+    diagnostics: true,
+  });
+
+  assert.equal(result.error.code, "EXPECTED_MISMATCH");
+  assert.equal(result.diagnostics.hostCalls.byMethod.getLyrics.count, 1);
+});
+
+test("sv_patch_notes still reads attributes outside the verified fingerprint", async () => {
+  const fixture = createRangeFixture();
+  const result = await fixture.service.patchNotes({
+    contextId: fixture.contextId,
+    occurrenceId: fixture.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { attributes: { muted: true } } }],
+    dryRun: true,
+    waitFor: "none",
+    diagnostics: true,
+  });
+
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.diagnostics.hostCalls.byMethod.getAttributes.count, 1);
+});
+
+test("sv_patch_notes keeps post-write read-back after fingerprint reuse", async () => {
+  const fixture = createRangeFixture();
+  const result = await fixture.service.patchNotes({
+    contextId: fixture.contextId,
+    occurrenceId: fixture.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    waitFor: "none",
+    diagnostics: true,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.verification.passed, true);
+  assert.equal(result.diagnostics.hostCalls.byMethod.getLyrics.count, 2);
 });
 
 test("sv_patch_notes keeps verified success when post-commit processing observation fails", async () => {

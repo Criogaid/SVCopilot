@@ -100,6 +100,34 @@ function assertValid(validate, payload, label) {
   );
 }
 
+test("served sv_patch_notes schema exposes diagnostics and scoped note references", async () => {
+  const schemas = await fetchServedSchemas(["sv_patch_notes", "sv_compare_computed_pitch"]);
+  const patchSchema = schemas.sv_patch_notes;
+  assert.deepEqual(patchSchema.properties.diagnostics, {
+    type: "boolean",
+    default: false,
+    description:
+      "Add phase timings and aggregate host method counts. Does not log arguments or musical values and does not change write/Undo behavior.",
+  });
+  assert.equal(
+    Object.hasOwn(schemas.sv_compare_computed_pitch.properties, "diagnostics"),
+    false
+  );
+
+  const validate = compile(patchSchema);
+  assert.equal(
+    validate({
+      contextId: "ctx_test",
+      occurrenceId: "ctx_test:t:0:r:0",
+      patches: [{ noteIndexInGroup: 0, set: { lyrics: "test" } }],
+      dryRun: true,
+      diagnostics: true,
+    }),
+    true,
+    JSON.stringify(validate.errors)
+  );
+});
+
 test("planner outputs validate against the schemas the real server serves", async () => {
   const schemas = await fetchServedSchemas(["sv_patch_parameter_curves", "sv_patch_notes"]);
   const validateCurves = compile(schemas.sv_patch_parameter_curves);
