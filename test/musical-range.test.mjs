@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ArtifactStore } from "../server/src/artifact-store.js";
 import { ComputedPitchCompareService } from "../server/src/computed-pitch-compare.js";
+import { decodeDense } from "../server/src/dense-codec.js";
 import { RangeSnapshotService, getStoredComputedPitch } from "../server/src/musical-range.js";
 import { StyleProfileService } from "../server/src/style-profile.js";
 import { blickToMusical, musicalToBlick, normalizeMusicalPoint } from "../server/src/musical-time.js";
@@ -185,6 +187,43 @@ function createService(model, options = {}) {
     { now: () => 1000, ...options }
   );
 }
+
+test("range detail seals a self-contained hash-bound artifact with dense Automation points", async () => {
+  const model = createRangeModel();
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const service = createService(model, { artifactStore, sessionId: "sess_range" });
+  const result = await service.snapshot({
+    scope: { kind: "range", from: { bar: 1 }, to: { bar: 20 } },
+    include: ["notes", "tempoMap", "meterMap", "automation"],
+    automationParameters: ["tension"],
+  });
+
+  assert.ok(result.artifactRef, JSON.stringify(result.warnings));
+  assert.match(result.artifactRef.resourceUri, /svcopilot:\/\/artifacts\/a_.+\/sha256_/);
+  assert.equal(result.page.detailCursor === result.artifactRef, false);
+  assert.equal(result.warnings.some((warning) => warning.code === "ARTIFACT_SEAL_FAILED"), false);
+  const artifact = artifactStore.resolve({
+    artifactId: result.artifactRef.artifactId,
+    expectedContentHash: result.artifactRef.contentHash,
+    sessionId: "sess_range",
+  });
+  const densePoints = artifact.payload.data.automation[0].points;
+  assert.equal(densePoints.encoding, "dense-table-v1");
+  const decoded = decodeDense(densePoints);
+  assert.equal(decoded.length, 2);
+  assert.deepEqual(
+    decoded.map((point) => point.localBlick),
+    [0, Q]
+  );
+  const denseNotes = artifact.payload.data.notes;
+  assert.equal(artifact.payload.data.noteEncoding, "dense-table-v1");
+  assert.equal(denseNotes.encoding, "dense-table-v1");
+  const decodedNotes = decodeDense(denseNotes);
+  assert.equal(decodedNotes.length, result.data.notes.length);
+  assert.equal(decodedNotes[0].lyrics, result.data.notes[0].lyrics);
+  assert.equal(decodedNotes[0]["musical.bar"], result.data.notes[0].musical.bar);
+  assert.equal(decodedNotes[0].restBeforeBlick, result.data.notes[0].restBeforeBlick);
+});
 
 test("range snapshot converts 1-based bar/beat to blick and back across meter changes", async () => {
   const model = createRangeModel();

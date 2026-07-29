@@ -13,6 +13,7 @@ import {
   pitchEquals,
 } from "./pitch-control.js";
 import { waitForProcessing } from "./processing.js";
+import { resolvePlanReference } from "./plan-reference.js";
 import { ServiceTiming } from "./service-timing.js";
 import { createHostScope } from "./snapshot.js";
 
@@ -40,11 +41,17 @@ const MAX_OPERATIONS = PITCH_CONTROL_LIMITS.operationsPerRequest;
 const MAX_CURVE_POINTS = PITCH_CONTROL_LIMITS.curvePointsPerControl;
 
 export class PitchControlPatchService {
-  constructor(session, snapshotService, { sleepFn, now = () => Date.now(), idGenerator } = {}) {
+  constructor(
+    session,
+    snapshotService,
+    { sleepFn, now = () => Date.now(), idGenerator, artifactStore = null, sessionId = null } = {}
+  ) {
     this.session = session;
     this.snapshotService = snapshotService;
     this.sleep = sleepFn;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
     // 自建对象的持久 controlId 生成器；测试注入确定性值，线上用随机 UUID。
     this.newControlId =
       idGenerator ?? (() => `pc_${globalThis.crypto?.randomUUID?.() ?? `${this.now()}_${Math.random()}`}`);
@@ -52,11 +59,26 @@ export class PitchControlPatchService {
 
   async patch(request) {
     const serviceStartedAt = this.now();
+    let resolvedRequest = request;
+    // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
+    if (request?.planRef && this.artifactStore && this.sessionId) {
+      const resolved = resolvePlanReference({
+        planRef: request.planRef,
+        action: request.action,
+        confirmations: request.confirmations,
+        executionOptions: request.executionOptions,
+        expectedTargetTool: "sv_patch_pitch_controls",
+        sessionId: this.sessionId,
+        artifactStore: this.artifactStore,
+        snapshotStore: this.snapshotService.store,
+      });
+      resolvedRequest = resolved.mutationRequest;
+    }
     let input;
     try {
-      input = normalizeRequest(request);
+      input = normalizeRequest(resolvedRequest);
     } catch (error) {
-      return formatValidationFailure(request, error, { elapsedMs: elapsed(serviceStartedAt, this.now()) });
+      return formatValidationFailure(resolvedRequest, error, { elapsedMs: elapsed(serviceStartedAt, this.now()) });
     }
     const coordinatorRequestedAt = this.now();
     return this.session.withExclusive(async (host) => {

@@ -90,8 +90,27 @@ const MELODY = [
 ];
 
 function analyzer(store) {
-  return new VocalContextAnalysisService({ store, now: () => 2000 });
+  const service = new VocalContextAnalysisService({ store, now: () => 2000 });
+  // 既有 section 断言走 standard；compact 专项测试显式请求 compact。
+  return {
+    style: service.style,
+    analyze: (request) => service.analyze({ responseMode: "standard", ...request }),
+  };
 }
+
+test("compact projection omits item lists while preserving decisions and detail pointers", async () => {
+  const store = createStore();
+  const { stored } = createContext(store, { notes: MELODY });
+  const result = await analyzer(store).analyze({
+    contextId: stored.contextId,
+    responseMode: "compact",
+  });
+  assert.equal(result.sections, undefined);
+  assert.equal(result.sectionIndex.style.status, "succeeded");
+  assert.ok(result.sectionIndex.style.summary);
+  assert.ok(Array.isArray(result.topFindings));
+  assert.ok(Array.isArray(result.nextSteps));
+});
 
 test("one call returns every requested section from a single range context", async () => {
   const store = createStore();

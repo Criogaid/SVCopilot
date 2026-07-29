@@ -699,6 +699,10 @@ test("compact responses keep summary, alignment, and patchRequest only", async (
   assert.equal(result.tokens, undefined);
   assert.equal(result.perNote, undefined);
   assert.ok(result.summary);
+  assert.equal(result.alignment.unassignedUnits, undefined);
+  assert.equal(result.alignment.unfilledNotes, undefined);
+  assert.equal(result.alignment.unassignedCount, 0);
+  assert.equal(result.alignment.unfilledCount, 0);
   assert.ok(result.patchRequest.arguments.patches.length === 2);
   assert.match(result.planId, /^lyr_[0-9a-f]{16}$/);
 });

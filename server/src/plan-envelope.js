@@ -13,8 +13,7 @@
 // - expectedUserUndoSteps 是"用户需要按几次撤销"的诚实计数：expression 的非相邻表现手法簇
 //   会拆成 K 次调用即 K 条 Undo 记录，不能谎报为 1。
 //
-// 兼容：本版同时保留各规划器原有的 applyRequests/patchRequest/restructureRequest 字段
-// （内容与 apply 完全一致），标注 deprecated，下一个接口版本移除。
+// 大型计划优先通过 planRef 交接，避免在响应里重复内联 mutation 请求。
 
 export const PLAN_ATOMICITY = "verified_compensation";
 
@@ -28,7 +27,7 @@ function preconditionsFor(calls) {
       kind: "context_valid",
       contextId: args.contextId,
       detail:
-        "The snapshot context must still exist and match the live host; a note/structure/lyric write or TTL expiry invalidates it (STALE_CONTEXT / UNKNOWN_CONTEXT → re-snapshot and re-plan).",
+        "Inline apply needs a live snapshot context. A sealed planRef may restore its bounded context capsule while the artifact lease remains valid; both paths still resolve the live target and reject target drift before writing.",
     });
   }
   if (args.target?.contextId) {
@@ -36,7 +35,7 @@ function preconditionsFor(calls) {
       kind: "context_valid",
       contextId: args.target.contextId,
       detail:
-        "The snapshot context must still exist and match the live host (STALE_CONTEXT → re-snapshot and re-plan).",
+        "Inline apply needs a live snapshot context. A sealed planRef may restore its bounded context capsule while the artifact lease remains valid; both paths still resolve the live target and reject target drift before writing.",
     });
   }
   if (Array.isArray(args.patches) && args.patches.some((patch) => patch.expected)) {

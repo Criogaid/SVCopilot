@@ -1,0 +1,152 @@
+{
+  "fixtureVersion": "1",
+  "generatedAt": "2026-07-29T06:47:55.373Z",
+  "summary": {
+    "listToolsMinifiedBytes": 130052,
+    "listToolsPrettyBytes": 257526,
+    "representativeResultMinifiedBytes": 20054,
+    "representativeResultPrettyBytes": 36436
+  },
+  "listTools": {
+    "label": "ListTools",
+    "prettyBytes": 257526,
+    "minifiedBytes": 130052,
+    "overheadPercent": 98.02,
+    "toolCount": 41,
+    "descriptionBytes": 30889,
+    "schemaBytes": 92788,
+    "largestTools": [
+      {
+        "name": "sv_patch_parameter_curves",
+        "totalBytes": 11912,
+        "inputBytes": 10574,
+        "outputBytes": 45,
+        "descriptionBytes": 1126
+      },
+      {
+        "name": "sv_edit_phrase",
+        "totalBytes": 11585,
+        "inputBytes": 10469,
+        "outputBytes": 45,
+        "descriptionBytes": 915
+      },
+      {
+        "name": "sv_patch_parameter_curve",
+        "totalBytes": 9680,
+        "inputBytes": 8888,
+        "outputBytes": 45,
+        "descriptionBytes": 581
+      },
+      {
+        "name": "sv_patch_pitch_controls",
+        "totalBytes": 8342,
+        "inputBytes": 6919,
+        "outputBytes": 45,
+        "descriptionBytes": 1211
+      },
+      {
+        "name": "sv_get_parameter_curve",
+        "totalBytes": 6954,
+        "inputBytes": 5960,
+        "outputBytes": 45,
+        "descriptionBytes": 786
+      }
+    ]
+  },
+  "toolResult": {
+    "label": "representative-tool-result",
+    "prettyBytes": 36436,
+    "minifiedBytes": 20054,
+    "overheadPercent": 81.69
+  },
+  "fixtures": {
+    "notes-10": {
+      "fileName": "notes-10.json",
+      "hash": "03e64ffcde38b35ab72f62694a2d8edc",
+      "minifiedBytes": 2147,
+      "itemCount": 10
+    },
+    "notes-100": {
+      "fileName": "notes-100.json",
+      "hash": "d2989d02225e2bef1a086250c661f9b7",
+      "minifiedBytes": 20901,
+      "itemCount": 100
+    },
+    "notes-373": {
+      "fileName": "notes-373.json",
+      "hash": "714a44f6c994114506d079e86998d9ab",
+      "minifiedBytes": 78546,
+      "itemCount": 373
+    },
+    "notes-1000": {
+      "fileName": "notes-1000.json",
+      "hash": "647538426981b6bd93cc11a2d91e2ba4",
+      "minifiedBytes": 211129,
+      "itemCount": 1000
+    },
+    "automation-10": {
+      "fileName": "automation-10.json",
+      "hash": "506a508d1213f7eb02376a4473993f4b",
+      "minifiedBytes": 543,
+      "itemCount": 10
+    },
+    "automation-100": {
+      "fileName": "automation-100.json",
+      "hash": "ec7f01ee66b11cd6946507740c68d711",
+      "minifiedBytes": 4678,
+      "itemCount": 100
+    },
+    "automation-1000": {
+      "fileName": "automation-1000.json",
+      "hash": "1de626dc25bdd72492fb6d58f8812726",
+      "minifiedBytes": 46352,
+      "itemCount": 1000
+    },
+    "automation-2000": {
+      "fileName": "automation-2000.json",
+      "hash": "0f2e7d016081edb3d091256ecae4d297",
+      "minifiedBytes": 92653,
+      "itemCount": 2000
+    },
+    "computed-pitch-null": {
+      "fileName": "computed-pitch-null.json",
+      "hash": "92e1db36721309275b076ffc1d4c93ae",
+      "minifiedBytes": 954,
+      "itemCount": 160
+    },
+    "computed-pitch-sparse": {
+      "fileName": "computed-pitch-sparse.json",
+      "hash": "bdd18a1ed6aacda848b9fbee572d873f",
+      "minifiedBytes": 2012,
+      "itemCount": 160
+    },
+    "computed-pitch-160": {
+      "fileName": "computed-pitch-160.json",
+      "hash": "1fbda2a0f48b90e0c8e9fd85bbb3c2ac",
+      "minifiedBytes": 3061,
+      "itemCount": 160
+    },
+    "computed-pitch-1000": {
+      "fileName": "computed-pitch-1000.json",
+      "hash": "b60b2034bec8a97c139a9497f0c229eb",
+      "minifiedBytes": 18377,
+      "itemCount": 1000
+    }
+  },
+  "tokenizer": {
+    "status": "unavailable",
+    "name": null,
+    "version": null,
+    "tokens": null,
+    "reason": "No tokenizer dependency is bundled; byte metrics remain deterministic."
+  },
+  "execution": {
+    "mcpCalls": 0,
+    "hostCalls": 0,
+    "undoRecords": 0,
+    "coordinatorQueueMs": null,
+    "bridgeRoundTrips": 0,
+    "totalTimeMs": null,
+    "scope": "static_serialization_only"
+  }
+}

@@ -6,21 +6,41 @@ import {
   resolveContextTarget,
 } from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
+import { resolvePlanReference } from "./plan-reference.js";
 
 // 结构操作按调用方顺序逐个执行；每步都在执行时读取活动 index，避免删除导致的漂移。
 // MAX_OPERATIONS 导出供 harmony 规划器对齐单次可提交批量上限。
 export const MAX_OPERATIONS = 64;
 
 export class NoteStructureService {
-  constructor(session, snapshotService, { sleepFn, now = () => Date.now() } = {}) {
+  constructor(
+    session,
+    snapshotService,
+    { sleepFn, now = () => Date.now(), artifactStore = null, sessionId = null } = {}
+  ) {
     this.session = session;
     this.snapshotService = snapshotService;
     this.sleep = sleepFn;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
   }
 
   async restructureNotes(request) {
-    const input = normalizeRequest(request);
+    let resolvedRequest = request;
+    if (request?.planRef && this.artifactStore && this.sessionId) {
+      resolvedRequest = resolvePlanReference({
+        planRef: request.planRef,
+        action: request.action,
+        confirmations: request.confirmations,
+        executionOptions: request.executionOptions,
+        expectedTargetTool: "sv_restructure_notes",
+        sessionId: this.sessionId,
+        artifactStore: this.artifactStore,
+        snapshotStore: this.snapshotService.store,
+      }).mutationRequest;
+    }
+    const input = normalizeRequest(resolvedRequest);
     return this.session.withExclusive(async (host) => {
       let resolved;
       let boundaryCalls = 0;

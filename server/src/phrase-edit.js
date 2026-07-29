@@ -10,6 +10,7 @@ import {
 } from "./parameter-curve.js";
 import { waitForProcessing } from "./processing.js";
 import { ServiceTiming } from "./service-timing.js";
+import { runChunkedMutation } from "./chunked-mutation.js";
 import { createHostScope } from "./snapshot.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 
@@ -138,47 +139,171 @@ export class PhraseEditService {
         await timer.measure("hostWriteMs", async () => {
           await capture.call(resolved.roots.project, "newUndoRecord", []);
           boundaryCalls += 1;
-          for (const plan of prepared.liveCurvePlans) {
-            mutationState.touchedCurves.push(plan);
-            await applyCurvePlan(capture, plan);
-          }
-          if (input.notePatches.length > 0 || input.structureOperations.length > 0) {
-            mutationState.notesTouched = true;
-            // onset 写入可能立即重排组内 index；所有 noteId 必须先绑定到稳定 handle。
-            const liveNotes = await resolveOccurrenceNotes(
-              capture,
-              resolved.originalTarget,
-              resolved.occurrence
-            );
-            await applyNotePatches(
-              capture,
-              liveNotes,
-              input.notePatches
-            );
-            await applyStructureOperations(
-              capture,
-              resolved.roots,
-              resolved.originalTarget,
-              input.structureOperations,
-              liveNotes
-            );
-          }
-          if (prepared.voice.changed) {
-            mutationState.voiceWritten = true;
-            await capture.call(resolved.reference, "setVoice", [prepared.voice.planned]);
-          }
         });
 
-        const verification = await timer.measure("verificationMs", () =>
-          verifyCommittedPhrase(capture, resolved, prepared)
-        );
-        if (!verification.passed) {
-          const error = codedError(
-            "POSTCONDITION_FAILED",
-            "the committed phrase did not match the verified detached plan"
+        const chunks = [
+          ...prepared.liveCurvePlans.map((plan) => ({ kind: "curve", plan })),
+          ...(input.notePatches.length > 0 || input.structureOperations.length > 0
+            ? [{ kind: "notes" }]
+            : []),
+          ...(prepared.voice.changed ? [{ kind: "voice" }] : []),
+        ];
+        const rollbackSteps = [];
+        let verification = null;
+        let notesRolledBack = false;
+        const chunkResult = await runChunkedMutation({
+          // detached/live preflight 已在 Undo 之前建立曲线、音符和 voice 的完整 journal。
+          prepareJournal: async () => ({
+            curves: prepared.liveCurvePlans.map((plan) => plan.journal),
+            notes: prepared.backupNotes,
+            voice: resolved.originalVoice,
+          }),
+          chunks,
+          applyChunk: async (chunk) => {
+            try {
+              if (chunk.kind === "curve") {
+                mutationState.touchedCurves.push(chunk.plan);
+                await timer.measure("hostWriteMs", () => applyCurvePlan(capture, chunk.plan));
+              } else if (chunk.kind === "notes") {
+                mutationState.notesTouched = true;
+                // onset 写入可能立即重排组内 index；所有 noteId 必须先绑定到稳定 handle。
+                const liveNotes = await resolveOccurrenceNotes(
+                  capture,
+                  resolved.originalTarget,
+                  resolved.occurrence
+                );
+                await timer.measure("hostWriteMs", async () => {
+                  await applyNotePatches(capture, liveNotes, input.notePatches);
+                  await applyStructureOperations(
+                    capture,
+                    resolved.roots,
+                    resolved.originalTarget,
+                    input.structureOperations,
+                    liveNotes
+                  );
+                });
+              } else {
+                mutationState.voiceWritten = true;
+                await timer.measure("hostWriteMs", () =>
+                  capture.call(resolved.reference, "setVoice", [prepared.voice.planned])
+                );
+              }
+              return { ok: true };
+            } catch (error) {
+              if (isUnknownOutcomeError(error)) throw error;
+              return { ok: false, error };
+            }
+          },
+          verifyAll: async () => {
+            verification = await timer.measure("verificationMs", () =>
+              verifyCommittedPhrase(capture, resolved, prepared)
+            );
+            if (verification.passed) return { ok: true };
+            const error = codedError(
+              "POSTCONDITION_FAILED",
+              "the committed phrase did not match the verified detached plan"
+            );
+            error.verification = verification;
+            return { ok: false, error };
+          },
+          rollbackChunk: async (chunk) => {
+            if (chunk.kind === "voice") {
+              await timer.measure("rollbackMs", () =>
+                capture.call(resolved.reference, "setVoice", [resolved.originalVoice])
+              );
+              const observed = normalizeVoiceParameters(
+                await capture.call(resolved.reference, "getVoice", [], {
+                  resultFormat: "typed-v2",
+                })
+              );
+              const verified = voiceValueEqual(observed, resolved.originalVoice);
+              rollbackSteps.push({ kind: "voice", verified });
+              return { ok: verified };
+            }
+            if (chunk.kind === "notes") {
+              if (notesRolledBack) return { ok: true };
+              notesRolledBack = true;
+              await timer.measure("rollbackMs", () =>
+                restoreGroupNotes(capture, resolved.originalTarget, prepared.backup)
+              );
+              const observed = await readGroupNoteStates(capture, resolved.originalTarget);
+              const verified = jsonEqual(observed, prepared.backupNotes);
+              rollbackSteps.push({
+                kind: "notes",
+                verified,
+                expectedNoteCount: prepared.backupNotes.length,
+                observedNoteCount: observed.length,
+              });
+              return { ok: verified };
+            }
+            const rollback = await timer.measure("rollbackMs", () =>
+              rollbackCurve(
+                capture,
+                chunk.plan.automation,
+                chunk.plan.range,
+                chunk.plan.journal,
+                chunk.plan.definition
+              )
+            );
+            rollbackSteps.push({
+              kind: `curve:${chunk.plan.typeName}`,
+              verified: rollback.verified,
+              ...(rollback.error ? { error: rollback.error } : {}),
+            });
+            return {
+              ok: rollback.verified,
+              ...(rollback.error ? { error: rollback.error } : {}),
+            };
+          },
+          verifyRollback: async () => {
+            const observedTarget = await capture.call(resolved.reference, "getTarget", [], {
+              inferredType: "NoteGroup",
+            });
+            const observedTargetUuid = await capture.call(observedTarget, "getUUID");
+            const targetStep = {
+              kind: "target",
+              verified: observedTargetUuid === resolved.originalTargetUuid,
+              observedTargetUuid,
+            };
+            rollbackSteps.push(targetStep);
+            return {
+              ok: rollbackSteps.every((step) => step.verified),
+              evidence: { steps: rollbackSteps },
+            };
+          },
+          shouldRollback: (error) => input.atomic && !isUnknownOutcomeError(error),
+          classifyUnknownOutcome: (error) =>
+            isUnknownOutcomeError(error) ? "outcome_unknown" : "partial",
+        });
+
+        if (!chunkResult.ok) {
+          this.snapshotService.store.delete(input.target.contextId);
+          await tryCloseBoundary(capture, resolved.roots.project, warnings, () => {
+            boundaryCalls += 1;
+          });
+          const failure = Object.assign(
+            codedError(chunkResult.error.code, chunkResult.error.message),
+            chunkResult.error
           );
-          error.verification = verification;
-          throw error;
+          return phraseFailure({
+            atomicity: phraseAtomicity(input),
+            error: failure,
+            status: chunkResult.status,
+            effects: chunkResult.status === "rolled_back" ? "reverted" : chunkResult.effects,
+            boundaryCalls,
+            rollback: {
+              attempted: chunkResult.rollback.attempted,
+              verified: chunkResult.rollback.verified,
+              outcomeUnknown: chunkResult.status === "outcome_unknown",
+              evidence: { steps: rollbackSteps },
+              ...(chunkResult.rollback.failures.length > 0
+                ? { failures: chunkResult.rollback.failures }
+                : {}),
+            },
+            prepared,
+            warnings,
+            timings: timer.finish(),
+          });
         }
 
         await timer.measure("hostWriteMs", async () => {

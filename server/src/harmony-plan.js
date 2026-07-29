@@ -1,4 +1,6 @@
-import { createHash } from "node:crypto";
+import { canonicalHashHex } from "./canonical-json.js";
+import { artifactReference } from "./artifact-store.js";
+import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { MAX_OPERATIONS } from "./note-structure.js";
 import { analyzeKey } from "./phrase-analysis.js";
@@ -10,7 +12,7 @@ import { isBreathEventLyrics } from "./vocal-event-semantics.js";
 //
 // 关键契约：
 // - 纯内存只读：只读取 range context 的音符指纹，不进 ExecutionCoordinator、绝不写宿主。
-//   真正落地由调用方把 restructureRequest 交给现有 sv_restructure_notes（Undo/读回/补偿
+//   真正落地由调用方把 apply 交给现有 sv_restructure_notes（Undo/读回/补偿
 //   全部复用）。目标 occurrence 由调用方先准备（sv_clone_track_from_template 或手动建组
 //   后重拍快照，使源与目标在同一 range context 内）——本工具不创建轨道或 NoteGroup。
 // - 调内映射是启发式不是编曲：三度/六度 = 自然音阶级 ±2/±5；调外源音按最近调内音的
@@ -81,10 +83,12 @@ const PROVENANCE = Object.freeze({
 });
 
 export class HarmonyPlanService {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
     if (!store) throw new Error("HarmonyPlanService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
     this.continuationIdentities = new Map();
   }
 
@@ -101,7 +105,10 @@ export class HarmonyPlanService {
     const planned = await timer.measure("mapMs", async () =>
       mapHarmony(loaded, input, warnings)
     );
-    const response = buildHarmonyResponse(loaded, input, planned, warnings, timer.finish());
+    const response = buildHarmonyResponse(loaded, input, planned, warnings, timer.finish(), {
+      artifactStore: this.artifactStore,
+      sessionId: this.sessionId,
+    });
     if (response.continuation) {
       rememberContinuationIdentities(this.continuationIdentities, loaded, input, this.now());
     }
@@ -512,7 +519,14 @@ function mapHarmony(loaded, input, warnings) {
 
 // ---------- 响应组装 ----------
 
-function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
+function buildHarmonyResponse(
+  loaded,
+  input,
+  planned,
+  warnings,
+  timings,
+  { artifactStore, sessionId } = {}
+) {
   const insertable = planned.items.filter((item) => item.status === "planned");
   const operations = insertable
     .sort((left, right) => left.localOnsetBlick - right.localOnsetBlick)
@@ -547,7 +561,7 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
           operationCapPerCall: MAX_OPERATIONS,
           remainingCount,
           workflow: [
-            "Commit the returned restructureRequest (dryRun first, then dryRun:false).",
+            "Submit apply.arguments with action dry_run, then commit.",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
             "Re-run sv_generate_harmony with the same harmony/register/lyricsMode options against the fresh contextId: already-inserted harmony notes match exactly and are skipped as already_applied, so the next round plans the remaining inserts. Explicit occurrence selectors are re-anchored only while their short-lived continuation identities prove the same target group UUIDs (warned as STALE_SELECTOR_REANCHORED).",
             "Repeat until the response carries no continuation (or reports status no_change).",
@@ -557,24 +571,19 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
   if (continuation) {
     warnings.push({
       code: "PLAN_EXCEEDS_OPERATION_CAP",
-      message: `${operations.length} inserts exceed the ${MAX_OPERATIONS}-operation per-call cap; restructureRequest carries the first ${submittable.length} and ${remainingCount} remain. Follow continuation.workflow: commit, re-snapshot, re-plan with identical options. Each round is its own transaction and Undo record.`,
+      message: `${operations.length} inserts exceed the ${MAX_OPERATIONS}-operation per-call cap; apply carries the first ${submittable.length} and ${remainingCount} remain. Follow continuation.workflow: commit, re-snapshot, re-plan with identical options. Each round is its own transaction and Undo record.`,
     });
   }
   const sharedTargetOccurrences = loaded.target.sharedTargetOccurrences ?? [];
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
-  const planId = `hrm_${createHash("sha256")
-    .update(
-      stableStringify({
-        sourceOccurrenceId: loaded.source.occurrenceId,
-        targetOccurrenceId: loaded.target.occurrenceId,
-        harmony: input.harmony,
-        register: input.register,
-        lyricsMode: input.lyricsMode,
-        operations,
-      })
-    )
-    .digest("hex")
-    .slice(0, 16)}`;
+  const planId = `hrm_${canonicalHashHex({
+    sourceOccurrenceId: loaded.source.occurrenceId,
+    targetOccurrenceId: loaded.target.occurrenceId,
+    harmony: input.harmony,
+    ...(input.register !== undefined ? { register: input.register } : {}),
+    lyricsMode: input.lyricsMode,
+    operations,
+  }).slice(0, 16)}`;
   const counts = {
     sourceNotes: loaded.melodicNotes.length,
     skippedBreaths: loaded.skippedBreathCount,
@@ -595,7 +604,7 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
   }
   const checklist = [
     "Review perNote harmony pitches; diatonic mapping is a heuristic, not an arrangement — audition the result (human_only).",
-    "Apply through the returned restructureRequest (sv_restructure_notes) with dryRun:true first, then commit.",
+    "Apply through the returned apply envelope with action dry_run first, then commit.",
   ];
   if (counts.needsReview > 0) {
     checklist.push(
@@ -617,6 +626,41 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
       `${remainingCount} insert(s) do not fit this call (${MAX_OPERATIONS}-operation cap): after committing, re-snapshot the same range and re-run sv_generate_harmony with identical options — the loop converges to no_change.`
     );
   }
+  let planRef = null;
+  if (input.usePlanRef && artifactStore && sessionId && restructureRequest) {
+    try {
+      const { payload } = buildPlanArtifact({
+        targetTool: "sv_restructure_notes",
+        mutationRequest: restructureRequest.arguments,
+        targetGroupUuid: loaded.target.targetGroupUuid,
+        occurrenceId: loaded.target.occurrenceId,
+        contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.target, {
+          noteIds: [],
+        }),
+      });
+      planRef = artifactReference(
+        artifactStore.seal({
+          kind: "plan",
+          schemaVersion: "1",
+          sessionId,
+          sourceEpoch: loaded.stored.epoch,
+          payload,
+        })
+      );
+    } catch (error) {
+      warnings.push({
+        code: "ARTIFACT_SEAL_FAILED",
+        message: `Failed to seal harmony plan artifact: ${error.message}`,
+      });
+    }
+  }
+  const apply = buildApplyEnvelope(restructureRequest ? [restructureRequest] : null, {
+    sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+  });
+  if (planRef && apply?.arguments) {
+    apply.arguments = { planRef, action: "dry_run" };
+  }
+
   return {
     ok: true,
     status: restructureRequest ? "planned" : "no_change",
@@ -677,11 +721,8 @@ function buildHarmonyResponse(loaded, input, planned, warnings, timings) {
           perNoteTruncated: planned.items.length > cap,
           conflicts: planned.conflicts.slice(0, cap),
         }),
-    apply: buildApplyEnvelope(restructureRequest ? [restructureRequest] : null, {
-      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
-    }),
-    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
-    restructureRequest,
+    apply,
+    ...(!planRef ? { restructureRequest } : {}),
     ...(continuation ? { continuation } : {}),
     review: {
       requiresHumanAudition: true,
@@ -709,6 +750,7 @@ function normalizeHarmonyRequest(request) {
       "lyricsMode",
       "noteIds",
       "responseMode",
+      "usePlanRef",
     ],
     "request"
   );
@@ -808,6 +850,7 @@ function normalizeHarmonyRequest(request) {
     lyricsMode,
     noteIds: request.noteIds,
     responseMode,
+    usePlanRef: request.usePlanRef !== false,
   };
 }
 
@@ -866,17 +909,6 @@ function intervalSteps(spec, scaleLength) {
 
 function appendOnce(warnings, warning) {
   if (!warnings.some((item) => item.code === warning.code)) warnings.push(warning);
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 function assertKnownKeys(value, allowed, label) {

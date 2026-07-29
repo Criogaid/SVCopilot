@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // MCP 入口只负责工具与资源路由；宿主会话、工作流、快照和处理等待各自封装。
 
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import Ajv from "ajv";
@@ -60,6 +63,17 @@ import { StyleProfileService } from "./style-profile.js";
 import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
 import { VoiceProfileService } from "./voice-profile.js";
 import { WorkflowExecutor } from "./workflow.js";
+import { encodeToolError, encodeToolResult } from "./mcp-result-encoder.js";
+import {
+  ArtifactStore,
+  DEFAULT_ARTIFACT_PAGE_BYTES,
+  MAX_ARTIFACT_DIRECT_READ_BYTES,
+  MAX_ARTIFACT_PAGE_BYTES,
+  MIN_ARTIFACT_PAGE_BYTES,
+  artifactReference,
+  artifactResourceView,
+} from "./artifact-store.js";
+import { filterToolsByProfile, isToolEnabled } from "./tool-profile.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处。
@@ -67,15 +81,39 @@ const INTERFACE_VERSION = "0.9.0";
 
 const bridge = new PipeRelay();
 const hostSession = new HostSession(bridge);
+// ArtifactStore 与 SnapshotStore 分离：artifact 是只读数据，可跨 context 过期后继续读取。
+// 使用进程级 session id 让同一 server 实例内的 tool/resource 共享 artifact。
+const serverSessionId = `sess_${randomUUID()}`;
+
+// 工具 profile 在进程启动时确定；默认 full 保持兼容。
+const toolProfileName = process.env.SV_COPILOT_TOOL_PROFILE ?? "full";
 const snapshotService = new SnapshotService(hostSession);
 const workflowExecutor = new WorkflowExecutor(hostSession);
+const artifactStore = new ArtifactStore();
 const processingService = new ProcessingService(hostSession, snapshotService);
 const lyricsService = new LyricsService(hostSession, snapshotService);
-const notePatchService = new NotePatchService(hostSession, snapshotService);
-const rangeSnapshotService = new RangeSnapshotService(hostSession, { snapshotService });
-const parameterCurveService = new ParameterCurveService(hostSession, { snapshotService });
-const noteStructureService = new NoteStructureService(hostSession, snapshotService);
-const pitchControlPatchService = new PitchControlPatchService(hostSession, snapshotService);
+const notePatchService = new NotePatchService(hostSession, snapshotService, {
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const rangeSnapshotService = new RangeSnapshotService(hostSession, {
+  snapshotService,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const parameterCurveService = new ParameterCurveService(hostSession, {
+  snapshotService,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const noteStructureService = new NoteStructureService(hostSession, snapshotService, {
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const pitchControlPatchService = new PitchControlPatchService(hostSession, snapshotService, {
+  artifactStore,
+  sessionId: serverSessionId,
+});
 const bakeComputedPitchService = new BakeComputedPitchService(
   hostSession,
   snapshotService,
@@ -89,15 +127,39 @@ const phraseEditService = new PhraseEditService(hostSession, snapshotService);
 const computedPitchCompareService = new ComputedPitchCompareService({
   store: snapshotService.store,
 });
-const expressionPlanService = new ExpressionPlanService({ store: snapshotService.store });
-const lyricAlignService = new LyricAlignService({ store: snapshotService.store });
+const expressionPlanService = new ExpressionPlanService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const lyricAlignService = new LyricAlignService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
 const phraseAnalysisService = new PhraseAnalysisService({ store: snapshotService.store });
 const styleProfileService = new StyleProfileService({ store: snapshotService.store });
 const lyricProsodyService = new LyricProsodyService({ store: snapshotService.store });
-const quantizePlanService = new QuantizePlanService({ store: snapshotService.store });
-const harmonyPlanService = new HarmonyPlanService({ store: snapshotService.store });
-const vocalContextService = new VocalContextAnalysisService({ store: snapshotService.store });
-const pitchGesturePlanService = new PitchGesturePlanService({ store: snapshotService.store });
+const quantizePlanService = new QuantizePlanService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const harmonyPlanService = new HarmonyPlanService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const vocalContextService = new VocalContextAnalysisService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const pitchGesturePlanService = new PitchGesturePlanService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
 const selectionService = new SelectionService(hostSession, { snapshotService });
 
 const HANDLE_SCHEMA = {
@@ -387,8 +449,106 @@ const CURVE_RANGE_SCHEMA = {
     to: CURVE_POSITION_SCHEMA,
   },
 };
+const DENSE_TABLE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    encoding: { const: "dense-table-v1" },
+    schemaVersion: { type: "string", minLength: 1 },
+    kind: { type: "string", minLength: 1 },
+    columns: {
+      type: "array",
+      minItems: 1,
+      maxItems: 64,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string", minLength: 1 },
+          unit: { type: "string" },
+          type: { enum: ["integer", "number", "string", "boolean"] },
+          encoding: { enum: ["delta", "qint", "identity", "dictionary"] },
+          scale: { type: "number", exclusiveMinimum: 0 },
+          maxError: { type: "number", minimum: 0 },
+          default: {},
+          dictionary: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string" },
+          },
+          nullable: { type: "boolean" },
+        },
+        required: ["name", "type"],
+      },
+    },
+    points: {
+      type: "array",
+      maxItems: 2000,
+      items: { type: "array", maxItems: 64 },
+    },
+  },
+  required: ["encoding", "schemaVersion", "columns", "points"],
+};
+const CURVE_POINTS_INPUT_SCHEMA = {
+  anyOf: [
+    { type: "array", maxItems: 2000, items: CURVE_POINT_SCHEMA },
+    DENSE_TABLE_SCHEMA,
+  ],
+  description:
+    "Object points or a schema-described dense-table-v1 envelope whose decoded rows match the point schema.",
+};
+const PLAN_REF_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    artifactId: { type: "string", minLength: 1 },
+    contentHash: { type: "string", pattern: "^sha256_[0-9a-f]{64}$" },
+    kind: { const: "plan" },
+    schemaVersion: { type: "string", minLength: 1 },
+    resourceUri: { type: "string", minLength: 1 },
+    firstPageUri: { type: "string", minLength: 1 },
+    expiresAt: { type: "string", minLength: 1 },
+    totalBytes: { type: "integer", minimum: 0 },
+    pagingRequired: { type: "boolean" },
+  },
+  required: ["artifactId", "contentHash"],
+};
+const PLAN_EXECUTION_PROPERTIES = {
+  planRef: PLAN_REF_SCHEMA,
+  action: {
+    enum: ["dry_run", "commit"],
+    description: "Required with planRef. dry_run never writes; commit keeps all live preflight checks.",
+  },
+  confirmations: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      allowSharedTargetMutation: { type: "boolean", default: false },
+    },
+  },
+  executionOptions: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      atomic: { type: "boolean" },
+      responseMode: { enum: ["compact", "standard", "verbose"] },
+      undoLabel: { type: "string", maxLength: 200 },
+      waitFor: { enum: ["none", "phonemes", "computedAttributes", "computedPitch"] },
+      timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+      pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
+    },
+    description:
+      "Optional execution-only overrides. Unsupported options are rejected for the referenced target tool.",
+  },
+};
+const USE_PLAN_REF_SCHEMA = {
+  type: "boolean",
+  default: true,
+  description:
+    "Seal mutation payloads as immutable artifacts and return short planRef apply arguments. Set false only when inline payloads are required.",
+};
 
-const TOOLS = [
+export const TOOLS = [
   {
     name: "sv_root",
     description:
@@ -448,6 +608,20 @@ const TOOLS = [
     description: 'End-to-end health check; returns "pong" when the SynthV bridge loop is alive.',
     inputSchema: { type: "object", properties: {}, required: [] },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_release_artifact",
+    description:
+      "Release one immutable artifact before its lease expires. The artifact must belong to this MCP server session; repeated release returns released:false.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        artifactId: { type: "string", minLength: 1 },
+      },
+      required: ["artifactId"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   },
   {
     name: "sv_search_api",
@@ -703,6 +877,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
+        ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
         occurrenceId: {
           type: "string",
@@ -782,7 +957,7 @@ const TOOLS = [
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
-      required: ["contextId", "patches"],
+      oneOf: [{ required: ["contextId", "patches"] }, { required: ["planRef", "action"] }],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -1155,6 +1330,7 @@ const TOOLS = [
           },
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId"],
     },
@@ -1164,7 +1340,7 @@ const TOOLS = [
   {
     name: "sv_align_lyrics",
     description:
-      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects inferred "+" continuation notes); an explicit +/- chain is authoritative and is never expanded again. Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review. Exact ASCII "+", "-", and "br", plus an ASCII apostrophe prefix, use the official Synthesizer V Studio 2 special-lyric semantics; similar spellings such as "BR" remain lexical and emit a warning. Tokens and per-note units expose semanticRole/semanticEvidence, and orphan continuations or an uncalibrated standalone apostrophe require human review. Returns per-note planned lyrics/languageOverride with tiered confidence plus a unified apply envelope (read apply.tool and submit apply.arguments verbatim; the deprecated patchRequest field carries the identical payload) whose expected.lyrics preconditions guard against post-snapshot drift. Plans above the 200-patch per-call cap return the first 200 plus a continuation block (warned as PLAN_EXCEEDS_PATCH_CAP): follow-up batches cannot be pre-generated because a successful sv_patch_notes invalidates the contextId (and noteIds embed it) — commit, re-run sv_snapshot_range, re-run this tool with identical arguments, and repeat. Applied notes come back unchanged so the rounds converge to status no_change. Explicit occurrenceId/startNoteId are re-anchored only while a short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); forged, expired, or drifted selectors are rejected. G2P parity with the host is not guaranteed.',
+      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects inferred "+" continuation notes); an explicit +/- chain is authoritative and is never expanded again. Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review. Exact ASCII "+", "-", and "br", plus an ASCII apostrophe prefix, use the official Synthesizer V Studio 2 special-lyric semantics; similar spellings such as "BR" remain lexical and emit a warning. Tokens and per-note units expose semanticRole/semanticEvidence, and orphan continuations or an uncalibrated standalone apostrophe require human review. Returns per-note planned lyrics/languageOverride plus a unified apply envelope. By default apply.arguments carries a sealed planRef with resourceUri, firstPageUri, and expiresAt; the executor restores its bounded context capsule if the original snapshot TTL has elapsed, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 200-patch per-call cap return the first 200 plus a continuation block. G2P parity with the host is not guaranteed.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1202,6 +1378,7 @@ const TOOLS = [
           description: "Also plan per-note languageOverride values where the token language is known.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "lyrics"],
     },
@@ -1476,6 +1653,7 @@ const TOOLS = [
           description: "Also snap durations to whole grid steps and trim overlaps.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "grid"],
     },
@@ -1485,7 +1663,7 @@ const TOOLS = [
   {
     name: "sv_generate_harmony",
     description:
-      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) a diatonic third or sixth below/above using an explicit key or Krumhansl-Schmuckler detection (a thin margin warns KEY_AMBIGUOUS with the runner-up; pass harmony.key to lock the mapping). Integer occurrence pitch offsets participate in key/register/voice-crossing calculations in sounding MIDI space; perNote.harmonyPitch and the insert request use target-local MIDI, while perNote.harmonySoundingPitch reports the sounding coordinate. A non-integer occurrence offset returns UNSUPPORTED_PITCH_OFFSET because sv_restructure_notes requires integer MIDI note pitches. Non-diatonic source notes get a nearest-scale-tone semitone-offset approximation flagged needsReview. Register bounds trigger one octave shift, then skip; a shift that would cross the source voice is skipped as VOICE_CROSSING_AVOIDED. lyricsMode "copy" copies source lyrics, "sustain" uses the first melodic lyric then "-" melisma. Existing target notes that match onset, duration, local pitch, and lyrics are skipped as already_applied (convergence basis); overlapping-but-different target notes become TARGET_NOTE_CONFLICT and are NEVER overwritten. Returns a unified apply envelope of sv_restructure_notes inserts in the target\'s local coordinates (read apply.tool and submit apply.arguments verbatim; the deprecated restructureRequest field carries the identical payload); plans above the 64-operation cap return the first 64 plus a continuation block (commit → re-snapshot → re-run with identical options; already-inserted notes skip as already_applied so the loop converges to no_change). Whether the harmony sounds good is human-only.',
+      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) using an explicit key or Krumhansl-Schmuckler detection. Existing exact target notes are skipped; overlapping different notes become TARGET_NOTE_CONFLICT and are never overwritten. Returns a unified apply envelope targeting sv_restructure_notes. By default apply.arguments carries a sealed planRef with resourceUri, firstPageUri, and expiresAt; the executor restores its bounded context capsule if the original snapshot TTL has elapsed, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 64-operation cap return the first 64 plus a continuation block. Whether the harmony sounds good is human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1581,6 +1759,7 @@ const TOOLS = [
           description: "Optional source-note subset; all noteIds must belong to the source occurrence.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "targetOccurrenceId", "harmony"],
     },
@@ -1687,9 +1866,7 @@ const TOOLS = [
         mode: { enum: ["replace", "add", "scale"] },
         range: CURVE_RANGE_SCHEMA,
         points: {
-          type: "array",
-          maxItems: 2000,
-          items: CURVE_POINT_SCHEMA,
+          ...CURVE_POINTS_INPUT_SCHEMA,
           description:
             "replace mode only; use blick, a musicalPosition, or a note anchor from the target range context.",
         },
@@ -1711,6 +1888,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
+        ...PLAN_EXECUTION_PROPERTIES,
         target: CURVE_TARGET_SCHEMA,
         curves: {
           type: "array",
@@ -1730,9 +1908,7 @@ const TOOLS = [
               mode: { enum: ["replace", "add", "scale"] },
               range: CURVE_RANGE_SCHEMA,
               points: {
-                type: "array",
-                maxItems: 2000,
-                items: CURVE_POINT_SCHEMA,
+                ...CURVE_POINTS_INPUT_SCHEMA,
                 description:
                   "replace mode only; use blick, a musicalPosition, or a note anchor from the target range context.",
               },
@@ -1751,7 +1927,7 @@ const TOOLS = [
           description: "Audit metadata only; the SynthV Undo API cannot display custom labels.",
         },
       },
-      required: ["target", "curves"],
+      oneOf: [{ required: ["target", "curves"] }, { required: ["planRef", "action"] }],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -1764,6 +1940,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
+        ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
         occurrenceId: { type: "string", minLength: 1 },
         target: {
@@ -1880,7 +2057,10 @@ const TOOLS = [
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
-      required: ["contextId", "occurrenceId", "operations"],
+      oneOf: [
+        { required: ["contextId", "occurrenceId", "operations"] },
+        { required: ["planRef", "action"] },
+      ],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -1893,6 +2073,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
+        ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
         occurrenceId: { type: "string", minLength: 1 },
         specialEventPolicy: {
@@ -1988,6 +2169,7 @@ const TOOLS = [
           },
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
+        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "gestures"],
       definitions: {
@@ -2178,7 +2360,7 @@ const TOOLS = [
               parameter: { type: "string", minLength: 1, maxLength: 200 },
               mode: { enum: ["replace", "add", "scale"] },
               range: CURVE_RANGE_SCHEMA,
-              points: { type: "array", maxItems: 2000, items: CURVE_POINT_SCHEMA },
+              points: CURVE_POINTS_INPUT_SCHEMA,
               amount: { type: "number" },
               simplifyThreshold: { type: "number", minimum: 0 },
             },
@@ -2232,6 +2414,7 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
+        ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
         occurrenceId: {
           type: "string",
@@ -2296,7 +2479,7 @@ const TOOLS = [
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
-      required: ["contextId", "operations"],
+      oneOf: [{ required: ["contextId", "operations"] }, { required: ["planRef", "action"] }],
     },
     outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -2593,6 +2776,9 @@ const TOOLS = [
   },
 ];
 
+// 根据启动时 profile 过滤工具清单；full 保持默认兼容。
+const enabledTools = filterToolsByProfile(toolProfileName, TOOLS);
+
 const server = new Server(
   { name: "sv-copilot", version: INTERFACE_VERSION },
   { capabilities: { tools: {}, resources: {} } }
@@ -2603,7 +2789,7 @@ const toolArgumentValidators = new Map(
   TOOLS.map((tool) => [tool.name, schemaValidator.compile(tool.inputSchema)])
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: enabledTools }));
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => ({
   resources: [
@@ -2717,6 +2903,13 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       description: "Exact JSON input schema used to validate sv_analyze_vocal_context.",
       mimeType: "application/json",
     },
+    {
+      uri: "svcopilot://artifacts",
+      name: "SV Copilot immutable artifact store",
+      description:
+        "Read-only container for large results and sealed plans. Artifact descriptors provide hash-bound full and paged resource URIs.",
+      mimeType: "application/json",
+    },
   ],
 }));
 
@@ -2741,6 +2934,18 @@ server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
       description: "Exact runtime input schema for a supported composite music tool.",
       mimeType: "application/json",
     },
+    {
+      uriTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}",
+      name: "SV Copilot artifact",
+      description: "Immutable read-only artifact containing a large result or sealed plan.",
+      mimeType: "application/json",
+    },
+    {
+      uriTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}/pages/{cursor}",
+      name: "SV Copilot artifact page",
+      description: "Paginated read-only chunk of an immutable artifact.",
+      mimeType: "application/json",
+    },
   ],
 }));
 
@@ -2759,6 +2964,9 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name } = request.params;
+  if (!isToolEnabled(toolProfileName, name)) {
+    return toolError("TOOL_NOT_ENABLED", `tool "${name}" is not enabled in profile "${toolProfileName}"`);
+  }
   const args = normalizeToolArguments(name, request.params.arguments ?? {});
   const argumentValidator = toolArgumentValidators.get(name);
   if (!argumentValidator) return toolError("UNKNOWN_TOOL", name);
@@ -2786,6 +2994,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_ping":
         result = await hostSession.ping();
+        break;
+      case "sv_release_artifact":
+        result = {
+          ok: true,
+          status: "succeeded",
+          artifactId: args.artifactId,
+          released: artifactStore.release({
+            artifactId: args.artifactId,
+            sessionId: serverSessionId,
+          }),
+        };
         break;
       case "sv_search_api":
         if (!apiManifestAvailable) return manifestUnavailableError();
@@ -2959,33 +3178,11 @@ function formatSchemaErrors(errors = []) {
 }
 
 function toolResult(result) {
-  const value = result ?? null;
-  const structuredContent =
-    value !== null && typeof value === "object" && !Array.isArray(value)
-      ? value
-      : { result: value };
-  return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
-    structuredContent,
-    ...(value?.ok === false ? { isError: true } : {}),
-  };
+  return encodeToolResult(result);
 }
 
 function toolError(code, message, details) {
-  const result = {
-    ok: false,
-    status: "failed",
-    error: {
-      code,
-      message,
-      ...(details && typeof details === "object" && !Array.isArray(details) ? details : {}),
-    },
-  };
-  return {
-    content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    structuredContent: result,
-    isError: true,
-  };
+  return encodeToolError(code, message, details);
 }
 
 function manifestUnavailableError() {
@@ -3032,6 +3229,9 @@ function readResource(uri) {
     const toolName = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
     return toolInputSchema(toolName);
   }
+  if (parsed.protocol === "svcopilot:" && parsed.hostname === "artifacts") {
+    return readArtifactResource(parsed, uri);
+  }
   if (parsed.protocol !== "svapi:") throw new Error(`Unsupported resource URI: ${uri}`);
   if (parsed.hostname === "manifest" && (parsed.pathname === "" || parsed.pathname === "/")) {
     return apiManifest;
@@ -3050,6 +3250,75 @@ function readResource(uri) {
     };
   }
   throw new Error(`Unsupported resource URI: ${uri}`);
+}
+
+function readArtifactResource(parsed, uri) {
+  const rawPath = parsed.pathname.replace(/^\/+|\/+$/g, "");
+  if (!rawPath) {
+    // 返回当前 store 元数据摘要，不暴露 payload。
+    return {
+      schemaVersion: INTERFACE_VERSION,
+      sessionId: serverSessionId,
+      artifactCount: artifactStore.entries.size,
+      totalBytes: artifactStore.totalBytes,
+    };
+  }
+  const segments = rawPath.split("/").map((segment) => decodeURIComponent(segment));
+  const [artifactId, contentHash] = segments;
+  const isPage = segments.length === 4 && segments[2] === "pages";
+  if (
+    !artifactId ||
+    !contentHash ||
+    (!isPage && segments.length !== 2) ||
+    (isPage && !segments[3])
+  ) {
+    throw new Error(`Invalid artifact resource URI: ${uri}`);
+  }
+  if (isPage) {
+    const unknownQueryFields = [...parsed.searchParams.keys()].filter(
+      (field) => field !== "byteBudget"
+    );
+    if (unknownQueryFields.length > 0) {
+      throw new Error(`Invalid artifact page query: ${unknownQueryFields.join(", ")}`);
+    }
+    const byteBudgetText = parsed.searchParams.get("byteBudget");
+    const byteBudget =
+      byteBudgetText === null ? DEFAULT_ARTIFACT_PAGE_BYTES : Number(byteBudgetText);
+    if (
+      !Number.isSafeInteger(byteBudget) ||
+      byteBudget < MIN_ARTIFACT_PAGE_BYTES ||
+      byteBudget > MAX_ARTIFACT_PAGE_BYTES
+    ) {
+      throw new Error(
+        `artifact page byteBudget must be ${MIN_ARTIFACT_PAGE_BYTES}-${MAX_ARTIFACT_PAGE_BYTES}`
+      );
+    }
+    const result = artifactStore.readPage({
+      artifactId,
+      expectedContentHash: contentHash,
+      sessionId: serverSessionId,
+      cursor: segments[3],
+      byteBudget,
+    });
+    const reference = artifactReference(result.artifact);
+    return {
+      artifact: reference,
+      page: {
+        ...result.page,
+        nextPageUri: result.page.cursor
+          ? `${reference.resourceUri}/pages/${encodeURIComponent(
+              result.page.cursor
+            )}?byteBudget=${byteBudget}`
+          : null,
+      },
+    };
+  }
+  const artifact = artifactStore.resolve({
+    artifactId,
+    expectedContentHash: contentHash,
+    sessionId: serverSessionId,
+  });
+  return artifactResourceView(artifact);
 }
 
 function capabilities() {
@@ -3072,6 +3341,13 @@ function capabilities() {
       rangePage: RANGE_PAGE_LIMITS,
       pitchControl: PITCH_CONTROL_LIMITS,
       snapshotContextTtlMs: snapshotService.store.ttlMs,
+      artifacts: {
+        ...artifactStore.quotas,
+        activeEntries: artifactStore.entries.size,
+        activeBytes: artifactStore.totalBytes,
+        cursorIntegrity: "hmac-sha256",
+        sessionScoped: true,
+      },
       singleInFlight: true,
     },
     interfaces: {
@@ -3109,6 +3385,19 @@ function capabilities() {
       ],
       voice: ["sv_get_voice_profile", "sv_clone_track_from_template"],
       editorState: ["sv_set_selection"],
+      artifact: {
+        index: "svcopilot://artifacts",
+        resourceTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}",
+        pageTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}/pages/{cursor}",
+        releaseTool: "sv_release_artifact",
+        pageBytes: {
+          default: DEFAULT_ARTIFACT_PAGE_BYTES,
+          minimum: MIN_ARTIFACT_PAGE_BYTES,
+          maximum: MAX_ARTIFACT_PAGE_BYTES,
+        },
+        directReadMaxBytes: MAX_ARTIFACT_DIRECT_READ_BYTES,
+      },
+      toolProfile: toolProfileName,
       typedResultFormat: "typed-v2",
       guide: {
         musicWorkflows: "svcopilot://guide/music-workflows",
@@ -3240,10 +3529,8 @@ function toolInputSchema(name) {
 }
 
 function serializeResource(uri, payload) {
-  // 部分 MCP 客户端会截断较大的 resource 文本；schema 与指南使用紧凑 JSON 降低上下文成本。
-  return uri.startsWith("svcopilot://schemas/") || uri.startsWith("svcopilot://guide/")
-    ? JSON.stringify(payload)
-    : JSON.stringify(payload, null, 2);
+  // resource 与 tool result 一律紧凑编码，避免 pretty-print 抵消 artifact/dense 的传输收益。
+  return JSON.stringify(payload);
 }
 
 async function main() {
@@ -3270,7 +3557,10 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 process.stdin.once("end", () => void shutdown("stdin closed"));
 
-main().catch((error) => {
-  console.error("[sv-copilot] fatal:", error);
-  process.exit(1);
-});
+// 只有直接作为主模块启动时才运行 server；作为库导入时不应初始化网络资源。
+if (import.meta.filename === path.resolve(process.argv[1] ?? "")) {
+  main().catch((error) => {
+    console.error("[sv-copilot] fatal:", error);
+    process.exit(1);
+  });
+}

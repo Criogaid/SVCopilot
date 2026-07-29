@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { canonicalHashHex } from "./canonical-json.js";
 
 import {
   blickToMusical,
@@ -7,6 +7,12 @@ import {
   normalizeMusicalPoint,
   publicMusicalPoint,
 } from "./musical-time.js";
+import { artifactReference } from "./artifact-store.js";
+import {
+  AUTOMATION_POINT_DENSE_PROFILE,
+  NOTE_DENSE_PROFILE,
+  encodeDense,
+} from "./dense-codec.js";
 import { readAutomationSnapshot } from "./parameter-curve.js";
 import { analyzePhonemeResult } from "./phoneme-state.js";
 import {
@@ -78,11 +84,15 @@ export class RangeSnapshotService {
       snapshotService = null,
       store = snapshotService?.store,
       captureLimits = {},
+      artifactStore = null,
+      sessionId = null,
     } = {}
   ) {
     this.session = session;
     this.now = now;
     this.store = store ?? new SnapshotStore({ now });
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
     this.captureLimits = {
       automationPoints:
         captureLimits.automationPoints ?? MAX_CAPTURED_AUTOMATION_POINTS,
@@ -124,7 +134,7 @@ export class RangeSnapshotService {
           context: { kind: "range", occurrences: [] },
         });
         const prepared = await timer.measure("serializationMs", async () =>
-          prepareStoredRange(stored, captured, input, snapshotToken, warnings)
+          prepareStoredRange(stored, captured, input, snapshotToken, warnings, this.artifactStore, this.sessionId)
         );
         if (input.sinceToken && input.sinceToken === snapshotToken) {
           return {
@@ -148,6 +158,7 @@ export class RangeSnapshotService {
                 pitchControls: 0,
               },
             },
+            ...(stored.artifactRef ? { artifactRef: stored.artifactRef } : {}),
             warnings,
             timings: timer.finish(),
           };
@@ -476,7 +487,7 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
   };
 }
 
-function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
+function prepareStoredRange(stored, captured, input, snapshotToken, warnings, artifactStore, sessionId) {
   const occurrenceByKey = new Map();
   const occurrencesByTarget = new Map();
   for (const occurrence of captured.occurrences) {
@@ -598,10 +609,107 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings) {
   stored.responseMode = input.responseMode;
   stored.rangePages = buildRangePages(captured.data, input.budgets, stored);
 
+  // Phase 2：大 detail 封存为 artifact，响应中携带 artifactRef。
+  if (artifactStore && sessionId) {
+    try {
+      const artifact = artifactStore.seal({
+        kind: "range-detail",
+        schemaVersion: "1",
+        sessionId,
+        sourceEpoch: stored.epoch,
+        payload: {
+          snapshotToken,
+          context: artifactRangeContext(stored.context),
+          data: denseRangeDetail(captured.data),
+          warnings,
+        },
+      });
+      stored.artifactRef = artifactReference(artifact);
+    } catch (error) {
+      // artifact 封存失败不应中断 range 捕获；只记录 warning。
+      stored.warnings = [
+        ...(stored.warnings ?? []),
+        {
+          code: "ARTIFACT_SEAL_FAILED",
+          message: `Failed to seal range detail artifact: ${error.message}`,
+        },
+      ];
+    }
+  }
+
   if (input.responseMode === "compact") {
     return { initialPage: compactRangePage(captured.data, stored) };
   }
   return { initialPage: stored.rangePages[0] };
+}
+
+function artifactRangeContext(context) {
+  const {
+    computedPitchByOccurrence: _computedPitch,
+    automationByOccurrence: _automation,
+    pitchControlsByOccurrence: _pitchControls,
+    ...identityContext
+  } = context;
+  return identityContext;
+}
+
+function denseRangeDetail(data) {
+  return {
+    ...data,
+    ...(Array.isArray(data.notes)
+      ? {
+          noteEncoding: "dense-table-v1",
+          notes: encodeDense(data.notes.map(flattenRangeNote), NOTE_DENSE_PROFILE),
+        }
+      : {}),
+    automation: (data.automation ?? []).map((curve) => ({
+      ...curve,
+      pointEncoding: "dense-table-v1",
+      points: encodeDense(
+        curve.points.map((point) => ({
+          localBlick: point.localBlick,
+          absoluteBlick: point.absoluteBlick,
+          value: point.value,
+          bar: point.musical.bar,
+          beat: point.musical.beat,
+          tickInBeatBlick: point.musical.tickInBeatBlick,
+          numerator: point.musical.numerator,
+          denominator: point.musical.denominator,
+        })),
+        AUTOMATION_POINT_DENSE_PROFILE
+      ),
+    })),
+  };
+}
+
+function flattenRangeNote(note) {
+  return {
+    occurrenceId: note.occurrenceId,
+    noteId: note.noteId,
+    trackIndex: note.trackIndex,
+    groupIndex: note.groupIndex,
+    groupUuid: note.groupUuid,
+    indexInGroup: note.indexInGroup,
+    onsetBlick: note.onsetBlick,
+    durationBlick: note.durationBlick,
+    endBlick: note.endBlick,
+    absoluteOnsetBlick: note.absoluteOnsetBlick,
+    absoluteEndBlick: note.absoluteEndBlick,
+    pitch: note.pitch,
+    lyrics: note.lyrics,
+    phonemesOverride: note.phonemesOverride,
+    languageOverride: note.languageOverride,
+    detuneCents: note.detuneCents,
+    "musical.bar": note.musical.bar,
+    "musical.beat": note.musical.beat,
+    "musical.tickInBeatBlick": note.musical.tickInBeatBlick,
+    "musical.numerator": note.musical.numerator,
+    "musical.denominator": note.musical.denominator,
+    restBeforeBlick: note.restBeforeBlick,
+    restAfterBlick: note.restAfterBlick,
+    prevLyrics: note.prevLyrics,
+    nextLyrics: note.nextLyrics,
+  };
 }
 
 // sv_compare_computed_pitch 读取入口：返回某 occurrence 完整 computed-pitch 序列（含 null）。
@@ -624,6 +732,7 @@ function formatStoredRangePage(stored, page, { changedSinceToken = false, timing
     consistency: "best-effort",
     data: page.data,
     page: page.page,
+    ...(stored.artifactRef ? { artifactRef: stored.artifactRef } : {}),
     warnings: stored.warnings ?? [],
     ...(timings ? { timings } : {}),
   };
@@ -1018,16 +1127,7 @@ function normalizeQuarterBlick(value) {
 }
 
 function contentToken(data) {
-  return `snap_${createHash("sha256").update(stableStringify(data)).digest("hex").slice(0, 32)}`;
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
+  return `snap_${canonicalHashHex(data).slice(0, 32)}`;
 }
 
 function normalizeRequest(request) {

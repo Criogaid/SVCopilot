@@ -29,15 +29,37 @@ const PROCESSING_FIELDS = new Set(["lyrics", "phonemesOverride", "languageOverri
 export const MAX_PATCHES = 200;
 
 export class NotePatchService {
-  constructor(session, snapshotService, { sleepFn, now = () => Date.now() } = {}) {
+  constructor(
+    session,
+    snapshotService,
+    { sleepFn, now = () => Date.now(), artifactStore = null, sessionId = null } = {}
+  ) {
     this.session = session;
     this.snapshotService = snapshotService;
     this.sleep = sleepFn;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
   }
 
   async patchNotes(request) {
-    const input = normalizeRequest(request);
+    let resolvedRequest = request;
+    // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
+    if (request?.planRef && this.artifactStore && this.sessionId) {
+      const { resolvePlanReference } = await import("./plan-reference.js");
+      const resolved = resolvePlanReference({
+        planRef: request.planRef,
+        action: request.action,
+        confirmations: request.confirmations,
+        executionOptions: request.executionOptions,
+        expectedTargetTool: "sv_patch_notes",
+        sessionId: this.sessionId,
+        artifactStore: this.artifactStore,
+        snapshotStore: this.snapshotService.store,
+      });
+      resolvedRequest = resolved.mutationRequest;
+    }
+    const input = normalizeRequest(resolvedRequest);
     return this.session.withExclusive(async (host) => {
       let resolved;
       let boundaryCalls = 0;

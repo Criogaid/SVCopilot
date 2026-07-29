@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { canonicalClone } from "./canonical-json.js";
 
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { collectHandleRefs } from "./wire-codec.js";
@@ -36,6 +37,25 @@ export class SnapshotStore {
   get(contextId) {
     this._prune();
     return this.entries.get(contextId) ?? null;
+  }
+
+  restore(contextId, snapshot) {
+    this._prune();
+    if (this.entries.has(contextId)) return this.entries.get(contextId);
+    if (typeof contextId !== "string" || !contextId || !snapshot || typeof snapshot !== "object") {
+      throw codedError("INVALID_ARGUMENTS", "restored snapshot requires contextId and snapshot");
+    }
+    while (this.entries.size >= this.maxEntries) {
+      this.entries.delete(this.entries.keys().next().value);
+    }
+    const restored = {
+      ...canonicalClone(snapshot),
+      contextId,
+      createdAt: this.now(),
+      expiresAt: this.now() + this.ttlMs,
+    };
+    this.entries.set(contextId, restored);
+    return restored;
   }
 
   delete(contextId) {

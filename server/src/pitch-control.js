@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { canonicalHashHex } from "./canonical-json.js";
 
 // PitchControlPoint / PitchControlCurve 的规范化读模型与身份模型（主计划 P1-C）。
 //
@@ -249,30 +249,26 @@ function publicOwnership(ownedValues, scriptDataKeys) {
 // 完整有序 points + SVCopilot 命名空间值 + 目标 group UUID。刻意不含 indexInGroup
 // （重排不改变对象本质身份），也不含相邻摘要（那是 group 级 fingerprint 的职责）。
 export function computeControlFingerprint(control, groupUuid) {
-  return `sha256:${sha256Hex(
-    stableStringify({
-      v: 1,
-      kind: control.kind,
-      positionBlick: control.positionBlick,
-      pitchSemitone: control.pitchSemitone,
-      points: control.points ?? null,
-      ownership: control.ownedValues ?? null,
-      groupUuid: groupUuid ?? null,
-    })
-  )}`;
+  return `sha256:${canonicalHashHex({
+    v: 1,
+    kind: control.kind,
+    positionBlick: control.positionBlick,
+    pitchSemitone: control.pitchSemitone,
+    points: control.points ?? null,
+    ownership: control.ownedValues ?? null,
+    groupUuid: groupUuid ?? null,
+  })}`;
 }
 
 // group 级 fingerprint：对象数量 + 有序 per-control fingerprint 序列。任何增删、重排或
 // 单对象内容变化都会改变它——这是 target.expectedPitchControlFingerprint 比对的全组守卫。
 export function computeGroupFingerprint(controls, groupUuid) {
-  return `sha256:${sha256Hex(
-    stableStringify({
-      v: 1,
-      groupUuid: groupUuid ?? null,
-      count: controls.length,
-      ordered: controls.map((control) => control.fingerprint),
-    })
-  )}`;
+  return `sha256:${canonicalHashHex({
+    v: 1,
+    groupUuid: groupUuid ?? null,
+    count: controls.length,
+    ordered: controls.map((control) => control.fingerprint),
+  })}`;
 }
 
 // context-scoped controlId：外部/无标签对象用 occurrenceId + 捕获索引。SVCopilot 自有对象
@@ -307,19 +303,6 @@ export function pitchEquals(a, b, { abs = PITCH_ABS_EPSILON, rel = PITCH_REL_EPS
 function normalizeScriptDataKeys(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.filter((key) => typeof key === "string" && !key.startsWith("$sv"));
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-function sha256Hex(text) {
-  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function hostDataError(message) {

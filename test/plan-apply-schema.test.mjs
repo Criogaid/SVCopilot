@@ -7,6 +7,8 @@ import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/es
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 import AjvModule from "../server/node_modules/ajv/dist/ajv.js";
 
+import { ArtifactStore } from "../server/src/artifact-store.js";
+import { encodeDense } from "../server/src/dense-codec.js";
 import { ExpressionPlanService } from "../server/src/expression-plan.js";
 import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { LyricAlignService } from "../server/src/lyric-align.js";
@@ -141,6 +143,87 @@ test("planner outputs validate against the schemas the real server serves", asyn
   assert.equal(aligned.patchRequest.arguments.patches.length, 200);
   assert.equal(aligned.continuation.remainingChangedCount, 1);
   assertValid(validatePatches, aligned.patchRequest.arguments, "sv_align_lyrics patchRequest");
+});
+
+test("served mutation schemas accept only an explicit planRef execution action", async () => {
+  const schemas = await fetchServedSchemas([
+    "sv_patch_notes",
+    "sv_patch_parameter_curves",
+    "sv_patch_pitch_controls",
+    "sv_restructure_notes",
+  ]);
+  const reference = {
+    artifactId: "a_schema",
+    contentHash: `sha256_${"a".repeat(64)}`,
+    kind: "plan",
+  };
+
+  for (const [toolName, schema] of Object.entries(schemas)) {
+    const validate = compile(schema);
+    assertValid(
+      validate,
+      { planRef: reference, action: "dry_run" },
+      `${toolName} planRef dry_run`
+    );
+    assertValid(
+      validate,
+      { planRef: reference, action: "commit" },
+      `${toolName} planRef commit`
+    );
+    assert.equal(
+      validate({ planRef: reference }),
+      false,
+      `${toolName} must reject an implicit execution action`
+    );
+    assert.equal(
+      validate({ planRef: reference, action: "dry_run", bogus: true }),
+      false,
+      `${toolName} must reject unknown planRef wrapper fields`
+    );
+  }
+});
+
+test("served curve schemas accept dense-table-v1 points on single, batch, and phrase writes", async () => {
+  const schemas = await fetchServedSchemas([
+    "sv_patch_parameter_curve",
+    "sv_patch_parameter_curves",
+    "sv_edit_phrase",
+  ]);
+  const points = encodeDense(
+    [
+      { blick: 0, value: 0.2 },
+      { blick: Q, value: 0.8 },
+    ],
+    {
+      schemaVersion: "1",
+      columns: [
+        { name: "blick", type: "integer", encoding: "delta" },
+        { name: "value", type: "number" },
+      ],
+    }
+  );
+  const target = { contextId: "ctx_dense", occurrenceId: "ctx_dense:t:0:r:0" };
+  const curve = {
+    parameter: "tension",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: Q },
+    points,
+  };
+  assertValid(
+    compile(schemas.sv_patch_parameter_curve),
+    { target, ...curve },
+    "single curve dense points"
+  );
+  assertValid(
+    compile(schemas.sv_patch_parameter_curves),
+    { target, curves: [curve] },
+    "batch curve dense points"
+  );
+  assertValid(
+    compile(schemas.sv_edit_phrase),
+    { target, curves: [curve] },
+    "phrase curve dense points"
+  );
 });
 
 // P0-D 统一信封：通用消费者只读 apply.tool + apply.arguments 就能提交，不需要知道
@@ -332,6 +415,116 @@ test("all five planners share one apply envelope a generic consumer can submit",
   }
 });
 
+test("lyric and harmony planners default to complete plan references without inline duplicates", async () => {
+  const sessionId = "sess_remaining_planners";
+  const artifactStore = new ArtifactStore({ now: () => 2000 });
+
+  const lyricStore = new SnapshotStore({ now: () => 1000 });
+  const lyricContext = createStoredContext(lyricStore, [
+    { onsetBlick: 0, durationBlick: Q, lyrics: "" },
+    { onsetBlick: Q, durationBlick: Q, lyrics: "" },
+  ]);
+  const lyric = await new LyricAlignService({
+    store: lyricStore,
+    now: () => 2000,
+    artifactStore,
+    sessionId,
+  }).align({
+    contextId: lyricContext.stored.contextId,
+    lyrics: "ひかり",
+    language: "japanese",
+  });
+
+  const harmonyStore = new SnapshotStore({ now: () => 1000 });
+  const harmonyCtx = harmonyContext(harmonyStore);
+  const harmony = await new HarmonyPlanService({
+    store: harmonyStore,
+    now: () => 2000,
+    artifactStore,
+    sessionId,
+  }).plan({
+    contextId: harmonyCtx.stored.contextId,
+    sourceOccurrenceId: harmonyCtx.sourceId,
+    targetOccurrenceId: harmonyCtx.targetId,
+    harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+  });
+
+  for (const [label, plan] of [
+    ["lyrics", lyric],
+    ["harmony", harmony],
+  ]) {
+    const reference = plan.apply.arguments.planRef;
+    assert.equal(plan.apply.arguments.action, "dry_run");
+    assert.equal(reference.kind, "plan");
+    assert.equal(reference.schemaVersion, "1");
+    assert.ok(reference.expiresAt);
+    assert.ok(reference.resourceUri);
+    assert.ok(reference.firstPageUri);
+    assert.ok(reference.totalBytes > 0);
+    assert.equal(plan.patchRequest, undefined, `${label} must not duplicate an inline patch request`);
+    assert.equal(
+      plan.restructureRequest,
+      undefined,
+      `${label} must not duplicate an inline restructure request`
+    );
+    assert.doesNotMatch(
+      JSON.stringify(plan.apply.preconditions),
+      /TTL expiry invalidates/,
+      `${label} preconditions must describe plan leases accurately`
+    );
+  }
+});
+
+test("compact lyric plans externalize alignment detail and capsule only touched notes", async () => {
+  const sessionId = "sess_compact_lyrics";
+  const artifactStore = new ArtifactStore({ now: () => 2000 });
+  const store = new SnapshotStore({ now: () => 1000 });
+  const context = createStoredContext(
+    store,
+    Array.from({ length: 373 }, (_, index) => ({
+      onsetBlick: index * Q,
+      durationBlick: Q,
+      lyrics: "",
+    }))
+  );
+  const plan = await new LyricAlignService({
+    store,
+    now: () => 2000,
+    artifactStore,
+    sessionId,
+  }).align({
+    contextId: context.stored.contextId,
+    lyrics: "我你他她天地人",
+    language: "mandarin",
+    responseMode: "compact",
+  });
+
+  assert.equal(plan.alignment.unfilledCount, 366);
+  assert.equal(plan.alignment.unfilledNotes, undefined);
+  assert.equal(plan.alignment.firstUnfilledNote.noteId, `${context.occurrenceId}:n:7`);
+  assert.equal(plan.alignment.lastUnfilledNote.noteId, `${context.occurrenceId}:n:372`);
+  assert.ok(plan.alignment.detailRef);
+  assert.ok(JSON.stringify(plan).length < 6_000);
+
+  const planArtifact = artifactStore.resolve({
+    artifactId: plan.apply.arguments.planRef.artifactId,
+    expectedKind: "plan",
+    sessionId,
+  });
+  assert.equal(
+    planArtifact.payload.contextSnapshot.snapshot.context.occurrences[0].noteFingerprints.length,
+    7
+  );
+  assert.ok(planArtifact.totalBytes < 10_000);
+
+  const detailArtifact = artifactStore.resolve({
+    artifactId: plan.alignment.detailRef.artifactId,
+    expectedKind: "planner-detail",
+    sessionId,
+  });
+  assert.equal(detailArtifact.payload.alignment.unfilledNotes.length, 366);
+});
+
 test("the apply envelope reports multiple sequential calls honestly", async () => {
   const store = new SnapshotStore({ now: () => 1000 });
   const context = createStoredContext(store, [
@@ -371,6 +564,51 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
   // 不得暗示多次调用是一个事务。
   assert.match(plan.apply.sequencing, /does NOT roll back earlier committed calls/);
   assert.deepEqual(plan.apply.additionalCalls[0].arguments, plan.applyRequests[1].arguments);
+});
+
+test("a partial multi-call artifact seal releases every artifact from that attempt", async () => {
+  const store = new SnapshotStore({ now: () => 1000 });
+  const context = createStoredContext(store, [
+    { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
+    { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "b" },
+    { onsetBlick: 20 * Q, durationBlick: Q, pitch: 64, lyrics: "c" },
+    { onsetBlick: 21 * Q, durationBlick: Q, pitch: 65, lyrics: "d" },
+  ]);
+  const notes = context.stored.context.occurrences[0].noteFingerprints;
+  const artifactStore = new ArtifactStore({
+    now: () => 2000,
+    quotas: { maxEntries: 1 },
+  });
+  const service = new ExpressionPlanService({
+    store,
+    now: () => 2000,
+    artifactStore,
+    sessionId: "sess_partial_seal",
+  });
+  const plan = await service.plan({
+    contextId: context.stored.contextId,
+    usePlanRef: true,
+    gestures: [
+      {
+        type: "hairpin",
+        fromNoteId: notes[0].noteId,
+        toNoteId: notes[1].noteId,
+        parameter: "loudness",
+        amount: 3,
+      },
+      {
+        type: "hairpin",
+        fromNoteId: notes[2].noteId,
+        toNoteId: notes[3].noteId,
+        parameter: "loudness",
+        amount: 3,
+      },
+    ],
+  });
+
+  assert.equal(plan.applyRequests.length, 2);
+  assert.equal(artifactStore.entries.size, 0);
+  assert.ok(plan.warnings.some((warning) => warning.code === "ARTIFACT_SEAL_FAILED"));
 });
 
 test("a no-op plan returns apply:null instead of an empty request", async () => {

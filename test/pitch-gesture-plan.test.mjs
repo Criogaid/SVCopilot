@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ArtifactStore } from "../server/src/artifact-store.js";
 import { RangeSnapshotService } from "../server/src/musical-range.js";
 import { PitchControlPatchService } from "../server/src/pitch-control-patch.js";
 import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
@@ -20,15 +21,23 @@ function createFixture(options = {}) {
   const model = createPitchHostModel({ notes: NOTES, ...options });
   const session = { withExclusive: (task) => task(model.host) };
   const store = new SnapshotStore({ now: () => 1000 });
-  const snapshots = new RangeSnapshotService(session, { now: () => 1000, store });
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const sessionId = "sess_test";
+  const snapshots = new RangeSnapshotService(session, { now: () => 1000, store, artifactStore, sessionId });
   const snapshotService = new SnapshotService(session, { store, now: () => 1000 });
-  const planner = new PitchGesturePlanService({ store, now: () => 1000 });
+  const planService = new PitchGesturePlanService({ store, now: () => 1000, artifactStore, sessionId });
+  // 既有形状断言显式走 inline；planRef 专项用例自行传 usePlanRef:true。
+  const planner = {
+    plan: (request) => planService.plan({ usePlanRef: false, ...request }),
+  };
   const patch = new PitchControlPatchService(session, snapshotService, {
     sleepFn: async () => {},
     now: () => 1000,
     idGenerator: () => "pc_new_1",
+    artifactStore,
+    sessionId,
   });
-  return { model, snapshots, planner, patch, store };
+  return { model, snapshots, planner, patch, store, artifactStore };
 }
 
 async function snapshotNotes(snapshots) {
@@ -336,4 +345,35 @@ test("the planner never touches the host", async () => {
   assert.equal(model.hostCalls.length, callsBefore);
   assert.equal(model.undoCount, 0);
   assert.equal(model.controls.length, 0);
+});
+
+test("planRef path: planner returns short planRef and executor resolves it", async () => {
+  const { snapshots, planner, patch, model } = createFixture();
+  const snapshot = await snapshotNotes(snapshots);
+  const plan = await planner.plan({
+    contextId: snapshot.contextId,
+    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+    usePlanRef: true,
+  });
+  assert.equal(plan.status, "planned");
+  assert.ok(plan.apply.arguments.planRef, "apply.arguments should carry planRef");
+  assert.strictEqual(plan.apply.arguments.action, "dry_run");
+  assert.ok(!plan.apply.arguments.operations, "operations should not be inline when planRef is used");
+
+  // dry-run via planRef
+  const dryRun = await patch.patch({
+    planRef: plan.apply.arguments.planRef,
+    action: "dry_run",
+  });
+  assert.equal(dryRun.status, "dry_run");
+  assert.equal(dryRun.effects, "none");
+  assert.equal(model.undoCount, 0);
+
+  // commit via planRef
+  const commit = await patch.patch({
+    planRef: plan.apply.arguments.planRef,
+    action: "commit",
+  });
+  assert.equal(commit.status, "succeeded");
+  assert.equal(model.controls.length, 1);
 });

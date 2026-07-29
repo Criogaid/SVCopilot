@@ -6,6 +6,8 @@ import {
   normalizeMusicalPoint,
   numberToFraction,
 } from "./musical-time.js";
+import { runChunkedMutation } from "./chunked-mutation.js";
+import { decodeDense } from "./dense-codec.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
@@ -61,10 +63,20 @@ export async function readAutomationSnapshot(
 }
 
 export class ParameterCurveService {
-  constructor(session, { now = () => Date.now(), snapshotService = null } = {}) {
+  constructor(
+    session,
+    {
+      now = () => Date.now(),
+      snapshotService = null,
+      artifactStore = null,
+      sessionId = null,
+    } = {}
+  ) {
     this.session = session;
     this.now = now;
     this.snapshotService = snapshotService;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
   }
 
   async getCurve(request) {
@@ -139,11 +151,27 @@ export class ParameterCurveService {
 
   async patchCurves(request) {
     const serviceStartedAt = this.now();
+    let resolvedRequest = request;
+    // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
+    if (request?.planRef && this.artifactStore && this.sessionId) {
+      const { resolvePlanReference } = await import("./plan-reference.js");
+      const resolved = resolvePlanReference({
+        planRef: request.planRef,
+        action: request.action,
+        confirmations: request.confirmations,
+        executionOptions: request.executionOptions,
+        expectedTargetTool: "sv_patch_parameter_curves",
+        sessionId: this.sessionId,
+        artifactStore: this.artifactStore,
+        snapshotStore: this.snapshotService?.store,
+      });
+      resolvedRequest = resolved.mutationRequest;
+    }
     let input;
     try {
-      input = normalizeBatchPatchRequest(request);
+      input = normalizeBatchPatchRequest(resolvedRequest);
     } catch (error) {
-      return formatBatchValidationFailure(request, error, {
+      return formatBatchValidationFailure(resolvedRequest, error, {
         elapsedMs: elapsed(serviceStartedAt, this.now()),
       });
     }
@@ -371,53 +399,144 @@ async function executeCurveTransaction(capture, input, clock) {
       await capture.call(transaction.target.roots.project, "newUndoRecord", []);
       transaction.boundaryCalls += 1;
     });
-    for (const plan of transaction.plans) {
-      failedCurveIndex = plan.index;
-      const curveStartedAt = clock.now();
-      touched.push(plan);
-      plan.status = "writing";
-      try {
-        await timed(timings, "hostWriteMs", clock.now, () => applyCurvePlan(capture, plan));
-        plan.timings.hostWriteMs = elapsed(curveStartedAt, clock.now());
-        plan.status = "written";
-      } catch (error) {
-        plan.timings.hostWriteMs = elapsed(curveStartedAt, clock.now());
-        throw withCurveFailure(error, plan.index, plan.typeName, "execute");
-      }
-    }
-
-    phase = "verify";
-    for (const plan of transaction.plans) {
-      failedCurveIndex = plan.index;
-      const curveStartedAt = clock.now();
-      try {
-        await timed(timings, "verificationMs", clock.now, async () => {
-          const observedRead = await readPointsInRange(capture, plan.automation, plan.range, {
-            maxPoints: MAX_JOURNAL_POINTS,
-          });
-          plan.observed = observedRead.points;
-          plan.verification = await verifyCurve(
+    const chunkResult = await runChunkedMutation({
+      // 所有曲线 journal 已在第一条写入前完成，这里只负责有序执行与逆序补偿。
+      prepareJournal: async () =>
+        transaction.plans.map((plan) => ({
+          parameter: plan.typeName,
+          points: plan.journal,
+        })),
+      chunks: transaction.plans,
+      applyChunk: async (plan) => {
+        failedCurveIndex = plan.index;
+        const curveStartedAt = clock.now();
+        touched.push(plan);
+        plan.status = "writing";
+        try {
+          await timed(timings, "hostWriteMs", clock.now, () => applyCurvePlan(capture, plan));
+          plan.timings.hostWriteMs = elapsed(curveStartedAt, clock.now());
+          plan.status = "written";
+          return { ok: true };
+        } catch (error) {
+          plan.timings.hostWriteMs = elapsed(curveStartedAt, clock.now());
+          const failure = withCurveFailure(error, plan.index, plan.typeName, "execute");
+          if (isUnknownOutcomeError(error)) throw failure;
+          return { ok: false, error: failure };
+        }
+      },
+      verifyAll: async () => {
+        phase = "verify";
+        for (const plan of transaction.plans) {
+          failedCurveIndex = plan.index;
+          const curveStartedAt = clock.now();
+          try {
+            await timed(timings, "verificationMs", clock.now, async () => {
+              const observedRead = await readPointsInRange(capture, plan.automation, plan.range, {
+                maxPoints: MAX_JOURNAL_POINTS,
+              });
+              plan.observed = observedRead.points;
+              plan.verification = await verifyCurve(
+                capture,
+                plan.automation,
+                plan.planned,
+                plan.observed,
+                plan.definition,
+                plan.simplifyThreshold,
+                observedRead.truncated
+              );
+            });
+            plan.timings.verificationMs = elapsed(curveStartedAt, clock.now());
+            if (!plan.verification.passed) {
+              throw codedError(
+                "POSTCONDITION_FAILED",
+                `curve ${plan.typeName} did not match the requested points after write-back verification`
+              );
+            }
+            plan.status = "succeeded";
+          } catch (error) {
+            plan.timings.verificationMs = elapsed(curveStartedAt, clock.now());
+            const failure = withCurveFailure(error, plan.index, plan.typeName, "verify");
+            if (isUnknownOutcomeError(error)) throw failure;
+            return { ok: false, error: failure };
+          }
+        }
+        return { ok: true };
+      },
+      rollbackChunk: async (plan) => {
+        const rollbackStartedAt = clock.now();
+        const rollback = await timed(timings, "rollbackMs", clock.now, () =>
+          rollbackCurve(
             capture,
             plan.automation,
-            plan.planned,
-            plan.observed,
-            plan.definition,
-            plan.simplifyThreshold,
-            observedRead.truncated
-          );
+            plan.range,
+            plan.journal,
+            plan.definition
+          )
+        );
+        plan.timings.rollbackMs = elapsed(rollbackStartedAt, clock.now());
+        plan.rollback = rollback;
+        plan.status = rollback.verified ? "rolled_back" : "rollback_failed";
+        transaction.rollback.curves.push({
+          parameter: plan.typeName,
+          verified: rollback.verified,
+          ...(rollback.error ? { error: rollback.error } : {}),
         });
-        plan.timings.verificationMs = elapsed(curveStartedAt, clock.now());
-        if (!plan.verification.passed) {
-          throw codedError(
-            "POSTCONDITION_FAILED",
-            `curve ${plan.typeName} did not match the requested points after write-back verification`
-          );
-        }
-        plan.status = "succeeded";
-      } catch (error) {
-        plan.timings.verificationMs = elapsed(curveStartedAt, clock.now());
-        throw withCurveFailure(error, plan.index, plan.typeName, "verify");
+        return {
+          ok: rollback.verified,
+          ...(rollback.error ? { error: rollback.error } : {}),
+        };
+      },
+      verifyRollback: async () => ({
+        ok:
+          transaction.rollback.curves.length === touched.length &&
+          transaction.rollback.curves.every((curve) => curve.verified),
+        evidence: { curves: transaction.rollback.curves },
+      }),
+      shouldRollback: (error) => input.atomic && !isUnknownOutcomeError(error),
+      classifyUnknownOutcome: (error) =>
+        isUnknownOutcomeError(error) ? "outcome_unknown" : "partial",
+    });
+
+    if (!chunkResult.ok) {
+      const runnerError = Object.assign(
+        codedError(chunkResult.error.code, chunkResult.error.message),
+        chunkResult.error
+      );
+      transaction.failure = failureEvidence(
+        runnerError,
+        chunkResult.status === "outcome_unknown" ? "execute" : phase,
+        failedCurveIndex
+      );
+      transaction.rollback = {
+        attempted: chunkResult.rollback.attempted,
+        verified: chunkResult.rollback.verified,
+        curves: transaction.rollback.curves,
+        ...(chunkResult.rollback.failures.length > 0
+          ? { failures: chunkResult.rollback.failures }
+          : {}),
+      };
+      transaction.status = chunkResult.status;
+      transaction.effects =
+        chunkResult.status === "rolled_back" ? "reverted" : chunkResult.effects;
+      transaction.failure.outcome =
+        chunkResult.status === "rolled_back"
+          ? "unchanged"
+          : chunkResult.status === "outcome_unknown"
+            ? "unknown"
+            : "partial";
+      for (const plan of transaction.plans) {
+        if (plan.status === "prepared") plan.status = "not_applied";
+        else if (plan.status === "written") plan.status = "applied_unverified";
       }
+      await timed(timings, "hostWriteMs", clock.now, () =>
+        closeBoundary(
+          capture,
+          transaction.target,
+          transaction.warnings,
+          () => (transaction.boundaryCalls += 1)
+        )
+      );
+      return finish();
     }
     failedCurveIndex = null;
 
@@ -1953,13 +2072,20 @@ export function normalizeCurveInput(request) {
   let points = null;
   let amount = null;
   if (request.mode === "replace") {
-    if (!Array.isArray(request.points)) {
-      throw codedError("INVALID_ARGUMENTS", "replace mode requires a points array");
+    const decodedPoints =
+      isRecord(request.points) && request.points.encoding === "dense-table-v1"
+        ? decodeDense(request.points)
+        : request.points;
+    if (!Array.isArray(decodedPoints)) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        "replace mode requires a points array or dense-table-v1 envelope"
+      );
     }
-    if (request.points.length > 2000) {
+    if (decodedPoints.length > 2000) {
       throw codedError("INVALID_ARGUMENTS", "points must contain at most 2000 items");
     }
-    points = request.points.map((point, index) => normalizeCurvePoint(point, index));
+    points = decodedPoints.map((point, index) => normalizeCurvePoint(point, index));
   } else {
     if (!Number.isFinite(request.amount)) {
       throw codedError("INVALID_ARGUMENTS", `${request.mode} mode requires a finite amount`);
@@ -1985,6 +2111,21 @@ export function normalizeCurveInput(request) {
 function normalizeCurvePoint(point, index) {
   if (!isRecord(point) || !Number.isFinite(point.value)) {
     throw codedError("INVALID_ARGUMENTS", `points[${index}] must contain a finite value`);
+  }
+  const allowedFields = new Set([
+    "value",
+    "blick",
+    "anchor",
+    "musicalPosition",
+    "rangeBoundary",
+    "gap",
+  ]);
+  const unknownFields = Object.keys(point).filter((field) => !allowedFields.has(field));
+  if (unknownFields.length > 0) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `points[${index}] contains unknown field: ${unknownFields.join(", ")}`
+    );
   }
   const positionFields = ["blick", "anchor", "musicalPosition", "rangeBoundary", "gap"].filter(
     (field) => point[field] !== undefined

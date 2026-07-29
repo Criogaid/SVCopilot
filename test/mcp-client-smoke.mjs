@@ -93,7 +93,7 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 40);
+  assert.equal(listed.tools.length, 41);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
@@ -106,6 +106,12 @@ try {
   assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_generate_harmony"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_vocal_context"));
+  const releaseArtifactTool = listed.tools.find(
+    (tool) => tool.name === "sv_release_artifact"
+  );
+  assert.ok(releaseArtifactTool);
+  assert.equal(releaseArtifactTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(releaseArtifactTool.inputSchema.required, ["artifactId"]);
   const compareTool = listed.tools.find((tool) => tool.name === "sv_audition_compare");
   assert.ok(compareTool);
   assert.ok(listed.tools.some((tool) => tool.name === "sv_get_audition_compare"));
@@ -187,12 +193,12 @@ try {
   assert.equal(rangeTool.inputSchema.anyOf, undefined);
   assert.equal(batchCurveTool.inputSchema.properties.target.type, "object");
   assert.equal(batchCurveTool.inputSchema.properties.target.anyOf, undefined);
-  assert.equal(
-    batchCurveTool.inputSchema.properties.curves.items.properties.points.items.oneOf,
-    undefined
-  );
+  const curvePointsInput =
+    batchCurveTool.inputSchema.properties.curves.items.properties.points;
+  assert.equal(curvePointsInput.anyOf[0].items.oneOf, undefined);
+  assert.equal(curvePointsInput.anyOf[1].properties.encoding.const, "dense-table-v1");
   assert.deepEqual(
-    batchCurveTool.inputSchema.properties.curves.items.properties.points.items.properties.anchor
+    curvePointsInput.anyOf[0].items.properties.anchor
       .properties.position.enum,
     ["onset", "center", "end", "ratio"]
   );
@@ -281,6 +287,17 @@ try {
   assert.ok(capabilities.interfaces.audition.includes("sv_audition_compare"));
   assert.ok(capabilities.interfaces.audition.includes("sv_stop_audition_compare"));
   assert.equal(capabilities.interfaces.typedResultFormat, "typed-v2");
+  assert.equal(capabilities.interfaces.artifact.releaseTool, "sv_release_artifact");
+  assert.deepEqual(capabilities.interfaces.artifact.pageBytes, {
+    default: 8 * 1024,
+    minimum: 8 * 1024,
+    maximum: 16 * 1024,
+  });
+  assert.equal(capabilities.interfaces.artifact.directReadMaxBytes, 16 * 1024);
+  assert.match(
+    capabilities.interfaces.artifact.resourceTemplate,
+    /\{artifactId\}\/\{contentHash\}/
+  );
   assert.equal(
     capabilities.interfaces.schemas.musicWorkflowIndex,
     "svcopilot://schemas/music-workflow"
@@ -357,7 +374,7 @@ try {
     ["insert", "delete", "split", "merge"]
   );
   assert.equal(
-    batchSchema.properties.curves.items.properties.points.items.properties.value.type,
+    batchSchema.properties.curves.items.properties.points.anyOf[0].items.properties.value.type,
     "number"
   );
   const compareResource = await client.readResource({
@@ -948,6 +965,37 @@ try {
   assert.match(rangeSnapshot.data.tracks[0].groups[0].occurrenceId, /^ctx_/);
   assert.match(rangeSnapshot.data.notes[0].id, /:n:0$/);
   assert.ok(Number.isFinite(rangeSnapshot.timings.serviceTotalMs));
+  assert.ok(rangeSnapshot.artifactRef);
+  const rangeArtifactResource = await client.readResource({
+    uri: rangeSnapshot.artifactRef.resourceUri,
+  });
+  assert.equal(
+    rangeArtifactResource.contents[0].text,
+    JSON.stringify(JSON.parse(rangeArtifactResource.contents[0].text))
+  );
+  const rangeArtifact = parseResource(rangeArtifactResource);
+  assert.equal(rangeArtifact.contentHash, rangeSnapshot.artifactRef.contentHash);
+  assert.equal(rangeArtifact.access.mode, "inline");
+  assert.equal(rangeArtifact.payload.data.notes.encoding, "dense-table-v1");
+  assert.equal(rangeArtifact.payload.data.automation.length, 0);
+  const firstArtifactPage = parseResource(
+    await client.readResource({ uri: rangeSnapshot.artifactRef.firstPageUri })
+  );
+  assert.equal(firstArtifactPage.artifact.contentHash, rangeSnapshot.artifactRef.contentHash);
+  assert.equal(firstArtifactPage.page.encoding, "json-utf8-fragment");
+  assert.ok(firstArtifactPage.page.bytesReturned > 0);
+  assert.ok(firstArtifactPage.page.bytesReturned <= 8 * 1024);
+  const releasedArtifact = parseToolResult(
+    await client.callTool({
+      name: "sv_release_artifact",
+      arguments: { artifactId: rangeSnapshot.artifactRef.artifactId },
+    })
+  );
+  assert.equal(releasedArtifact.released, true);
+  await assert.rejects(
+    client.readResource({ uri: rangeSnapshot.artifactRef.resourceUri }),
+    /ARTIFACT_NOT_FOUND/
+  );
 
   const rangeProcessing = parseToolResult(
     await client.callTool({

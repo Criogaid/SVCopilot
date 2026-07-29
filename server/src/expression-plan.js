@@ -1,4 +1,6 @@
-import { createHash } from "node:crypto";
+import { canonicalHashHex } from "./canonical-json.js";
+import { artifactReference } from "./artifact-store.js";
+import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
@@ -105,10 +107,12 @@ const PROVENANCE = Object.freeze({
 });
 
 export class ExpressionPlanService {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
     if (!store) throw new Error("ExpressionPlanService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
   }
 
   async plan(request = {}) {
@@ -129,7 +133,7 @@ export class ExpressionPlanService {
     const compiled = await timer.measure("compileMs", async () =>
       compileOperations(gestures, loaded, input, warnings)
     );
-    return buildPlanResponse(loaded, input, gestures, compiled, warnings, timer.finish());
+    return buildPlanResponse(loaded, input, gestures, compiled, warnings, timer.finish(), this.artifactStore, this.sessionId);
   }
 }
 
@@ -1143,7 +1147,7 @@ function clampValue(value, info, deltaLimit) {
 
 // ---------- 响应组装 ----------
 
-function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings) {
+function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings, artifactStore, sessionId) {
   const sharedTargetOccurrences = loaded.occurrence.sharedTargetOccurrences ?? [];
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
   const target = {
@@ -1202,16 +1206,11 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
     },
     points: operation.points.map((point) => ({ blick: point.blick, value: point.value })),
   });
-  const planId = `plan_${createHash("sha256")
-    .update(
-      stableStringify({
-        occurrenceId: loaded.occurrence.occurrenceId,
-        targetGroupUuid: loaded.occurrence.targetGroupUuid,
-        curves: compiled.operations.map(curveOf),
-      })
-    )
-    .digest("hex")
-    .slice(0, 16)}`;
+  const planId = `plan_${canonicalHashHex({
+    occurrenceId: loaded.occurrence.occurrenceId,
+    targetGroupUuid: loaded.occurrence.targetGroupUuid,
+    curves: compiled.operations.map(curveOf),
+  }).slice(0, 16)}`;
   const applyRequests = [];
   for (let callIndex = 0; callIndex < compiled.applyCallCount; callIndex += 1) {
     const callOperations = compiled.operations.filter(
@@ -1280,6 +1279,61 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
       "The target NoteGroup is shared by multiple occurrences; commit requires target.allowSharedTargetMutation:true and affects every occurrence."
     );
   }
+
+  const planArtifactRefs = [];
+  if (input.usePlanRef && artifactStore && sessionId && applyRequests.length > 0) {
+    try {
+      for (const request of applyRequests) {
+        const { payload } = buildPlanArtifact({
+          targetTool: "sv_patch_parameter_curves",
+          mutationRequest: request.arguments,
+          targetGroupUuid: loaded.occurrence.targetGroupUuid,
+          occurrenceId: loaded.occurrence.occurrenceId,
+          expectedTimeOffsetBlick: loaded.timeOffsetBlick,
+          fingerprints: { expectedNotes: request.arguments.target?.expectedNotes ?? [] },
+          contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+            noteIds: (request.arguments.target?.expectedNotes ?? []).map(
+              (fingerprint) => fingerprint.noteId
+            ),
+          }),
+        });
+        const planArtifact = artifactStore.seal({
+          kind: "plan",
+          schemaVersion: "1",
+          sessionId,
+          sourceEpoch: loaded.stored.epoch,
+          payload,
+        });
+        planArtifactRefs.push(artifactReference(planArtifact));
+      }
+    } catch (error) {
+      for (const reference of planArtifactRefs) {
+        artifactStore.release({
+          artifactId: reference.artifactId,
+          sessionId,
+        });
+      }
+      planArtifactRefs.length = 0;
+      warnings.push({
+        code: "ARTIFACT_SEAL_FAILED",
+        message: `Failed to seal expression plan artifact: ${error.message}`,
+      });
+    }
+  }
+
+  const applyEnvelope = buildApplyEnvelope(applyRequests, {
+    sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+  });
+  if (planArtifactRefs.length === applyRequests.length && applyEnvelope?.arguments) {
+    applyEnvelope.arguments = { planRef: planArtifactRefs[0], action: "dry_run" };
+    for (let index = 0; index < (applyEnvelope.additionalCalls?.length ?? 0); index += 1) {
+      applyEnvelope.additionalCalls[index].arguments = {
+        planRef: planArtifactRefs[index + 1],
+        action: "dry_run",
+      };
+    }
+  }
+
   return {
     ok: true,
     status: hasOperations ? "planned" : "no_change",
@@ -1309,9 +1363,10 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings)
       ? {}
       : { gestures: publicGestures, operations: operationsMeta }),
     ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
-    apply: buildApplyEnvelope(applyRequests, { sharedTargetConfirmationRequired: requiresSharedTargetConfirmation }),
-    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
-    applyRequests,
+    apply: applyEnvelope,
+    ...(planArtifactRefs.length > 0 && planArtifactRefs.length === applyRequests.length
+      ? {}
+      : { applyRequests }),
     review: {
       requiresHumanAudition: true,
       requiresSharedTargetConfirmation,
@@ -1331,7 +1386,7 @@ function normalizePlanRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "gestures", "intent", "constraints", "sampling", "responseMode"],
+    ["contextId", "occurrenceId", "gestures", "intent", "constraints", "sampling", "responseMode", "usePlanRef"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -1374,6 +1429,7 @@ function normalizePlanRequest(request) {
     intentDefaults: EXPRESSION_PLAN_DEFAULTS.intent,
     responseMode,
     referencedNoteIds,
+    usePlanRef: request.usePlanRef !== false,
   };
 }
 
@@ -1697,17 +1753,6 @@ function checkedInteger(value, minimum, maximum, fallback, label) {
     );
   }
   return value;
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 function assertKnownKeys(value, allowed, label) {

@@ -1,4 +1,6 @@
-import { createHash } from "node:crypto";
+import { canonicalHashHex } from "./canonical-json.js";
+import { artifactReference } from "./artifact-store.js";
+import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { MAX_PATCHES } from "./note-patch.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
@@ -41,10 +43,12 @@ const PROVENANCE = Object.freeze({
 });
 
 export class QuantizePlanService {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
     if (!store) throw new Error("QuantizePlanService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
     this.continuationIdentities = new Map();
   }
 
@@ -61,7 +65,15 @@ export class QuantizePlanService {
     const planned = await timer.measure("quantizeMs", async () =>
       quantizeNotes(loaded, input, warnings)
     );
-    const response = buildQuantizeResponse(loaded, input, planned, warnings, timer.finish());
+    const response = buildQuantizeResponse(
+      loaded,
+      input,
+      planned,
+      warnings,
+      timer.finish(),
+      this.artifactStore,
+      this.sessionId
+    );
     if (response.continuation && typeof input.occurrenceId === "string") {
       rememberContinuationIdentity(this.continuationIdentities, loaded, input, this.now());
     }
@@ -341,7 +353,7 @@ function gridContextAt(absBlick, meterMarks, quarterBlick) {
 
 // ---------- 响应组装 ----------
 
-function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
+function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifactStore, sessionId) {
   const changed = planned.filter((item) => item.changed);
   const patches = changed.map((item) => ({
     noteId: item.note.noteId,
@@ -394,19 +406,14 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
       message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; patchRequest carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow continuation.workflow: commit, re-snapshot, re-quantize with identical options. Each round is its own transaction and Undo record.`,
     });
   }
-  const planId = `qnt_${createHash("sha256")
-    .update(
-      stableStringify({
-        occurrenceId: loaded.occurrence.occurrenceId,
-        grid: input.grid,
-        strength: input.strength,
-        swing: input.swing,
-        quantizeDurations: input.quantizeDurations,
-        patches,
-      })
-    )
-    .digest("hex")
-    .slice(0, 16)}`;
+  const planId = `qnt_${canonicalHashHex({
+    occurrenceId: loaded.occurrence.occurrenceId,
+    grid: input.grid,
+    strength: input.strength,
+    swing: input.swing,
+    quantizeDurations: input.quantizeDurations,
+    patches,
+  }).slice(0, 16)}`;
   const revertedCount = planned.filter((item) => item.onsetReverted).length;
   // 共享 target 的写入会同时改变所有 occurrence；规划阶段就如实声明。
   const requiresSharedTargetConfirmation =
@@ -437,6 +444,42 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
       `${remainingChangedCount} change(s) do not fit this call (${MAX_PATCHES}-patch cap): after committing, re-snapshot the same range and re-run sv_quantize_notes with identical options — the loop converges to no_change.`
     );
   }
+  let planArtifactRef = null;
+  if (input.usePlanRef && artifactStore && sessionId && patchRequest) {
+    try {
+      const { payload } = buildPlanArtifact({
+          targetTool: "sv_patch_notes",
+          mutationRequest: patchRequest.arguments,
+          targetGroupUuid: loaded.occurrence.targetGroupUuid,
+          occurrenceId: loaded.occurrence.occurrenceId,
+          fingerprints: {},
+          contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+            noteIds: submittable.map((patch) => patch.noteId),
+          }),
+      });
+      const planArtifact = artifactStore.seal({
+        kind: "plan",
+        schemaVersion: "1",
+        sessionId,
+        sourceEpoch: loaded.stored.epoch,
+        payload,
+      });
+      planArtifactRef = artifactReference(planArtifact);
+    } catch (error) {
+      warnings.push({
+        code: "ARTIFACT_SEAL_FAILED",
+        message: `Failed to seal quantize plan artifact: ${error.message}`,
+      });
+    }
+  }
+
+  const applyEnvelope = buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
+    sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+  });
+  if (planArtifactRef && applyEnvelope?.arguments) {
+    applyEnvelope.arguments = { planRef: planArtifactRef, action: "dry_run" };
+  }
+
   return {
     ok: true,
     status: patchRequest ? "planned" : "no_change",
@@ -486,11 +529,8 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings) {
           })),
           perNoteTruncated: planned.length > cap,
         }),
-    apply: buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
-      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
-    }),
-    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
-    patchRequest,
+    apply: applyEnvelope,
+    ...(planArtifactRef ? {} : { patchRequest }),
     ...(continuation ? { continuation } : {}),
     review: { requiresHumanReview: revertedCount > 0, requiresSharedTargetConfirmation, checklist },
     provenance: PROVENANCE,
@@ -505,7 +545,7 @@ function normalizeQuantizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "noteIds", "grid", "strength", "swing", "quantizeDurations", "responseMode"],
+    ["contextId", "occurrenceId", "noteIds", "grid", "strength", "swing", "quantizeDurations", "responseMode", "usePlanRef"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -566,6 +606,7 @@ function normalizeQuantizeRequest(request) {
     swing,
     quantizeDurations: request.quantizeDurations ?? false,
     responseMode,
+    usePlanRef: request.usePlanRef !== false,
   };
 }
 
@@ -573,17 +614,6 @@ function normalizeQuantizeRequest(request) {
 
 function appendOnce(warnings, warning) {
   if (!warnings.some((item) => item.code === warning.code)) warnings.push(warning);
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 function assertKnownKeys(value, allowed, label) {

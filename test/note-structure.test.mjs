@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ArtifactStore, artifactReference } from "../server/src/artifact-store.js";
 import { NoteStructureService } from "../server/src/note-structure.js";
+import { buildPlanArtifact, buildPlanContextSnapshot } from "../server/src/plan-reference.js";
 import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
 
 const Q = 705600;
@@ -371,7 +373,12 @@ test("sv_restructure_notes verifies inserted phoneme and language overrides", as
 });
 
 // range context fixture：结构与 sv_snapshot_range prepareStoredRange 存储的 occurrence 一致。
-function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
+function createRangeFixture({
+  shared = false,
+  extraOccurrence = false,
+  artifactStore = null,
+  sessionId = null,
+} = {}) {
   const model = createStructureModel();
   const session = { withExclusive: (task) => task(model.host) };
   const snapshots = new SnapshotService(session, {
@@ -381,6 +388,8 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
   const service = new NoteStructureService(session, snapshots, {
     sleepFn: async () => {},
     now: () => 1000,
+    artifactStore,
+    sessionId,
   });
   const entry = snapshots.store.create({
     epoch: 1,
@@ -424,8 +433,55 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
       noteFingerprints: [],
     });
   }
-  return { model, snapshots, service, contextId: entry.contextId, occurrenceId };
+  return { model, snapshots, service, entry, contextId: entry.contextId, occurrenceId };
 }
+
+test("sv_restructure_notes expands a planRef and restores its bounded context capsule", async () => {
+  const sessionId = "sess_structure_plan";
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const { model, snapshots, service, entry, contextId, occurrenceId } = createRangeFixture({
+    artifactStore,
+    sessionId,
+  });
+  const occurrence = entry.context.occurrences[0];
+  const { payload } = buildPlanArtifact({
+    targetTool: "sv_restructure_notes",
+    mutationRequest: {
+      contextId,
+      occurrenceId,
+      operations: [
+        {
+          op: "insert",
+          note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67, lyrics: "go" },
+        },
+      ],
+      dryRun: true,
+      atomic: true,
+    },
+    targetGroupUuid: occurrence.targetGroupUuid,
+    occurrenceId,
+    contextSnapshot: buildPlanContextSnapshot(entry, occurrence),
+  });
+  const reference = artifactReference(
+    artifactStore.seal({
+      kind: "plan",
+      schemaVersion: "1",
+      sessionId,
+      sourceEpoch: 1,
+      payload,
+    })
+  );
+  snapshots.store.delete(contextId);
+
+  const result = await service.restructureNotes({
+    planRef: reference,
+    action: "dry_run",
+  });
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.data.expectedNoteCount, 4);
+  assert.equal(model.groupNotes.length, 3);
+  assert.ok(snapshots.store.get(contextId));
+});
 
 test("sv_restructure_notes accepts a range context and derives the occurrence from noteIds", async () => {
   const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();

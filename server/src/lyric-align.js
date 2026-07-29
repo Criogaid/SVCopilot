@@ -1,4 +1,6 @@
-import { createHash } from "node:crypto";
+import { canonicalHashHex } from "./canonical-json.js";
+import { artifactReference } from "./artifact-store.js";
+import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { ServiceTiming } from "./service-timing.js";
 import { MAX_PATCHES } from "./note-patch.js";
@@ -12,7 +14,7 @@ import {
 //
 // 关键契约：
 // - 纯内存只读：只读取 range context 的音符指纹，不进 ExecutionCoordinator、绝不写宿主，
-//   也绝不通过临时写工程来"试算"音素。真正落地由调用方把 patchRequest 交给现有
+//   也绝不通过临时写工程来"试算"音素。真正落地由调用方把 apply 交给现有
 //   sv_patch_notes（expected.lyrics 前置条件防快照后漂移，冲突检查/Undo/读回全部复用）。
 // - 分档诚实置信：日语假名 mora 切分是确定性规则（一假名一拍；拗音/小假名并入前拍；
 //   促音/拨音/长音各占一拍）；英语音节数是元音簇启发式（文献准确率 ~85-90%，只影响
@@ -45,12 +47,15 @@ const SMALL_KANA = new Set([..."ぁぃぅぇぉゃゅょゎァィゥェォャュ
 // 独立成拍的特殊拍：促音、拨音、长音（唱歌中各占一个音符/拍）。
 const STANDALONE_KANA = new Set([..."っンんッー"]);
 const MAX_CONTINUATION_IDENTITIES = 256;
+const STANDARD_ALIGNMENT_ITEMS = 50;
 
 export class LyricAlignService {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
     if (!store) throw new Error("LyricAlignService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
     this.continuationIdentities = new Map();
   }
 
@@ -73,7 +78,10 @@ export class LyricAlignService {
     const mapped = await timer.measure("mapMs", async () =>
       mapUnitsToNotes(tokens, loaded, input, warnings)
     );
-    const response = buildAlignResponse(loaded, input, tokens, mapped, warnings, timer.finish());
+    const response = buildAlignResponse(loaded, input, tokens, mapped, warnings, timer.finish(), {
+      artifactStore: this.artifactStore,
+      sessionId: this.sessionId,
+    });
     if (response.continuation) {
       rememberContinuationIdentity(this.continuationIdentities, loaded, input, this.now());
     }
@@ -260,7 +268,7 @@ function noteStructureDigest(noteFingerprints, startNoteIndexInGroup) {
       pitch: note.pitch,
       detuneCents: note.detuneCents,
     }));
-  return createHash("sha256").update(stableStringify(structure)).digest("hex");
+  return canonicalHashHex(structure);
 }
 
 // ---------- 分词（按字符类别分段；确定性） ----------
@@ -571,7 +579,15 @@ function createLyricUnit(token, text, role) {
 
 // ---------- 响应组装 ----------
 
-function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
+function buildAlignResponse(
+  loaded,
+  input,
+  tokens,
+  mapped,
+  warnings,
+  timings,
+  { artifactStore, sessionId } = {}
+) {
   const changed = mapped.perNote.filter((item) => item.changed);
   const patches = changed.map((item) => ({
     noteId: item.noteId,
@@ -610,7 +626,7 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
           patchCapPerCall: MAX_PATCHES,
           remainingChangedCount,
           workflow: [
-            "Commit the returned patchRequest (dryRun first, then dryRun:false).",
+            "Submit apply.arguments with action dry_run, then commit.",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
             "Re-run sv_align_lyrics with the same lyrics and options against the fresh contextId: already-applied notes come back unchanged, so the next round plans exactly the remaining patches. Explicit occurrenceId/startNoteId are re-anchored only when their short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); otherwise the replay is rejected.",
             "Repeat until the response carries no continuation (or reports status no_change).",
@@ -620,19 +636,14 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
   if (continuation) {
     warnings.push({
       code: "PLAN_EXCEEDS_PATCH_CAP",
-      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; patchRequest carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow-up batches cannot be pre-generated (a successful sv_patch_notes invalidates the contextId and noteIds embed it) — follow continuation.workflow: commit, re-snapshot, re-align, repeat. Each round is its own transaction and Undo record.`,
+      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; apply carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow-up batches cannot be pre-generated (a successful sv_patch_notes invalidates the contextId and noteIds embed it) — follow continuation.workflow: commit, re-snapshot, re-align, repeat. Each round is its own transaction and Undo record.`,
     });
   }
-  const planId = `lyr_${createHash("sha256")
-    .update(
-      stableStringify({
-        occurrenceId: loaded.occurrence.occurrenceId,
-        patches,
-        perNote: mapped.perNote.map((item) => [item.noteId, item.plannedLyrics]),
-      })
-    )
-    .digest("hex")
-    .slice(0, 16)}`;
+  const planId = `lyr_${canonicalHashHex({
+    occurrenceId: loaded.occurrence.occurrenceId,
+    patches,
+    perNote: mapped.perNote.map((item) => [item.noteId, item.plannedLyrics]),
+  }).slice(0, 16)}`;
   const needsReviewCount = mapped.perNote.filter((item) => item.needsReview).length;
   const semanticRoles = { total: mapped.units.length, byRole: {} };
   for (const unit of mapped.units) {
@@ -644,7 +655,7 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
     (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1;
   const checklist = [
     "Review plannedLyrics per note; heuristic English syllable counts only affect the number of '+' continuation notes.",
-    "Apply through the returned patchRequest (sv_patch_notes) with dryRun:true first, then commit; expected.lyrics guards against post-snapshot drift.",
+    "Apply through the returned apply envelope with action dry_run first, then commit; expected.lyrics guards against post-snapshot drift.",
     "Phoneme output is decided by the host G2P after the write; verify with sv_wait_for_processing (this planner does not guarantee G2P parity).",
   ];
   if (needsReviewCount > 0) {
@@ -662,6 +673,74 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
       `${remainingChangedCount} change(s) do not fit this call (${MAX_PATCHES}-patch cap): after committing, re-snapshot the same range and re-run sv_align_lyrics with identical arguments — each round applies the next slice and the loop converges to no_change.`
     );
   }
+  let planRef = null;
+  if (input.usePlanRef && artifactStore && sessionId && patchRequest) {
+    try {
+      const { payload } = buildPlanArtifact({
+        targetTool: "sv_patch_notes",
+        mutationRequest: patchRequest.arguments,
+        targetGroupUuid: loaded.occurrence.targetGroupUuid,
+        occurrenceId: loaded.occurrence.occurrenceId,
+        contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+          noteIds: submittable.map((patch) => patch.noteId),
+        }),
+      });
+      planRef = artifactReference(
+        artifactStore.seal({
+          kind: "plan",
+          schemaVersion: "1",
+          sessionId,
+          sourceEpoch: loaded.stored.epoch,
+          payload,
+        })
+      );
+    } catch (error) {
+      warnings.push({
+        code: "ARTIFACT_SEAL_FAILED",
+        message: `Failed to seal lyric alignment plan artifact: ${error.message}`,
+      });
+    }
+  }
+  let alignmentDetailRef = null;
+  const hasAlignmentDetails =
+    mapped.unassignedUnits.length > 0 || mapped.unfilledNotes.length > 0;
+  if (
+    input.responseMode === "compact" &&
+    hasAlignmentDetails &&
+    artifactStore &&
+    sessionId
+  ) {
+    try {
+      alignmentDetailRef = artifactReference(
+        artifactStore.seal({
+          kind: "planner-detail",
+          schemaVersion: "1",
+          sessionId,
+          sourceEpoch: loaded.stored.epoch,
+          payload: {
+            planner: "sv_align_lyrics",
+            planId,
+            alignment: {
+              unassignedUnits: mapped.unassignedUnits,
+              unfilledNotes: mapped.unfilledNotes,
+            },
+          },
+        })
+      );
+    } catch (error) {
+      warnings.push({
+        code: "ARTIFACT_SEAL_FAILED",
+        message: `Failed to seal lyric alignment detail artifact: ${error.message}`,
+      });
+    }
+  }
+  const apply = buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
+    sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+  });
+  if (planRef && apply?.arguments) {
+    apply.arguments = { planRef, action: "dry_run" };
+  }
+
   return {
     ok: true,
     status: patchRequest ? "planned" : "no_change",
@@ -702,15 +781,9 @@ function buildAlignResponse(loaded, input, tokens, mapped, warnings, timings) {
           })),
           perNote: mapped.perNote,
         }),
-    alignment: {
-      unassignedUnits: mapped.unassignedUnits,
-      unfilledNotes: mapped.unfilledNotes,
-    },
-    apply: buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
-      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
-    }),
-    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
-    patchRequest,
+    alignment: formatAlignment(mapped, input.responseMode, alignmentDetailRef),
+    apply,
+    ...(!planRef ? { patchRequest } : {}),
     ...(continuation ? { continuation } : {}),
     review: { requiresHumanReview: needsReviewCount > 0, requiresSharedTargetConfirmation, checklist },
     provenance: PROVENANCE,
@@ -725,7 +798,16 @@ function normalizeAlignRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "lyrics", "language", "startNoteId", "setLanguageOverride", "responseMode"],
+    [
+      "contextId",
+      "occurrenceId",
+      "lyrics",
+      "language",
+      "startNoteId",
+      "setLanguageOverride",
+      "responseMode",
+      "usePlanRef",
+    ],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -771,24 +853,54 @@ function normalizeAlignRequest(request) {
     startNoteId: request.startNoteId,
     setLanguageOverride: request.setLanguageOverride ?? true,
     responseMode,
+    usePlanRef: request.usePlanRef !== false,
   };
+}
+
+function formatAlignment(mapped, responseMode, detailRef) {
+  const unassignedCount = mapped.unassignedUnits.length;
+  const unfilledCount = mapped.unfilledNotes.length;
+  const summary = {
+    unassignedCount,
+    unfilledCount,
+    ...(unassignedCount > 0
+      ? {
+          firstUnassignedUnit: mapped.unassignedUnits[0],
+          lastUnassignedUnit: mapped.unassignedUnits.at(-1),
+        }
+      : {}),
+    ...(unfilledCount > 0
+      ? {
+          firstUnfilledNote: mapped.unfilledNotes[0],
+          lastUnfilledNote: mapped.unfilledNotes.at(-1),
+        }
+      : {}),
+  };
+  if (responseMode === "compact") {
+    return {
+      ...summary,
+      detailsOmitted: hasAlignmentOverflow(mapped, 0),
+      ...(detailRef ? { detailRef } : {}),
+    };
+  }
+  const limit = responseMode === "verbose" ? Number.POSITIVE_INFINITY : STANDARD_ALIGNMENT_ITEMS;
+  return {
+    ...summary,
+    unassignedUnits: mapped.unassignedUnits.slice(0, limit),
+    unfilledNotes: mapped.unfilledNotes.slice(0, limit),
+    unassignedTruncated: mapped.unassignedUnits.length > limit,
+    unfilledTruncated: mapped.unfilledNotes.length > limit,
+  };
+}
+
+function hasAlignmentOverflow(mapped, limit) {
+  return mapped.unassignedUnits.length > limit || mapped.unfilledNotes.length > limit;
 }
 
 // ---------- 小工具 ----------
 
 function appendOnce(warnings, warning) {
   if (!warnings.some((item) => item.code === warning.code)) warnings.push(warning);
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 function assertKnownKeys(value, allowed, label) {

@@ -18,12 +18,15 @@
 // details.tool + details.arguments —— 调用方照抄即可拿到该 section 的完整明细。
 
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
+import { artifactReference } from "./artifact-store.js";
 import { LyricProsodyService } from "./lyric-prosody.js";
 import { PhraseAnalysisService } from "./phrase-analysis.js";
+import { project, registerProjection } from "./response-projection.js";
 import { ServiceTiming } from "./service-timing.js";
 import { StyleProfileService } from "./style-profile.js";
 
 const SECTIONS = ["phrase", "prosody", "style", "computedPitch"];
+const PROJECTION_KIND = "vocal-context-analysis";
 
 const DEFAULT_BUDGETS = Object.freeze({
   issues: 50,
@@ -76,11 +79,37 @@ const FATAL_CODES = new Set([
   "INVALID_ARGUMENTS",
 ]);
 
+registerProjection(PROJECTION_KIND, {
+  summarize: (canonical) => ({
+    sectionIndex: Object.fromEntries(
+      Object.entries(canonical.sections).map(([name, section]) => [
+        name,
+        {
+          status: section.status,
+          authority: section.authority,
+          ...(section.summary !== undefined ? { summary: section.summary } : {}),
+          ...(section.reason !== undefined ? { reason: section.reason } : {}),
+          ...(section.remedy !== undefined ? { remedy: section.remedy } : {}),
+          details: section.details,
+        },
+      ])
+    ),
+    summary: canonical.summary,
+    topFindings: canonical.topFindings,
+    nextSteps: canonical.nextSteps,
+  }),
+  chooseRepresentativeItems: (canonical) => ({ sections: canonical.sections }),
+  paginateDetail: (_canonical, options) =>
+    options.artifactRef ? { detailRef: options.artifactRef } : {},
+});
+
 export class VocalContextAnalysisService {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
     if (!store) throw new Error("VocalContextAnalysisService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
     // 复用既有分析器实例：它们本身无状态（只读 store），共享安全。
     this.phrase = new PhraseAnalysisService({ store, now });
     this.prosody = new LyricProsodyService({ store, now });
@@ -107,6 +136,40 @@ export class VocalContextAnalysisService {
     }
 
     const findings = collectFindings(sections, input);
+    const canonical = {
+      sections,
+      summary: summarize(sections, findings),
+      topFindings: findings.slice(0, input.budgets.issues),
+      nextSteps: nextSteps(sections, findings, target),
+    };
+    let artifactRef = null;
+    if (this.artifactStore && this.sessionId) {
+      try {
+        const artifact = this.artifactStore.seal({
+          kind: "vocal-context-analysis",
+          schemaVersion: "1",
+          sessionId: this.sessionId,
+          payload: {
+            contextId: target.contextId,
+            occurrence: target.publicOccurrence,
+            requested: [...input.include],
+            ...canonical,
+          },
+        });
+        artifactRef = artifactReference(artifact);
+      } catch (error) {
+        warnings.push({
+          code: "ARTIFACT_SEAL_FAILED",
+          message: `Failed to seal vocal-context detail artifact: ${error.message}`,
+        });
+      }
+    }
+    const projection = project({
+      kind: PROJECTION_KIND,
+      canonical,
+      mode: input.responseMode === "verbose" ? "audit" : input.responseMode,
+      options: { artifactRef },
+    });
     return applyByteBudget(
       {
         ok: true,
@@ -114,13 +177,14 @@ export class VocalContextAnalysisService {
         contextId: target.contextId,
         occurrence: target.publicOccurrence,
         requested: [...input.include],
-        sections,
-        summary: summarize(sections, findings),
-        topFindings: findings.slice(0, input.budgets.issues),
-        nextSteps: nextSteps(sections, findings, target),
+        responseMode: input.responseMode,
+        ...projection.summary,
+        ...(projection.representative ?? {}),
+        ...(projection.detail ?? {}),
         provenance: PROVENANCE,
         warnings,
         timings: timer.finish(),
+        ...(artifactRef ? { artifactRef } : {}),
       },
       input,
       warnings
@@ -596,6 +660,7 @@ function snapshotBlickRange(range) {
 function applyByteBudget(response, input, warnings) {
   const size = Buffer.byteLength(JSON.stringify(response), "utf8");
   if (size <= input.budgets.bytes) return response;
+  if (!response.sections) return response;
   // 超预算时先丢逐项明细（摘要与 topFindings 是决策必需），并如实警告。
   const trimmed = { ...response, sections: { ...response.sections } };
   for (const [name, section] of Object.entries(trimmed.sections)) {

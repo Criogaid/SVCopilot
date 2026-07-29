@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-
+import { canonicalHashHex } from "./canonical-json.js";
+import { artifactReference } from "./artifact-store.js";
+import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
@@ -50,10 +51,12 @@ const PROVENANCE = Object.freeze({
 });
 
 export class PitchGesturePlanService {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
     if (!store) throw new Error("PitchGesturePlanService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
+    this.artifactStore = artifactStore;
+    this.sessionId = sessionId;
   }
 
   async plan(request = {}) {
@@ -78,7 +81,9 @@ export class PitchGesturePlanService {
       compiled,
       selection,
       warnings,
-      timer.finish()
+      timer.finish(),
+      this.artifactStore,
+      this.sessionId
     );
   }
 }
@@ -630,7 +635,7 @@ function compileOperations(gestures, loaded, input, warnings) {
 
 // ---------- 响应组装 ----------
 
-function buildPlanResponse(loaded, input, gestures, compiled, selection, warnings, timings) {
+function buildPlanResponse(loaded, input, gestures, compiled, selection, warnings, timings, artifactStore, sessionId) {
   const sharedTargetOccurrences = loaded.occurrence.sharedTargetOccurrences ?? [];
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
   const target = {
@@ -687,18 +692,13 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   const applyRequests = applyArguments
     ? [{ tool: "sv_patch_pitch_controls", arguments: applyArguments }]
     : [];
-  const planId = `plan_${createHash("sha256")
-    .update(
-      stableStringify({
-        occurrenceId: loaded.occurrence.occurrenceId,
-        targetGroupUuid: loaded.occurrence.targetGroupUuid,
-        specialEventPolicy: input.specialEventPolicy,
-        requestedGestures: input.gestures,
-        operations: compiled.operations.map((operation) => operation.control),
-      })
-    )
-    .digest("hex")
-    .slice(0, 16)}`;
+  const planId = `plan_${canonicalHashHex({
+    occurrenceId: loaded.occurrence.occurrenceId,
+    targetGroupUuid: loaded.occurrence.targetGroupUuid,
+    specialEventPolicy: input.specialEventPolicy,
+    requestedGestures: input.gestures,
+    operations: compiled.operations.map((operation) => operation.control),
+  }).slice(0, 16)}`;
 
   const publicGestures = gestures.map((gesture) => ({
     gestureId: gesture.gestureId,
@@ -740,6 +740,47 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
       "The target NoteGroup is shared by multiple occurrences; commit requires target.allowSharedTargetMutation:true and affects every occurrence."
     );
   }
+
+  let planArtifactRef = null;
+  if (input.usePlanRef && artifactStore && sessionId && hasOperations) {
+    try {
+      const { payload } = buildPlanArtifact({
+          targetTool: "sv_patch_pitch_controls",
+          mutationRequest: applyRequests[0].arguments,
+          targetGroupUuid: loaded.occurrence.targetGroupUuid,
+          occurrenceId: loaded.occurrence.occurrenceId,
+          expectedTimeOffsetBlick: loaded.timeOffsetBlick,
+          fingerprints: { expectedNotes: applyRequests[0].arguments.target?.expectedNotes ?? [] },
+          contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+            noteIds: (applyRequests[0].arguments.target?.expectedNotes ?? []).map(
+              (fingerprint) => fingerprint.noteId
+            ),
+          }),
+      });
+      const planArtifact = artifactStore.seal({
+        kind: "plan",
+        schemaVersion: "1",
+        sessionId,
+        sourceEpoch: loaded.stored.epoch,
+        payload,
+      });
+      planArtifactRef = artifactReference(planArtifact);
+    } catch (error) {
+      warnings.push({
+        code: "ARTIFACT_SEAL_FAILED",
+        message: `Failed to seal pitch gesture plan artifact: ${error.message}`,
+      });
+    }
+  }
+
+  const applyEnvelope = buildApplyEnvelope(hasOperations ? applyRequests : null, {
+    sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
+  });
+  // planArtifactRef 存在时，apply.arguments 使用 planRef 而不是内联完整请求。
+  if (planArtifactRef && applyEnvelope?.arguments) {
+    applyEnvelope.arguments = { planRef: planArtifactRef, action: "dry_run" };
+  }
+
   return {
     ok: true,
     status: hasOperations ? "planned" : "no_change",
@@ -768,11 +809,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
       types: [...new Set(gestures.map((gesture) => gesture.type))],
     },
     ...(input.responseMode === "compact" ? {} : { gestures: publicGestures, operations: operationsMeta }),
-    apply: buildApplyEnvelope(hasOperations ? applyRequests : null, {
-      sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
-    }),
-    // deprecated：与 apply 内容一致，保留一个接口版本供既有调用方过渡。
-    applyRequests,
+    apply: applyEnvelope,
+    ...(planArtifactRef ? {} : { applyRequests }),
     review: {
       requiresHumanAudition: true,
       requiresSharedTargetConfirmation,
@@ -799,6 +837,7 @@ function normalizePlanRequest(request) {
       "constraints",
       "sampling",
       "responseMode",
+      "usePlanRef",
     ],
     "request"
   );
@@ -842,6 +881,7 @@ function normalizePlanRequest(request) {
     sampling: normalizeSampling(request.sampling),
     responseMode,
     referencedNoteIds,
+    usePlanRef: request.usePlanRef !== false,
   };
 }
 
@@ -990,15 +1030,6 @@ function checkedInteger(value, minimum, maximum, fallback, label) {
     throw codedError("INVALID_ARGUMENTS", `${label} must be an integer between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 function assertKnownKeys(value, allowed, label) {
