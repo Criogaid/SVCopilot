@@ -11,6 +11,7 @@ import {
 import { waitForProcessing } from "./processing.js";
 import { ServiceTiming } from "./service-timing.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
+import { readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 
@@ -81,7 +82,7 @@ export class PhraseEditService {
           })
         );
         prepared = await timer.measure("detachedPrepareMs", () =>
-          prepareDetachedPhrase(capture, resolved, input)
+          prepareDetachedPhrase(capture, resolved, input, host)
         );
         if (input.dryRun) {
           if (
@@ -503,7 +504,7 @@ async function resolveTarget(
   };
 }
 
-async function prepareDetachedPhrase(capture, resolved, input) {
+async function prepareDetachedPhrase(capture, resolved, input, host) {
   if (
     input.notePatches.length === 0 &&
     input.structureOperations.length === 0 &&
@@ -511,7 +512,7 @@ async function prepareDetachedPhrase(capture, resolved, input) {
   ) {
     return prepareNonStructuralPhrase(capture, resolved, input);
   }
-  await verifyContextFingerprints(capture, resolved);
+  await verifyContextFingerprints(capture, resolved, host);
   const backup = await capture.call(resolved.originalTarget, "clone", [], {
     inferredType: "NoteGroup",
   });
@@ -639,13 +640,30 @@ async function prepareNonStructuralPhrase(capture, resolved, input) {
   };
 }
 
-async function verifyContextFingerprints(capture, resolved) {
-  for (const expected of resolved.occurrence.noteFingerprints) {
+async function verifyContextFingerprints(capture, resolved, host) {
+  const expectedFingerprints = resolved.occurrence.noteFingerprints;
+  if (expectedFingerprints.length === 0) return;
+
+  // 写入仍需要 note handle；先按 occurrence 顺序解析，再一次性批量读指纹。
+  const notes = [];
+  for (const expected of expectedFingerprints) {
     const note = await capture.call(resolved.originalTarget, "getNote", [expected.indexInGroup + 1], {
       inferredType: "Note",
     });
     if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
-    const observed = await readNoteFingerprint(capture, note);
+    notes.push(note);
+  }
+  const observedFingerprints = await readNoteFingerprints(capture, {
+    host,
+    notes,
+    trackIndex: resolved.occurrence.trackIndex,
+    groupReferenceIndex: resolved.occurrence.groupIndex,
+    expectedGroupUuid: resolved.originalTargetUuid,
+    noteIndicesInGroup: expectedFingerprints.map((expected) => expected.indexInGroup),
+  });
+
+  for (const [position, expected] of expectedFingerprints.entries()) {
+    const observed = observedFingerprints[position];
     const comparable = pickFingerprint(expected);
     if (!jsonEqual(observed, comparable)) {
       const error = codedError("STALE_CONTEXT", `note ${expected.noteId} changed after snapshot`);
