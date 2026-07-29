@@ -317,6 +317,142 @@ local function unmarshal(v)
 end
 
 -- ===================================================================== --
+-- 有界批量读取（internal op）。只做机械读取：不注册长期 handle、不调 setter、
+-- 不产生 Undo，任一音符读取失败整批失败。字段来自固定 allowlist。
+-- ===================================================================== --
+BULK_MAX_NOTES = 200
+-- 结果还要被 {type,id,ok,result} 信封包一层；预算留给 payload 本身。
+BULK_RESULT_BUDGET = 60 * 1024
+-- 单字段值的保守上限（含 key、引号、逗号与多字节歌词）。仅用于读取前估算。
+BULK_FIELD_ESTIMATE = 48
+
+local NOTE_FIELD_READERS = {
+  indexInGroup        = function(note) return note:getIndexInParent() - 1 end,
+  onsetBlick          = function(note) return note:getOnset() end,
+  durationBlick       = function(note) return note:getDuration() end,
+  pitch               = function(note) return note:getPitch() end,
+  lyrics              = function(note) return note:getLyrics() end,
+  phonemesOverride    = function(note) return note:getPhonemes() end,
+  languageOverride    = function(note) return note:getLanguageOverride() end,
+  detuneCents         = function(note) return note:getDetune() end,
+}
+
+-- 批量结果只承载标量。nil 与特殊数字用 typed-v2 信封无损表达；其余类型
+-- （userdata/table/function）说明 allowlist 与宿主返回不符，必须整批失败而不是
+-- 把 handle 混进批量结果里。
+local function bulkScalar(field, value)
+  local t = type(value)
+  if value == nil then
+    return { ['$sv'] = 'nil' }
+  elseif t == 'number' then
+    if value ~= value then return { ['$sv'] = 'number', value = 'nan' } end
+    if value == math.huge then return { ['$sv'] = 'number', value = '+inf' } end
+    if value == -math.huge then return { ['$sv'] = 'number', value = '-inf' } end
+    return value
+  elseif t == 'string' or t == 'boolean' then
+    return value
+  end
+  error('field ' .. tostring(field) .. ' returned unsupported type: ' .. t)
+end
+
+local function bulkPositiveIndex(value, label)
+  if type(value) ~= 'number' or value ~= math.floor(value) or value < 0 then
+    error(label .. ' must be a non-negative integer')
+  end
+  return math.floor(value)
+end
+
+local function readNoteFingerprints(cmd)
+  if cmd.resultFormat ~= nil and cmd.resultFormat ~= 'typed-v2' then
+    error('read_note_fingerprints_v1 only supports resultFormat typed-v2')
+  end
+
+  local fields = cmd.fields
+  if type(fields) ~= 'table' or #fields == 0 then
+    error('fields must be a non-empty array')
+  end
+  local readers, seenField = {}, {}
+  for i = 1, #fields do
+    local name = fields[i]
+    if type(name) ~= 'string' then error('fields must contain strings') end
+    if seenField[name] then error('duplicate field: ' .. name) end
+    local reader = NOTE_FIELD_READERS[name]
+    if reader == nil then error('unsupported fingerprint field: ' .. name) end
+    seenField[name] = true
+    readers[#readers + 1] = { name = name, read = reader }
+  end
+
+  local requested = cmd.noteIndicesInGroup
+  if type(requested) ~= 'table' or #requested == 0 then
+    error('noteIndicesInGroup must be a non-empty array')
+  end
+  if #requested > BULK_MAX_NOTES then
+    error('noteIndicesInGroup exceeds ' .. BULK_MAX_NOTES .. ' entries')
+  end
+  local indices, seenIndex = {}, {}
+  for i = 1, #requested do
+    local index = bulkPositiveIndex(requested[i], 'noteIndicesInGroup entry')
+    if seenIndex[index] then error('duplicate note index: ' .. index) end
+    seenIndex[index] = true
+    indices[#indices + 1] = index
+  end
+
+  -- 读取前先估算上限：宁可结构化拒绝，也不要读完再撞 64 KiB 帧上限。
+  local estimate = 64 + #indices * (48 + #readers * BULK_FIELD_ESTIMATE)
+  if estimate > BULK_RESULT_BUDGET then
+    error('FRAME_TOO_LARGE: estimated ' .. estimate .. ' bytes exceeds ' .. BULK_RESULT_BUDGET
+      .. '; request fewer notes or fields')
+  end
+
+  local trackIndex = bulkPositiveIndex(cmd.trackIndex, 'trackIndex')
+  local referenceIndex = bulkPositiveIndex(cmd.groupReferenceIndex, 'groupReferenceIndex')
+  local project = SV:getProject()
+  if trackIndex >= project:getNumTracks() then
+    error('trackIndex out of range: ' .. trackIndex)
+  end
+  local track = project:getTrack(trackIndex + 1)
+  if referenceIndex >= track:getNumGroups() then
+    error('groupReferenceIndex out of range: ' .. referenceIndex)
+  end
+  local reference = track:getGroupReference(referenceIndex + 1)
+  if reference:isInstrumental() then
+    error('groupReferenceIndex refers to an instrumental reference')
+  end
+  local target = reference:getTarget()
+  local groupUuid = target:getUUID()
+  local expected = cmd.expectedGroupUuid
+  if expected ~= nil and expected ~= json.null and expected ~= groupUuid then
+    error('STALE_GROUP_UUID: target group is ' .. tostring(groupUuid))
+  end
+  local noteCount = target:getNumNotes()
+
+  local items = {}
+  for i = 1, #indices do
+    local index = indices[i]
+    if index >= noteCount then
+      error('note index out of range: ' .. index .. ' (noteCount ' .. noteCount .. ')')
+    end
+    local note = target:getNote(index + 1)
+    if note == nil then error('note index out of range: ' .. index) end
+    local fingerprint = {}
+    for r = 1, #readers do
+      local reader = readers[r]
+      fingerprint[reader.name] = bulkScalar(reader.name, reader.read(note))
+    end
+    items[i] = { noteIndexInGroup = index, fingerprint = fingerprint }
+  end
+
+  local result = { groupUuid = groupUuid, noteCount = noteCount, items = items }
+  -- 估算是保守值而非保证；真实字节仍必须在写帧前确认，绝不写出超限帧。
+  local encoded = json.stringify(result)
+  if #encoded > BULK_RESULT_BUDGET then
+    error('FRAME_TOO_LARGE: result is ' .. #encoded .. ' bytes, budget ' .. BULK_RESULT_BUDGET
+      .. '; request fewer notes or fields')
+  end
+  return result
+end
+
+-- ===================================================================== --
 -- Dispatch -- identical to StartSynthVCopilot.lua
 -- ===================================================================== --
 local function resolveTarget(handleId)
@@ -350,6 +486,8 @@ local function dispatch(cmd)
   elseif op == 'free' then
     if cmd.handle ~= nil then handles[cmd.handle] = nil end
     return true
+  elseif op == 'read_note_fingerprints_v1' then
+    return readNoteFingerprints(cmd)
   elseif op == 'index' then
     local obj = resolveTarget(cmd.handle)
     local value = obj[cmd.field]
@@ -470,8 +608,15 @@ function main()
   outPipe:setvbuf("no")
 
   -- handshake
-  local hello = json.stringify({ type = 'hello', role = 'sv', proto = PROTO_VERSION })
-  if not pcall(pipeWrite, hello) then finish("hello write failed", true); return end
+  -- ops 是能力协商：旧 Relay 会忽略该字段，新 Relay 只在这里出现的 opcode 上走批量路径。
+  -- PROTO_VERSION 不变，握手对两个方向都保持兼容。
+  local hello = json.stringify({
+    type = 'hello',
+    role = 'sv',
+    proto = PROTO_VERSION,
+    ops = { 'read_note_fingerprints_v1' },
+  })
+   if not pcall(pipeWrite, hello) then finish("hello write failed", true); return end
   local helloLine = inPipe:read("*l")
   if helloLine == nil then finish("no hello from Relay (EOF)", true); return end
   local response, parseError = parseFrame(helloLine)
