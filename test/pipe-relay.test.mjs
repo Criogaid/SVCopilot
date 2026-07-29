@@ -225,6 +225,71 @@ test("oversized result frames fail the command without detaching the bridge", as
   assert.equal(relay.getStatus().state, "attached");
 });
 
+test("PipeRelay negotiates bridge opcodes per connection and forgets them on detach", async (t) => {
+  const session = `relay-caps-${process.pid}-${Date.now()}`;
+  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  await relay.init();
+
+  const toSv = await connect(relay.paths.toSv);
+  const fromSv = await connect(relay.paths.fromSv);
+  const nextReply = createLineReader(toSv);
+  t.after(async () => {
+    toSv.destroy();
+    fromSv.destroy();
+    await relay.close();
+  });
+
+  const attaches = [];
+  relay.on("attach", (event) => attaches.push(event));
+
+  assert.equal(relay.supportsOp("read_note_fingerprints_v1"), false);
+
+  writeFrame(fromSv, {
+    type: "hello",
+    role: "sv",
+    proto: 1,
+    ops: ["read_note_fingerprints_v1", 42, "another_op"],
+  });
+  // 握手回复不携带 ops：能力是桥 -> Relay 的单向声明，回复保持逐字节兼容旧桥。
+  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 1, session });
+
+  assert.equal(relay.supportsOp("read_note_fingerprints_v1"), true);
+  assert.equal(relay.supportsOp("another_op"), true);
+  assert.equal(relay.supportsOp("not_advertised"), false);
+  // 非字符串项被丢弃，不会变成可调用的 opcode。
+  assert.deepEqual(relay.getStatus().hostOps, ["read_note_fingerprints_v1", "another_op"]);
+  assert.deepEqual(attaches.at(-1).ops, ["read_note_fingerprints_v1", "another_op"]);
+
+  const detached = once(relay, "detach");
+  fromSv.destroy();
+  await detached;
+  // 能力属于单次连接：断开后必须清空，否则重连前的调用会以为旧 opcode 仍可用。
+  assert.equal(relay.supportsOp("read_note_fingerprints_v1"), false);
+  assert.deepEqual(relay.getStatus().hostOps, []);
+});
+
+test("PipeRelay treats a bridge without an ops field as capability-free", async (t) => {
+  const session = `relay-nocaps-${process.pid}-${Date.now()}`;
+  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  await relay.init();
+
+  const toSv = await connect(relay.paths.toSv);
+  const fromSv = await connect(relay.paths.fromSv);
+  const nextReply = createLineReader(toSv);
+  t.after(async () => {
+    toSv.destroy();
+    fromSv.destroy();
+    await relay.close();
+  });
+
+  // 旧桥的 hello 没有 ops 字段；握手必须照常成功，只是不具备任何 internal op。
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
+  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 1, session });
+  assert.equal(relay.getStatus().state, "attached");
+  assert.equal(relay.supportsOp("read_note_fingerprints_v1"), false);
+  assert.deepEqual(relay.getStatus().hostOps, []);
+});
+
 test("_closeServers tears down servers unconditionally, including ones still binding", async () => {
   const { EventEmitter } = await import("node:events");
   const relay = new PipeRelay({ session: "close-race-test" });

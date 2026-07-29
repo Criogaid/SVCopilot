@@ -52,6 +52,8 @@ export class PipeRelay extends EventEmitter {
     this.closed = false;
     this.detaching = false;
     this.connectionEpoch = 0;
+    // 桥在 hello 里宣告的 internal opcode。旧桥不发该字段 -> 空集合 -> 只走逐调用路径。
+    this.hostOps = new Set();
   }
 
   async init() {
@@ -253,7 +255,15 @@ export class PipeRelay extends EventEmitter {
       if (!this.handshakeComplete) {
         this.handshakeComplete = true;
         this.connectionEpoch += 1;
-        this.emit("attach", { epoch: this.connectionEpoch, session: this.session });
+        // 能力只在握手时确定；每次重连都重新协商，不继承上一个桥的 opcode 集合。
+        this.hostOps = new Set(
+          Array.isArray(frame.ops) ? frame.ops.filter((op) => typeof op === "string") : []
+        );
+        this.emit("attach", {
+          epoch: this.connectionEpoch,
+          session: this.session,
+          ops: [...this.hostOps],
+        });
       }
       this._sendReply({ type: "hello", proto: this.proto, session: this.session });
       return;
@@ -349,6 +359,8 @@ export class PipeRelay extends EventEmitter {
     this.pendingReply = null;
     this.handshakeComplete = false;
     this.shutdownRequested = false;
+    // 能力属于单次连接：断开后必须清空，否则重连前的调用会以为旧 opcode 仍可用。
+    this.hostOps = new Set();
     this._rejectCommands(new Error(`SynthV bridge detached: ${reason}`));
     for (const socket of sockets) {
       if (socket && !socket.destroyed) socket.destroy();
@@ -357,11 +369,16 @@ export class PipeRelay extends EventEmitter {
     this.detaching = false;
   }
 
+  supportsOp(op) {
+    return this.handshakeComplete && this.hostOps.has(op);
+  }
+
   getStatus() {
     return {
       state: this.handshakeComplete ? "attached" : this.initialized ? "listening" : "stopped",
       epoch: this.connectionEpoch,
       session: this.session,
+      hostOps: [...this.hostOps],
     };
   }
 

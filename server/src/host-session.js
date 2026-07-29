@@ -35,6 +35,11 @@ export class HostSession {
     bridge.on?.("detach", () => this._clearHostState());
   }
 
+  // 能力协商的唯一入口：桥没宣告过的 opcode 一律视为不支持，调用方走逐调用回退。
+  supportsOp(op) {
+    return this.bridge.supportsOp?.(op) === true;
+  }
+
   withExclusive(task) {
     return this.coordinator.runExclusive(() => task(this._lease()));
   }
@@ -83,7 +88,24 @@ export class HostSession {
       status: () => this.getStatus(),
       epoch: () => this.epoch,
       handleType: (handle) => this.handleTypes.get(handle) ?? null,
+      supportsOp: (op) => this.supportsOp(op),
+      bulk: (command) => this._bulk(command),
     });
+  }
+
+  // internal op 只经此路径下发，永远不暴露给 sv_call：批量读取不返回 handle，
+  // 因此也不进入 handleTypes。
+  async _bulk(command) {
+    if (!isRecord(command) || typeof command.op !== "string" || !command.op) {
+      throw codedError("INVALID_ARGUMENTS", "bulk command requires an op");
+    }
+    if (!this.supportsOp(command.op)) {
+      throw codedError(
+        "UNSUPPORTED_HOST_CAPABILITY",
+        `the connected SynthV bridge does not advertise ${command.op}`
+      );
+    }
+    return decodeWireValue(await this._bridgeCall(command), { epoch: this.epoch });
   }
 
   async _roots() {
@@ -260,10 +282,19 @@ function codedError(code, message) {
   return error;
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function classifyHostError(error) {
   if (typeof error?.code === "string") return error;
   const message = error instanceof Error ? error.message : String(error);
   const mappings = [
+    // 批量读取的结构化拒绝先匹配：Lua 会在消息前加 "<script>:<line>: "，
+    // 且 "note index out of range" 同时命中下面的通用索引规则。
+    ["FRAME_TOO_LARGE", /FRAME_TOO_LARGE/],
+    ["STALE_GROUP_UUID", /STALE_GROUP_UUID/],
+    ["UNSUPPORTED_HOST_CAPABILITY", /does not advertise|unknown op:/i],
     ["UNKNOWN_METHOD", /no such method/i],
     ["UNKNOWN_FIELD", /no such field/i],
     ["UNKNOWN_HANDLE", /unknown handle/i],
