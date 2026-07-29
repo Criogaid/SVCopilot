@@ -860,6 +860,142 @@ test("sv_patch_notes requires exactly one note reference form per patch", async 
   );
 });
 
+// 让夹具宿主宣告并实现批量读取原语，语义与真实 Lua 桥一致：
+// 未设置字段以 typed-v2 nil 回传，索引 0-based，结果不含 handle。
+function enableBulkReads(model) {
+  const bulkCommands = [];
+  model.bulkCommands = bulkCommands;
+  model.host.supportsOp = (op) => op === "read_note_fingerprints_v1";
+  model.host.bulk = async (command) => {
+    bulkCommands.push(command);
+    if (command.expectedGroupUuid !== undefined && command.expectedGroupUuid !== "group-1") {
+      const error = new Error("STALE_GROUP_UUID: target group is group-1");
+      error.code = "STALE_GROUP_UUID";
+      throw error;
+    }
+    const encode = (field, note) => {
+      const raw = {
+        indexInGroup: note.index,
+        onsetBlick: note.onset,
+        durationBlick: note.duration,
+        pitch: note.pitch,
+        lyrics: note.lyrics,
+        phonemesOverride: note.phonemes,
+        languageOverride: note.language,
+        detuneCents: note.detune,
+      }[field];
+      return raw === undefined ? null : raw;
+    };
+    return {
+      groupUuid: "group-1",
+      noteCount: model.notes.length,
+      items: command.noteIndicesInGroup.map((index) => ({
+        noteIndexInGroup: index,
+        fingerprint: Object.fromEntries(
+          command.fields.map((field) => [field, encode(field, model.notes[index])])
+        ),
+      })),
+    };
+  };
+  return model;
+}
+
+test("sv_patch_notes routes scoped preflight through one bulk read", async () => {
+  const legacy = createRangeFixture();
+  const legacyResult = await legacy.service.patchNotes({
+    contextId: legacy.contextId,
+    occurrenceId: legacy.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+    diagnostics: true,
+  });
+
+  const bulk = createRangeFixture();
+  enableBulkReads(bulk.model);
+  const bulkResult = await bulk.service.patchNotes({
+    contextId: bulk.contextId,
+    occurrenceId: bulk.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+    diagnostics: true,
+  });
+
+  // 公开契约不能变：同一请求在新旧桥上返回同样的计划。
+  assert.equal(bulkResult.status, legacyResult.status);
+  assert.equal(bulkResult.effects, "none");
+  assert.deepEqual(bulkResult.data.plannedDiff, legacyResult.data.plannedDiff);
+
+  // 8 次指纹 getter 收敛成 1 次 internal op；getNote 仍保留（写入需要 handle）。
+  assert.equal(legacyResult.diagnostics.hostCalls.byMethod.getLyrics.count, 1);
+  assert.equal(bulkResult.diagnostics.hostCalls.byMethod.getLyrics, undefined);
+  assert.equal(bulkResult.diagnostics.hostCalls.byMethod.getNote.count, 1);
+  assert.equal(
+    bulkResult.diagnostics.hostCalls.byMethod["$bulk:read_note_fingerprints_v1"].count,
+    1
+  );
+  assert.ok(bulkResult.diagnostics.hostCalls.total < legacyResult.diagnostics.hostCalls.total);
+
+  assert.deepEqual(bulkResult.diagnostics.bulkReads, {
+    bulkHostCalls: 1,
+    bulkNotes: 1,
+    bulkFields: 8,
+    fallbackUsed: false,
+    fallbackReason: null,
+  });
+  assert.equal(legacyResult.diagnostics.bulkReads.fallbackUsed, true);
+  assert.equal(legacyResult.diagnostics.bulkReads.fallbackReason, "HOST_CAPABILITY_ABSENT");
+
+  // 批量请求必须带上快照的 group UUID，并且一次读完全部目标音符。
+  const [command] = bulk.model.bulkCommands;
+  assert.equal(command.expectedGroupUuid, "group-1");
+  assert.deepEqual(command.noteIndicesInGroup, [0]);
+  assert.equal(bulk.model.undoCount, 0);
+});
+
+test("bulk reads leave expected-mismatch and stale detection unchanged", async () => {
+  const mismatch = createRangeFixture();
+  enableBulkReads(mismatch.model);
+  const mismatched = await mismatch.service.patchNotes({
+    contextId: mismatch.contextId,
+    occurrenceId: mismatch.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, expected: { pitch: 99 }, set: { pitch: 61 } }],
+    dryRun: true,
+    waitFor: "none",
+  });
+  // expected 冲突仍由指纹判定，且不因来自批量读取而变成宿主错误。
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.status, "failed");
+  assert.equal(mismatched.error.code, "EXPECTED_MISMATCH");
+  assert.equal(mismatched.effects, "none");
+  assert.deepEqual(mismatched.data.mismatches, [
+    {
+      noteId: `${mismatch.occurrenceId}:n:0`,
+      field: "pitch",
+      expected: 99,
+      observed: 60,
+    },
+  ]);
+  assert.equal(mismatch.model.undoCount, 0);
+
+  const stale = createRangeFixture();
+  enableBulkReads(stale.model);
+  stale.model.notes[0].lyrics = "changed-after-capture";
+  const staleResult = await stale.service.patchNotes({
+    contextId: stale.contextId,
+    occurrenceId: stale.occurrenceId,
+    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    dryRun: true,
+    waitFor: "none",
+  });
+  // 批量读到的指纹必须仍然参与过期判定，不能因为来自 internal op 就被当成权威现状。
+  assert.equal(staleResult.ok, false);
+  assert.equal(staleResult.error.code, "STALE_CONTEXT");
+  assert.equal(staleResult.effects, "none");
+  assert.equal(stale.model.undoCount, 0);
+});
+
 test("sv_patch_notes diagnostics expose phases and method aggregates only when requested", async () => {
   const plainFixture = createRangeFixture();
   const plain = await plainFixture.service.patchNotes({

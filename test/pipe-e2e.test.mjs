@@ -129,6 +129,106 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
     /no such method/
   );
 
+  // 能力协商必须来自真实桥的 hello，而不是测试里手写的帧。
+  assert.equal(relay.supportsOp("read_note_fingerprints_v1"), true);
+  assert.equal(relay.supportsOp("read_note_fingerprints_v2"), false);
+  assert.deepEqual(relay.getStatus().hostOps, ["read_note_fingerprints_v1"]);
+
+  const bulkFields = [
+    "indexInGroup",
+    "onsetBlick",
+    "durationBlick",
+    "pitch",
+    "lyrics",
+    "phonemesOverride",
+    "languageOverride",
+    "detuneCents",
+  ];
+  const bulk = await relay.call({
+    op: "read_note_fingerprints_v1",
+    trackIndex: 0,
+    groupReferenceIndex: 0,
+    expectedGroupUuid: "pipe-group-1",
+    noteIndicesInGroup: [0, 1],
+    fields: bulkFields,
+    resultFormat: "typed-v2",
+  });
+  assert.equal(bulk.groupUuid, "pipe-group-1");
+  assert.equal(bulk.noteCount, 2);
+  assert.deepEqual(
+    Object.values(bulk.items).map((item) => item.noteIndexInGroup),
+    [0, 1]
+  );
+  // 0-based 契约要跨真实管道成立：宿主的 native index 1/2 必须回到 0/1。
+  assert.deepEqual(
+    Object.values(bulk.items).map((item) => item.fingerprint.indexInGroup),
+    [0, 1]
+  );
+  assert.deepEqual(
+    Object.values(bulk.items).map((item) => item.fingerprint.lyrics),
+    ["a", "i"]
+  );
+  assert.equal(Object.values(bulk.items)[1].fingerprint.pitch, 62);
+  // 批量结果永远不含 handle，也不应在宿主留下可释放对象。
+  assert.equal(JSON.stringify(bulk).includes("__handle__"), false);
+
+  // 逐字段读取同一音符必须与批量结果一致（同一根管道、同一宿主状态）。
+  const groupReference = await relay.call({
+    op: "call",
+    handle: handleOf(
+      await relay.call({ op: "call", handle: projectHandle, method: "getTrack", args: [1] })
+    ),
+    method: "getGroupReference",
+    args: [1],
+  });
+  const target = await relay.call({
+    op: "call",
+    handle: handleOf(groupReference),
+    method: "getTarget",
+    args: [],
+  });
+  const firstNote = await relay.call({
+    op: "call",
+    handle: handleOf(target),
+    method: "getNote",
+    args: [1],
+  });
+  assert.equal(
+    await relay.call({
+      op: "call",
+      handle: handleOf(firstNote),
+      method: "getLyrics",
+      args: [],
+    }),
+    Object.values(bulk.items)[0].fingerprint.lyrics
+  );
+
+  await assert.rejects(
+    relay.call({
+      op: "read_note_fingerprints_v1",
+      trackIndex: 0,
+      groupReferenceIndex: 0,
+      expectedGroupUuid: "stale-uuid",
+      noteIndicesInGroup: [0],
+      fields: ["pitch"],
+      resultFormat: "typed-v2",
+    }),
+    /STALE_GROUP_UUID/
+  );
+  await assert.rejects(
+    relay.call({
+      op: "read_note_fingerprints_v1",
+      trackIndex: 0,
+      groupReferenceIndex: 0,
+      noteIndicesInGroup: [7],
+      fields: ["pitch"],
+      resultFormat: "typed-v2",
+    }),
+    /note index out of range/
+  );
+  // 结构化拒绝之后锁步必须仍然存活：桥没被拖死，后续命令照常返回。
+  assert.equal(await relay.call({ op: "ping" }), "pong");
+
   const stopChild = spawn(luaBin, [stopHarnessScript, stopScript], {
     env: { ...process.env, SV_COPILOT_SESSION: session },
     stdio: ["ignore", "pipe", "pipe"],

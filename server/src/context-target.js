@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { scanTargetOccurrences } from "./parameter-curve.js";
 import { measureDiagnosticPhase } from "./operation-diagnostics.js";
+import { createBulkStats, readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
 
 export async function resolveContextTarget(
@@ -41,11 +42,13 @@ export async function resolveContextTarget(
     );
   }
   const scope = createHostScope(host);
+  const bulkStats = createBulkStats();
   try {
     let roots;
     let track;
     let group;
     let target;
+    let expectedGroupUuid = null;
     await measureDiagnosticPhase(diagnostics, "targetResolutionMs", async () => {
       roots = await scope.roots();
       track = await scope.call(roots.project, "getTrack", [stored.context.trackIndex + 1], {
@@ -55,7 +58,7 @@ export async function resolveContextTarget(
         inferredType: "NoteGroupReference",
       });
       target = await scope.call(group, "getTarget", [], { inferredType: "NoteGroup" });
-      const expectedGroupUuid =
+      expectedGroupUuid =
         stored.baseData.group?.uuid ?? stored.baseData.tracks?.[0]?.groups?.[0]?.uuid ?? null;
       if (expectedGroupUuid !== null) {
         const currentGroupUuid = await scope.call(target, "getUUID");
@@ -67,18 +70,41 @@ export async function resolveContextTarget(
     const notes = [];
     const fingerprints = [];
     await measureDiagnosticPhase(diagnostics, "fingerprintVerificationMs", async () => {
+      // 写入仍需要 note handle，因此 getNote 保留；被替换掉的是每音符 8 次 getter 往返。
       for (const index of stored.context.noteIndices) {
         const note = await scope.call(target, "getNote", [index + 1], { inferredType: "Note" });
         if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${index} no longer exists`);
         notes.push(note);
-        fingerprints.push(await readFingerprint(scope, note));
       }
+      // 指纹走有界批量读取；旧桥自动回退到在上面这些 handle 上逐 getter。
+      fingerprints.push(
+        ...(await readNoteFingerprints(scope, {
+          host,
+          notes,
+          trackIndex: stored.context.trackIndex,
+          groupReferenceIndex: stored.context.groupIndex,
+          expectedGroupUuid,
+          noteIndicesInGroup: stored.context.noteIndices,
+          stats: bulkStats,
+        }))
+      );
+      diagnostics?.recordBulkStats(bulkStats);
 
       if (verify && !isDeepStrictEqual(fingerprints, stored.context.fingerprints)) {
         throw codedError("STALE_CONTEXT", "notes changed after the snapshot was captured");
       }
     });
-    return { scope, roots, track, group, target, notes, fingerprints, contextKind: stored.context.kind };
+    return {
+      scope,
+      roots,
+      track,
+      group,
+      target,
+      notes,
+      fingerprints,
+      contextKind: stored.context.kind,
+      bulkStats,
+    };
   } catch (error) {
     await scope.releaseAll();
     if (isResolveError(error)) throw error;
@@ -124,6 +150,7 @@ async function resolveRangeContextTarget(
   }
 
   const scope = createHostScope(host);
+  const bulkStats = createBulkStats();
   try {
     let roots;
     let track;
@@ -161,17 +188,37 @@ async function resolveRangeContextTarget(
       (occurrence.noteFingerprints ?? []).map((fingerprint, index) => [fingerprint.noteId, index])
     );
     await measureDiagnosticPhase(diagnostics, "fingerprintVerificationMs", async () => {
+      // 批量读取前先做范围校验：越界必须仍然按 noteId 报 STALE_CONTEXT，
+      // 而不是让整批以宿主的索引错误失败、丢掉是哪个音符过期的信息。
       for (const expected of expectedFingerprints) {
         if (!Number.isSafeInteger(expected.indexInGroup) || expected.indexInGroup >= targetNoteCount) {
           throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
         }
+      }
+      // 写入仍需要 note handle；先按 occurrence 顺序解析，再一次性批量读指纹。
+      const resolvedNotes = [];
+      for (const expected of expectedFingerprints) {
         const note = await scope.call(target, "getNote", [expected.indexInGroup + 1], {
           inferredType: "Note",
         });
         if (!note?.__handle__) {
           throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
         }
-        const observed = await readRangeFingerprint(scope, note);
+        resolvedNotes.push(note);
+      }
+      const observedFingerprints = await readNoteFingerprints(scope, {
+        host,
+        notes: resolvedNotes,
+        trackIndex: occurrence.trackIndex,
+        groupReferenceIndex: occurrence.groupIndex,
+        expectedGroupUuid: occurrence.targetGroupUuid,
+        noteIndicesInGroup: expectedFingerprints.map((expected) => expected.indexInGroup),
+        stats: bulkStats,
+      });
+      diagnostics?.recordBulkStats(bulkStats);
+      for (const [position, expected] of expectedFingerprints.entries()) {
+        const note = resolvedNotes[position];
+        const observed = observedFingerprints[position];
         if (verify && !isDeepStrictEqual(observed, pickRangeFingerprint(expected))) {
           throw codedError(
             "STALE_CONTEXT",
@@ -202,6 +249,7 @@ async function resolveRangeContextTarget(
       contextPositionByNoteId,
       contextPositionByIndexInGroup,
       targetNoteCount,
+      bulkStats,
     };
   } catch (error) {
     await scope.releaseAll();
@@ -291,34 +339,6 @@ export function contextGroupNoteCount(stored, fallback = null) {
   return candidates.find((value) => Number.isSafeInteger(value) && value >= 0) ?? null;
 }
 
-async function readFingerprint(scope, note) {
-  // 字段集合必须与 snapshot.js 的 noteFingerprint 一致（含 detuneCents，与 range 指纹对齐）。
-  return {
-    indexInGroup: toExternalIndex(await scope.call(note, "getIndexInParent")),
-    onsetBlick: await scope.call(note, "getOnset"),
-    durationBlick: await scope.call(note, "getDuration"),
-    pitch: await scope.call(note, "getPitch"),
-    lyrics: await scope.call(note, "getLyrics"),
-    phonemesOverride: await scope.call(note, "getPhonemes"),
-    languageOverride: await scope.call(note, "getLanguageOverride"),
-    detuneCents: await scope.call(note, "getDetune"),
-  };
-}
-
-// 字段集合必须与 musical-range.js 采集的 noteFingerprints 一致（含 detuneCents）。
-async function readRangeFingerprint(scope, note) {
-  return {
-    indexInGroup: toExternalIndex(await scope.call(note, "getIndexInParent")),
-    onsetBlick: await scope.call(note, "getOnset"),
-    durationBlick: await scope.call(note, "getDuration"),
-    pitch: await scope.call(note, "getPitch"),
-    lyrics: await scope.call(note, "getLyrics"),
-    phonemesOverride: await scope.call(note, "getPhonemes"),
-    languageOverride: await scope.call(note, "getLanguageOverride"),
-    detuneCents: await scope.call(note, "getDetune"),
-  };
-}
-
 function pickRangeFingerprint(value) {
   return {
     indexInGroup: value.indexInGroup,
@@ -384,10 +404,6 @@ function isResolveError(error) {
     "UNKNOWN_OCCURRENCE",
     "AMBIGUOUS_CONTEXT",
   ].includes(error?.code);
-}
-
-function toExternalIndex(luaIndex) {
-  return Number.isSafeInteger(luaIndex) ? luaIndex - 1 : null;
 }
 
 function codedError(code, message) {

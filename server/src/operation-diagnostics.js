@@ -21,6 +21,8 @@ export function createOperationDiagnostics({ enabled, now = () => Date.now() } =
     serviceTotalMs: 0,
   };
   const hostCalls = new Map();
+  // 批量读取计数由解析层上报：只记录数量与回退原因，绝不记录歌词或音素内容。
+  let bulk = null;
 
   function measureSync(name, action) {
     const startedAt = now();
@@ -61,6 +63,16 @@ export function createOperationDiagnostics({ enabled, now = () => Date.now() } =
   return {
     measure,
     measureSync,
+    recordBulkStats(stats) {
+      if (!stats) return;
+      bulk = {
+        bulkHostCalls: stats.bulkHostCalls,
+        bulkNotes: stats.bulkNotes,
+        bulkFields: stats.bulkFields,
+        fallbackUsed: stats.fallbackUsed,
+        fallbackReason: stats.fallbackReason,
+      };
+    },
     markValidationComplete() {
       timings.validationMs = elapsed(serviceStartedAt, now());
     },
@@ -87,6 +99,13 @@ export function createOperationDiagnostics({ enabled, now = () => Date.now() } =
           ),
         free: (handle) => recordHostCall("$free", () => host.free(handle)),
         ping: () => recordHostCall("$ping", () => host.ping()),
+        // internal op 按 opcode 单独计数，便于与逐 getter 的 host-call 数直接对照。
+        supportsOp: (op) => host.supportsOp?.(op) === true,
+        bulk: (command) =>
+          recordHostCall(
+            typeof command?.op === "string" ? `$bulk:${command.op}` : "$bulk",
+            () => host.bulk(command)
+          ),
         status: () => host.status(),
         epoch: () => host.epoch(),
         handleType: (handle) => host.handleType(handle),
@@ -109,6 +128,7 @@ export function createOperationDiagnostics({ enabled, now = () => Date.now() } =
           totalMs: [...hostCalls.values()].reduce((sum, entry) => sum + entry.totalMs, 0),
           byMethod,
         },
+        ...(bulk ? { bulkReads: { ...bulk } } : {}),
       };
     },
   };
