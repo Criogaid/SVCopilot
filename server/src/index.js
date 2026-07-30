@@ -73,7 +73,8 @@ import {
   artifactReference,
   artifactResourceView,
 } from "./artifact-store.js";
-import { filterToolsByProfile, isToolEnabled } from "./tool-profile.js";
+import { filterToolsByProfile, isToolEnabled, registerToolProfile } from "./tool-profile.js";
+import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处。
@@ -2790,7 +2791,14 @@ export const TOOLS = [
 ];
 
 // 根据启动时 profile 过滤工具清单；full 保持默认兼容。
-const enabledTools = filterToolsByProfile(toolProfileName, TOOLS);
+// compact-v2 是实验性 profile：只暴露 facade 工具，direct tool 的 schema 不变。
+const COMPACT_PROFILE = "compact-v2";
+const compactFacade = createCompactFacade(TOOLS);
+registerToolProfile(COMPACT_PROFILE, compactFacade.toolNames);
+const isCompactProfile = toolProfileName === COMPACT_PROFILE;
+const enabledTools = isCompactProfile
+  ? compactFacade.tools
+  : filterToolsByProfile(toolProfileName, TOOLS);
 
 const server = new Server(
   { name: "sv-copilot", version: INTERFACE_VERSION },
@@ -2800,6 +2808,11 @@ const server = new Server(
 const schemaValidator = new Ajv({ allErrors: true, strict: false, discriminator: true });
 const toolArgumentValidators = new Map(
   TOOLS.map((tool) => [tool.name, schemaValidator.compile(tool.inputSchema)])
+);
+// facade 信封的校验器与业务 schema 分开：facade 只校验 operation/arguments 外壳，
+// 内层 arguments 仍然由上面这份 direct tool validator 校验。
+const facadeArgumentValidators = new Map(
+  compactFacade.tools.map((tool) => [tool.name, schemaValidator.compile(tool.inputSchema)])
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: enabledTools }));
@@ -2823,6 +2836,13 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       name: "SV Copilot music workflow guide",
       description:
         "Recipe index for combining the tools into safe musical workflows: what to capture, which planner to call, how to commit, which errors are retryable, and where a human must judge. Read svcopilot://guide/music-workflows/{recipe} for full steps.",
+      mimeType: "application/json",
+    },
+    {
+      uri: "svcopilot://operations",
+      name: "SV Copilot compact operation catalog",
+      description:
+        "Facade-to-operation routing for the experimental compact-v2 profile: which operation each facade tool accepts, which direct tool it calls, and which tools stay out of the compact profile.",
       mimeType: "application/json",
     },
     {
@@ -2976,11 +2996,59 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name } = request.params;
-  if (!isToolEnabled(toolProfileName, name)) {
-    return toolError("TOOL_NOT_ENABLED", `tool "${name}" is not enabled in profile "${toolProfileName}"`);
+  const requestedName = request.params.name;
+  if (!isToolEnabled(toolProfileName, requestedName)) {
+    return toolError(
+      "TOOL_NOT_ENABLED",
+      `tool "${requestedName}" is not enabled in profile "${toolProfileName}"`
+    );
   }
-  const args = normalizeToolArguments(name, request.params.arguments ?? {});
+
+  // compact facade 只做解析：把 facade 调用翻译成 direct tool 名 + arguments 之后，
+  // 后续每一步（normalize、Ajv 校验、dispatch）与 direct 调用共用同一条路径。
+  let name = requestedName;
+  let rawArguments = request.params.arguments ?? {};
+  if (compactFacade?.isFacadeTool(requestedName)) {
+    if (requestedName === DESCRIBE_OPERATION_TOOL) {
+      const validator = facadeArgumentValidators.get(requestedName);
+      if (!validator(rawArguments)) {
+        return toolError("INVALID_ARGUMENTS", formatSchemaErrors(validator.errors));
+      }
+      try {
+        return toolResult(compactFacade.describe(rawArguments.operations));
+      } catch (error) {
+        return toolError(
+          typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
+          error instanceof Error ? error.message : String(error),
+          error?.details
+        );
+      }
+    }
+    let entry;
+    // 先解析 operation，再校验信封。schema 里的 enum 是给模型的可见清单，
+    // 但它对 unknown 与 cross-facade 都只报 INVALID_ARGUMENTS，无法告诉模型
+    // 「这个 operation 存在，只是在另一个 facade 上」——先解析才能给出可行动的错误。
+    // 缺失或非字符串 operation 属于信封本身的问题，交给下面的 schema 校验。
+    if (typeof rawArguments?.operation === "string") {
+      try {
+        entry = compactFacade.resolveOperation(requestedName, rawArguments.operation);
+      } catch (error) {
+        return toolError(
+          typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
+          error instanceof Error ? error.message : String(error),
+          error?.details
+        );
+      }
+    }
+    const validator = facadeArgumentValidators.get(requestedName);
+    if (!validator(rawArguments)) {
+      return toolError("INVALID_ARGUMENTS", formatSchemaErrors(validator.errors));
+    }
+    name = entry.tool;
+    rawArguments = rawArguments.arguments ?? {};
+  }
+
+  const args = normalizeToolArguments(name, rawArguments);
   const argumentValidator = toolArgumentValidators.get(name);
   if (!argumentValidator) return toolError("UNKNOWN_TOOL", name);
   if (!argumentValidator(args)) {
@@ -3231,6 +3299,9 @@ function readResource(uri) {
     }
     return recipe;
   }
+  if (parsed.protocol === "svcopilot:" && parsed.hostname === "operations") {
+    return compactFacade.catalog(INTERFACE_VERSION);
+  }
   if (
     parsed.protocol === "svcopilot:" &&
     parsed.hostname === "schemas" &&
@@ -3411,6 +3482,16 @@ function capabilities() {
         directReadMaxBytes: MAX_ARTIFACT_DIRECT_READ_BYTES,
       },
       toolProfile: toolProfileName,
+      // compact-v2 是实验性 profile：facade 只做 operation 路由，前置条件、
+      // 事务语义和失败模型与 direct tool 完全一致。
+      compact: {
+        profile: COMPACT_PROFILE,
+        active: isCompactProfile,
+        facades: compactFacade.toolNames,
+        describeTool: DESCRIBE_OPERATION_TOOL,
+        catalog: "svcopilot://operations",
+        semanticsEqualToDirectTools: true,
+      },
       typedResultFormat: "typed-v2",
       guide: {
         musicWorkflows: "svcopilot://guide/music-workflows",
