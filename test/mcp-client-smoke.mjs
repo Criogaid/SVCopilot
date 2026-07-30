@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 
+import { isErrorStatus } from "../server/src/mcp-result-encoder.js";
+
 const Q = 705600000;
 const MAX_SCHEMA_RESOURCE_CHARS = 16_000;
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -29,18 +31,39 @@ const bridgeScript = path.join(
   "StartSynthVCopilot.lua"
 );
 
-function parseToolResult(response) {
+// content[0].text 只是一行状态摘要，不再是 payload 的第二份副本；
+// 完整机器结果只能从 structuredContent 读取。摘要行仍要断言存在且有界，
+// 否则"不复制 payload"会退化成"什么都不返回"。
+function assertSummaryLine(response) {
   const text = response.content?.find((item) => item.type === "text")?.text;
-  if (response.isError) throw new Error(text || "MCP tool failed");
   assert.equal(typeof text, "string");
-  return JSON.parse(text);
+  assert.ok(Buffer.byteLength(text, "utf8") <= 512, `summary line too long: ${text.length}`);
+  assert.equal(text.includes("\n"), false);
+  const structured = JSON.stringify(response.structuredContent ?? null);
+  assert.equal(text.includes(structured), false, "summary line must not duplicate the payload");
+  return text;
+}
+
+// status 是唯一成败来源；与 status 并存的 ok 布尔已从 MCP surface 移除。
+// 仍保留 ok 的结果（如 sv_doctor 的安装健康结论）没有 status 承载同一信息，
+// 因此按 status 优先、ok 兜底判定。
+function okOf(result) {
+  if (typeof result?.status === "string") return !isErrorStatus(result.status);
+  return result?.ok;
+}
+
+function parseToolResult(response) {
+  const text = assertSummaryLine(response);
+  if (response.isError) throw new Error(text || "MCP tool failed");
+  assert.notEqual(response.structuredContent, undefined);
+  return response.structuredContent;
 }
 
 function parseToolError(response) {
   assert.equal(response.isError, true);
-  const text = response.content?.find((item) => item.type === "text")?.text;
-  assert.equal(typeof text, "string");
-  return JSON.parse(text);
+  assertSummaryLine(response);
+  assert.notEqual(response.structuredContent, undefined);
+  return response.structuredContent;
 }
 
 function parseResource(response) {
@@ -683,7 +706,7 @@ try {
       },
     })
   );
-  assert.equal(workflow.ok, true);
+  assert.equal(okOf(workflow), true);
   assert.equal(workflow.exports.name, "Pipe Vocal");
   assert.deepEqual(workflow.handleOwnership.returnedHandles, []);
   assert.equal(workflow.handleOwnership.callerMustFree, false);
@@ -802,7 +825,7 @@ try {
       },
     })
   );
-  assert.equal(lyricEdit.ok, true);
+  assert.equal(okOf(lyricEdit), true);
   assert.equal(lyricEdit.effects, "verified");
   assert.equal(lyricEdit.data.processedNotes, 2);
   assert.equal(lyricEdit.data.actuallyChangedNotes, 2);
@@ -840,7 +863,7 @@ try {
       },
     })
   );
-  assert.equal(verifiedWrite.ok, true);
+  assert.equal(okOf(verifiedWrite), true);
   assert.equal(verifiedWrite.effects, "verified");
   assert.ok(!verifiedWrite.warnings.some((warning) => warning.code === "UNVERIFIED_WRITE"));
 
@@ -876,7 +899,7 @@ try {
       arguments: { ...patchArguments, dryRun: true },
     })
   );
-  assert.equal(patchPlan.ok, true);
+  assert.equal(okOf(patchPlan), true);
   assert.equal(patchPlan.status, "dry_run");
   assert.equal(patchPlan.effects, "none");
   assert.equal(patchPlan.data.plannedDiff.length, 3);
@@ -885,7 +908,7 @@ try {
   const patchApplied = parseToolResult(
     await client.callTool({ name: "sv_patch_notes", arguments: patchArguments })
   );
-  assert.equal(patchApplied.ok, true);
+  assert.equal(okOf(patchApplied), true);
   assert.equal(patchApplied.status, "succeeded");
   assert.equal(patchApplied.effects, "verified");
   assert.equal(patchApplied.atomicity, "verified_compensation");
@@ -922,7 +945,7 @@ try {
       },
     })
   );
-  assert.equal(patchConflict.ok, false);
+  assert.equal(okOf(patchConflict), false);
   assert.equal(patchConflict.error.code, "EXPECTED_MISMATCH");
   assert.equal(patchConflict.effects, "none");
 
@@ -936,7 +959,7 @@ try {
       },
     })
   );
-  assert.equal(rangeSnapshot.ok, true);
+  assert.equal(okOf(rangeSnapshot), true);
   assert.match(rangeSnapshot.contextId, /^ctx_/);
   assert.equal(rangeSnapshot.data.barBase, 1);
   assert.equal(rangeSnapshot.data.range.to.blick, 4 * Q);
@@ -999,7 +1022,7 @@ try {
       },
     })
   );
-  assert.equal(rangeProcessing.ok, true);
+  assert.equal(okOf(rangeProcessing), true);
   assert.equal(rangeProcessing.data.state, "ready");
   assert.equal(rangeProcessing.data.evidence.expectedNotes, 2);
   assert.equal(
@@ -1029,7 +1052,7 @@ try {
       },
     })
   );
-  assert.equal(rangePatchPlan.ok, true);
+  assert.equal(okOf(rangePatchPlan), true);
   assert.equal(rangePatchPlan.status, "dry_run");
   assert.equal(rangePatchPlan.effects, "none");
   assert.equal(rangePatchPlan.data.plannedChangedNotes, 1);
@@ -1053,7 +1076,7 @@ try {
       },
     })
   );
-  assert.equal(rangeStructurePlan.ok, true);
+  assert.equal(okOf(rangeStructurePlan), true);
   assert.equal(rangeStructurePlan.status, "dry_run");
   assert.equal(rangeStructurePlan.effects, "none");
   assert.equal(rangeStructurePlan.data.initialNoteCount, 2);
@@ -1069,7 +1092,7 @@ try {
       },
     })
   );
-  assert.equal(invalidRangeArguments.ok, false);
+  assert.equal(okOf(invalidRangeArguments), false);
   assert.equal(invalidRangeArguments.error.code, "INVALID_ARGUMENTS");
   assert.match(invalidRangeArguments.error.message, /responseMod/);
 
@@ -1156,7 +1179,7 @@ try {
       },
     })
   );
-  assert.equal(curve.ok, true);
+  assert.equal(okOf(curve), true);
   assert.deepEqual(curve.data.definition.range, [-24, 24]);
   assert.equal(curve.data.interpolationMethod, "Linear");
   assert.equal(curve.data.stats.count, 2);
@@ -1177,7 +1200,7 @@ try {
       },
     })
   );
-  assert.equal(curvePatch.ok, true);
+  assert.equal(okOf(curvePatch), true);
   assert.equal(curvePatch.status, "succeeded");
   assert.equal(curvePatch.effects, "verified");
   assert.equal(curvePatch.verification.mode, "exact");
@@ -1211,7 +1234,7 @@ try {
       },
     })
   );
-  assert.equal(batchCurvePatch.ok, true);
+  assert.equal(okOf(batchCurvePatch), true);
   assert.equal(batchCurvePatch.status, "succeeded");
   assert.equal(batchCurvePatch.targetUuid, "pipe-group-1");
   assert.equal(batchCurvePatch.curves[0].verified, true);
@@ -1241,7 +1264,7 @@ try {
       },
     })
   );
-  assert.equal(typoCurvePatch.ok, false);
+  assert.equal(okOf(typoCurvePatch), false);
   assert.equal(typoCurvePatch.effects, "none");
   assert.equal(typoCurvePatch.error.code, "UNKNOWN_PARAMETER");
   assert.equal(typoCurvePatch.curves[0].requestedParameter, "pitchDelt");
@@ -1299,7 +1322,7 @@ try {
       },
     })
   );
-  assert.equal(splitResult.ok, true);
+  assert.equal(okOf(splitResult), true);
   assert.equal(splitResult.status, "succeeded");
   assert.equal(splitResult.data.finalNoteCount, 3);
   assert.equal(splitResult.atomicity, "verified_compensation");
@@ -1331,7 +1354,7 @@ try {
       },
     })
   );
-  assert.equal(mergeResult.ok, true);
+  assert.equal(okOf(mergeResult), true);
   assert.equal(mergeResult.data.finalNoteCount, 2);
 
   const insertSnapshot = parseToolResult(
@@ -1356,7 +1379,7 @@ try {
       },
     })
   );
-  assert.equal(insertResult.ok, true);
+  assert.equal(okOf(insertResult), true);
   assert.equal(insertResult.data.appliedOperations[0].indexInGroup, 2);
 
   const deleteSnapshot = parseToolResult(
@@ -1378,7 +1401,7 @@ try {
       },
     })
   );
-  assert.equal(deleteResult.ok, true);
+  assert.equal(okOf(deleteResult), true);
   assert.equal(deleteResult.data.finalNoteCount, 2);
 
   const autoAudition = parseToolResult(
@@ -1405,7 +1428,7 @@ try {
       arguments: { fromBlick: 0, toBlick: 4 * Q, soloTrackIndices: [0], loop: true },
     })
   );
-  assert.equal(auditionStart.ok, true);
+  assert.equal(okOf(auditionStart), true);
   assert.equal(auditionStart.data.playbackStatus, "looping");
   assert.equal(auditionStart.data.range.toSeconds, 2);
   assert.equal(auditionStart.data.recovery.savedPlayheadSeconds, 2.5);
@@ -1425,7 +1448,7 @@ try {
       arguments: { auditionId: auditionStart.data.auditionId },
     })
   );
-  assert.equal(auditionStop.ok, true);
+  assert.equal(okOf(auditionStop), true);
   assert.equal(auditionStop.status, "succeeded");
   assert.equal(auditionStop.data.playbackStatus, "stopped");
   assert.equal(auditionStop.data.playheadSeconds, 2.5);
@@ -1439,7 +1462,7 @@ try {
       arguments: { trackIndex: 0 },
     })
   );
-  assert.equal(voiceProfile.ok, true);
+  assert.equal(okOf(voiceProfile), true);
   assert.equal(voiceProfile.data.groups[0].voice.identityStatus, "unobservable");
   assert.equal(voiceProfile.data.groups[0].voice.parameters.paramTension, 0);
   assert.equal(voiceProfile.data.capabilities.singerIdentity, "unobservable");
@@ -1450,7 +1473,7 @@ try {
       arguments: { templateTrackIndex: 0, name: "Pipe Harmony" },
     })
   );
-  assert.equal(clonedTrack.ok, true);
+  assert.equal(okOf(clonedTrack), true);
   assert.equal(clonedTrack.status, "succeeded");
   assert.equal(clonedTrack.data.newTrackIndex, 3);
   assert.equal(clonedTrack.data.trackCountAfter, 4);
@@ -1468,7 +1491,9 @@ try {
     arguments: { handle: note.__handle__, method: "getRapAccent", args: [] },
   });
   assert.equal(versionDeferred.isError, true);
-  assert.match(versionDeferred.content?.[0]?.text ?? "", /no such method/);
+  // 宿主原文只在 structuredContent 里；content[0].text 现在只是状态摘要行。
+  assert.equal(versionDeferred.structuredContent.error.code, "UNKNOWN_METHOD");
+  assert.match(versionDeferred.structuredContent.error.message ?? "", /no such method/);
 
   parseToolResult(
     await client.callTool({ name: "sv_free", arguments: { handle: note.__handle__ } })
@@ -1509,7 +1534,8 @@ try {
     arguments: { handle: projectHandle, method: "setLyrics", args: ["la"] },
   });
   assert.equal(methodDeferred.isError, true);
-  assert.match(methodDeferred.content?.[0]?.text ?? "", /no such method/);
+  // 宿主原文只在 structuredContent 里；content[0].text 现在只是状态摘要行。
+  assert.match(methodDeferred.structuredContent.error.message ?? "", /no such method/);
   assert.equal(parseToolError(methodDeferred).error.code, "UNKNOWN_METHOD");
 
   const unknownField = parseToolError(
@@ -1517,11 +1543,13 @@ try {
   );
   assert.equal(unknownField.error.code, "UNKNOWN_FIELD");
 
-  assert.equal(ping, "pong");
-  assert.equal(fileName, "PipeProject");
+  // 标量结果在 structuredContent 里统一包装成 { result }，因为 MCP 的
+  // structuredContent 必须是对象。
+  assert.equal(ping.result, "pong");
+  assert.equal(fileName.result, "PipeProject");
   // 前面的 sv_clone_track_from_template 已把轨道数从 3 增加到 4。
-  assert.equal(trackCount, 4);
-  assert.equal(quarter, Q);
+  assert.equal(trackCount.result, 4);
+  assert.equal(quarter.result, Q);
 
   console.log("[client] smoke test passed");
 } finally {

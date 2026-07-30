@@ -166,7 +166,9 @@ test("sv_describe_operation returns the served direct-tool schema verbatim", asy
     });
     return { described: response.structuredContent, direct: null };
   });
-  assert.equal(described.ok, true);
+  // status 是唯一成败来源；与之并存的 ok 布尔不进入 MCP surface。
+  assert.equal(described.status, "succeeded");
+  assert.equal("ok" in described, false);
   assert.equal(described.operations.length, 2);
   const patch = described.operations.find((entry) => entry.operation === "patch_notes");
   assert.equal(patch.tool, "sv_patch_notes");
