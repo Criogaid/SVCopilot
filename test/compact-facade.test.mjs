@@ -8,28 +8,39 @@ import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/es
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 
 import { TOOLS } from "../server/src/index.js";
-import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "../server/src/compact-facade.js";
+import {
+  DESCRIBE_OPERATION_TOOL,
+  MAX_DESCRIBE_OPERATIONS,
+  createCompactFacade,
+} from "../server/src/compact-facade.js";
 import { buildOperationCatalog, operationNameForTool } from "../server/src/operation-catalog.js";
 
-// compact-v2 facade 的跨层契约回归。
+// facade 是唯一 MCP surface 的跨层契约回归。
 //
 // 这个文件要挡住的回归是「facade 变成第二套契约」：schema 被复制、校验被放宽、
-// operation 名与工具名脱钩、或者新增工具后 compact profile 悄悄漏掉它。
-// 因此每条断言都拿 facade 与真实 TOOLS / 真实 spawned server 对比，
-// 不使用任何手写的期望 schema。
+// operation 名与工具名脱钩、或者新增工具后 facade 悄悄漏掉它（在只有一个 surface
+// 的世界里，漏掉即不可达）。因此每条断言都拿 facade 与真实 TOOLS / 真实 spawned
+// server 对比，不使用任何手写的期望 schema。
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const serverScript = path.resolve(testDir, "..", "server", "src", "index.js");
-const MAX_COMPACT_LIST_BYTES = 10 * 1024;
+const MAX_LIST_BYTES = 12 * 1024;
+const EXPECTED_FACADES = [
+  "sv_status",
+  "sv_read",
+  "sv_plan",
+  "sv_edit",
+  "sv_audition",
+  "sv_artifact",
+  "sv_raw",
+  DESCRIBE_OPERATION_TOOL,
+];
 
-async function withClient(profile, fn) {
+async function withClient(fn) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
-    env: {
-      ...process.env,
-      ...(profile ? { SV_COPILOT_TOOL_PROFILE: profile } : {}),
-    },
+    env: process.env,
     cwd: path.dirname(serverScript),
     stderr: "pipe",
   });
@@ -42,10 +53,10 @@ async function withClient(profile, fn) {
   }
 }
 
-test("every tool carries a compact-facade routing label", () => {
-  // 新增工具但忘记登记路由时，这里（以及 server 启动本身）立即失败。
-  const { operations, excluded } = buildOperationCatalog(TOOLS);
-  assert.equal(operations.size + excluded.length, TOOLS.length);
+test("every tool carries a facade routing label", () => {
+  // facade 是唯一 surface，因此没有"排除"选项：每个工具都必须可达。
+  const { operations } = buildOperationCatalog(TOOLS);
+  assert.equal(operations.size, TOOLS.length);
   for (const [name, entry] of operations) {
     assert.equal(name, operationNameForTool(entry.tool), "operation name must derive from tool name");
   }
@@ -54,7 +65,7 @@ test("every tool carries a compact-facade routing label", () => {
 test("catalog rejects unregistered and mislabeled tools", () => {
   assert.throws(
     () => buildOperationCatalog([...TOOLS, { name: "sv_brand_new", inputSchema: { type: "object" } }]),
-    /no compact-facade routing label/
+    /no facade routing label/
   );
   assert.throws(
     () => buildOperationCatalog(TOOLS.filter((tool) => tool.name !== "sv_patch_notes")),
@@ -118,75 +129,93 @@ test("resolveOperation refuses unknown and cross-facade operations", () => {
   );
 });
 
-test("raw dispatcher stays out of the compact profile", () => {
+test("sv_raw keeps the official SV2 escape hatch reachable", () => {
+  // 没有 sv_raw，从全量 surface 收敛到 8 工具时这 5 个 dispatcher 就无处可去。
   const facade = createCompactFacade(TOOLS);
-  const catalog = facade.catalog("test");
-  assert.deepEqual(catalog.excludedTools.tools, [
-    "sv_call",
-    "sv_free",
-    "sv_index",
-    "sv_root",
-    "sv_run",
+  const raw = facade.tools.find((tool) => tool.name === "sv_raw");
+  assert.deepEqual([...raw.inputSchema.properties.operation.enum].sort(), [
+    "call",
+    "free",
+    "index",
+    "root",
+    "run",
   ]);
-  for (const name of catalog.excludedTools.tools) {
-    assert.ok(!facade.operationNames.includes(operationNameForTool(name)));
+  assert.equal(raw.annotations.readOnlyHint, false);
+  for (const operation of ["root", "call", "index", "free", "run"]) {
+    assert.equal(facade.resolveOperation("sv_raw", operation).facade, "sv_raw");
   }
 });
 
-test("compact-v2 tools/list stays under 10 KiB and exposes only facade tools", async () => {
-  const listed = await withClient("compact-v2", (client) => client.listTools());
+test("audition operations drop the redundant verb suffix", () => {
+  const facade = createCompactFacade(TOOLS);
+  const audition = facade.tools.find((tool) => tool.name === "sv_audition");
+  assert.deepEqual([...audition.inputSchema.properties.operation.enum].sort(), [
+    "compare",
+    "get",
+    "get_compare",
+    "restore",
+    "start",
+    "stop",
+    "stop_compare",
+  ]);
+  // sv_describe 这个工具名让位给 schema discovery；官方 API 描述改叫 describe_api。
+  assert.equal(facade.resolveOperation("sv_status", "describe_api").tool, "sv_describe");
+});
+
+test("tools/list is exactly the facade surface and stays small", async () => {
+  const listed = await withClient((client) => client.listTools());
   const bytes = Buffer.byteLength(JSON.stringify(listed.tools), "utf8");
-  assert.ok(
-    bytes < MAX_COMPACT_LIST_BYTES,
-    `compact-v2 tools/list must be under ${MAX_COMPACT_LIST_BYTES} bytes; got ${bytes}`
-  );
-  const names = listed.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(names, createCompactFacade(TOOLS).toolNames.sort());
-  // direct tool 不出现在 compact profile 的清单里。
-  assert.ok(!names.includes("sv_patch_notes"));
-});
-
-test("full profile is unchanged by the facade", async () => {
-  const listed = await withClient(null, (client) => client.listTools());
+  assert.ok(bytes < MAX_LIST_BYTES, `tools/list must be under ${MAX_LIST_BYTES} bytes; got ${bytes}`);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [...EXPECTED_FACADES].sort());
+  // direct tool 不再出现在清单里；它们只是内部组织单位。
   const names = listed.tools.map((tool) => tool.name);
-  assert.equal(names.length, TOOLS.length);
-  assert.ok(names.includes("sv_patch_notes"));
-  assert.ok(names.includes("sv_call"));
-  // facade 工具绝不泄漏到 full profile。
-  for (const facadeName of createCompactFacade(TOOLS).toolNames) {
-    assert.ok(!names.includes(facadeName), `${facadeName} must not appear in the full profile`);
-  }
+  assert.ok(!names.includes("sv_patch_notes"));
+  assert.ok(!names.includes("sv_call"));
 });
 
-test("sv_describe_operation returns the served direct-tool schema verbatim", async () => {
-  const { described, direct } = await withClient("compact-v2", async (client) => {
+test("every operation is reachable through exactly one facade", async () => {
+  const listed = await withClient((client) => client.listTools());
+  const reachable = new Set();
+  for (const tool of listed.tools) {
+    if (tool.name === DESCRIBE_OPERATION_TOOL) continue;
+    for (const operation of tool.inputSchema.properties.operation.enum) {
+      assert.equal(reachable.has(operation), false, `${operation} is exposed by two facades`);
+      reachable.add(operation);
+    }
+  }
+  const { operations } = buildOperationCatalog(TOOLS);
+  assert.deepEqual([...reachable].sort(), [...operations.keys()].sort());
+  assert.equal(reachable.size, TOOLS.length);
+});
+
+test("sv_describe returns the operation's real schema and its facade tool", async () => {
+  const described = await withClient(async (client) => {
     const response = await client.callTool({
       name: DESCRIBE_OPERATION_TOOL,
       arguments: { operations: ["patch_notes", "snapshot_range"] },
     });
-    return { described: response.structuredContent, direct: null };
+    return response.structuredContent;
   });
   // status 是唯一成败来源；与之并存的 ok 布尔不进入 MCP surface。
   assert.equal(described.status, "succeeded");
   assert.equal("ok" in described, false);
   assert.equal(described.operations.length, 2);
   const patch = described.operations.find((entry) => entry.operation === "patch_notes");
-  assert.equal(patch.tool, "sv_patch_notes");
-  assert.equal(patch.facade, "sv_edit");
-  // 与 full profile 里 tools/list 公布的 schema 逐字节相同。
-  const served = await withClient(null, async (client) => {
-    const listed = await client.listTools();
-    return listed.tools.find((tool) => tool.name === "sv_patch_notes").inputSchema;
-  });
-  assert.deepEqual(patch.inputSchema, served);
-  assert.equal(direct, null);
+  // tool 就是 facade 工具名；不再同时返回 facade 字段重复同一信息。
+  assert.equal(patch.tool, "sv_edit");
+  assert.equal("facade" in patch, false);
+  // 与内部 handler 校验的是同一份 schema。
+  const direct = TOOLS.find((tool) => tool.name === "sv_patch_notes");
+  assert.deepEqual(patch.inputSchema, direct.inputSchema);
 });
 
-test("sv_describe_operation bounds its request and rejects unknown operations", async () => {
-  await withClient("compact-v2", async (client) => {
+test("sv_describe bounds its request and rejects unknown operations", async () => {
+  await withClient(async (client) => {
+    // 实测最大 4 个 schema 合计远超 16 KiB 门禁，因此上限是 2。
+    assert.equal(MAX_DESCRIBE_OPERATIONS, 2);
     const tooMany = await client.callTool({
       name: DESCRIBE_OPERATION_TOOL,
-      arguments: { operations: ["ping", "snapshot", "snapshot_range", "patch_notes", "edit_phrase"] },
+      arguments: { operations: ["ping", "snapshot", "snapshot_range"] },
     });
     assert.equal(tooMany.isError, true);
     assert.equal(tooMany.structuredContent.error.code, "INVALID_ARGUMENTS");
@@ -204,7 +233,7 @@ test("sv_describe_operation bounds its request and rejects unknown operations", 
 });
 
 test("unknown operation fails before reaching any handler", async () => {
-  await withClient("compact-v2", async (client) => {
+  await withClient(async (client) => {
     const response = await client.callTool({
       name: "sv_edit",
       arguments: { operation: "not_an_operation", arguments: {} },
@@ -218,7 +247,7 @@ test("unknown operation fails before reaching any handler", async () => {
 });
 
 test("facade envelope rejects unknown outer fields and missing operation", async () => {
-  await withClient("compact-v2", async (client) => {
+  await withClient(async (client) => {
     const extra = await client.callTool({
       name: "sv_read",
       arguments: { operation: "snapshot", arguments: {}, planRef: "sneaky" },
@@ -233,13 +262,13 @@ test("facade envelope rejects unknown outer fields and missing operation", async
 });
 
 test("facade does not relax inner argument validation", async () => {
-  await withClient("compact-v2", async (client) => {
-    // 内层未知字段必须被 direct tool 的严格 schema 拒绝，而不是被 facade 放过。
+  await withClient(async (client) => {
+    // 内层未知字段必须被 operation 的严格 schema 拒绝，而不是被 facade 放过。
     const response = await client.callTool({
       name: "sv_edit",
       arguments: {
         operation: "patch_notes",
-        arguments: { contextId: "ctx_missing", notes: [], totallyUnknownField: 1 },
+        arguments: { contextId: "c_missing", notes: [], totallyUnknownField: 1 },
       },
     });
     assert.equal(response.isError, true);
@@ -248,44 +277,43 @@ test("facade does not relax inner argument validation", async () => {
   });
 });
 
-test("facade reaches the same handler and returns the same error as the direct tool", async () => {
-  // 用一个必然失败于业务前置条件（未知 context）的请求对比两条路径：
-  // 只要 facade 真的调用了同一个 handler，错误码与消息必然一致。
-  const facadeResponse = await withClient("compact-v2", (client) =>
+test("facade reaches the real handler and its business preconditions", async () => {
+  // 用一个必然失败于业务前置条件（未知 context）的请求确认 facade 真的调用了
+  // handler，而不是在路由层就编造成功或提前失败。
+  const response = await withClient((client) =>
     client.callTool({
       name: "sv_read",
-      arguments: { operation: "snapshot_range", arguments: { contextId: "ctx_does_not_exist" } },
+      arguments: { operation: "analyze_phrase", arguments: { contextId: "c_doesNotExist000" } },
     })
   );
-  const directResponse = await withClient(null, (client) =>
-    client.callTool({
-      name: "sv_snapshot_range",
-      arguments: { contextId: "ctx_does_not_exist" },
-    })
-  );
-  assert.equal(facadeResponse.isError, true);
-  assert.equal(directResponse.isError, true);
-  assert.deepEqual(facadeResponse.structuredContent, directResponse.structuredContent);
+  assert.equal(response.isError, true);
+  assert.equal(response.structuredContent.error.code, "UNKNOWN_CONTEXT");
+  // 伪造的 ID 只能报 unknown，不得声称"过期"（那会暗示重新快照必然可行）。
+  assert.equal(response.structuredContent.error.reason, "unknown");
 });
 
-test("direct tool names are rejected in the compact profile", async () => {
-  await withClient("compact-v2", async (client) => {
-    const response = await client.callTool({ name: "sv_patch_notes", arguments: {} });
-    assert.equal(response.isError, true);
-    assert.equal(response.structuredContent.error.code, "TOOL_NOT_ENABLED");
+test("direct tool names are not callable", async () => {
+  await withClient(async (client) => {
+    for (const name of ["sv_patch_notes", "sv_call"]) {
+      const response = await client.callTool({ name, arguments: {} });
+      assert.equal(response.isError, true);
+      assert.equal(response.structuredContent.error.code, "UNKNOWN_TOOL");
+    }
   });
 });
 
 test("svcopilot://operations catalog matches the served facade tools", async () => {
-  const { catalog, listed } = await withClient("compact-v2", async (client) => {
+  const { catalog, listed } = await withClient(async (client) => {
     const resource = await client.readResource({ uri: "svcopilot://operations" });
     return {
       catalog: JSON.parse(resource.contents[0].text),
       listed: await client.listTools(),
     };
   });
-  assert.equal(catalog.profile, "compact-v2");
   assert.equal(catalog.describeTool, DESCRIBE_OPERATION_TOOL);
+  // 没有 profile 名可报告，也没有"被排除的工具"——facade 是唯一 surface。
+  assert.equal("profile" in catalog, false);
+  assert.equal("excludedTools" in catalog, false);
   const catalogFacades = catalog.facades.map((entry) => entry.facade).sort();
   const servedFacades = listed.tools
     .map((tool) => tool.name)
@@ -306,20 +334,17 @@ test("svcopilot://operations catalog matches the served facade tools", async () 
   assert.ok(bytes < 16 * 1024, `operations catalog must stay under 16 KiB; got ${bytes}`);
 });
 
-test("capabilities reports the compact profile honestly", async () => {
-  const compact = await withClient("compact-v2", async (client) => {
+test("capabilities reports one facade surface with a derived operation count", async () => {
+  const capabilities = await withClient(async (client) => {
     const resource = await client.readResource({ uri: "svcopilot://capabilities" });
     return JSON.parse(resource.contents[0].text);
   });
-  assert.equal(compact.interfaces.toolProfile, "compact-v2");
-  assert.equal(compact.interfaces.compact.active, true);
-  assert.equal(compact.interfaces.compact.catalog, "svcopilot://operations");
-
-  const full = await withClient(null, async (client) => {
-    const resource = await client.readResource({ uri: "svcopilot://capabilities" });
-    return JSON.parse(resource.contents[0].text);
-  });
-  assert.equal(full.interfaces.compact.active, false);
-  // 即使未启用，也要告诉客户端这个 profile 存在。
-  assert.equal(full.interfaces.compact.profile, "compact-v2");
+  const surface = capabilities.interfaces.surface;
+  assert.deepEqual(surface.facades.sort(), [...EXPECTED_FACADES].sort());
+  assert.equal(surface.operations, TOOLS.length);
+  assert.equal(surface.catalog, "svcopilot://operations");
+  assert.equal(surface.describeTool, DESCRIBE_OPERATION_TOOL);
+  // profile 选择层已删除，不得再出现在自描述里。
+  assert.equal("toolProfile" in capabilities.interfaces, false);
+  assert.equal("compact" in capabilities.interfaces, false);
 });

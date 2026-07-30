@@ -9,6 +9,11 @@ import { StdioClientTransport } from "../server/node_modules/@modelcontextprotoc
 import AjvModule from "../server/node_modules/ajv/dist/ajv.js";
 
 import {
+  DESCRIBE_OPERATION_TOOL,
+  MAX_DESCRIBE_OPERATIONS,
+} from "../server/src/compact-facade.js";
+import { operationNameForTool } from "../server/src/operation-catalog.js";
+import {
   GUIDE_VERSION,
   musicWorkflowGuideExamples,
   musicWorkflowGuideIndex,
@@ -73,12 +78,24 @@ function parseResource(result) {
 }
 
 test("every guide example validates against the schemas the real server serves", async () => {
-  const { schemas, toolNames } = await withServer(async (client) => {
-    const listed = await client.listTools();
-    return {
-      schemas: new Map(listed.tools.map((tool) => [tool.name, tool.inputSchema])),
-      toolNames: new Set(listed.tools.map((tool) => tool.name)),
-    };
+  // facade 是唯一 surface，因此 schema 只能从 sv_describe 取——与模型走同一条路。
+  const operations = [
+    ...new Set(musicWorkflowGuideExamples().map((example) => operationNameForTool(example.tool))),
+  ];
+  const schemas = await withServer(async (client) => {
+    const collected = new Map();
+    for (let i = 0; i < operations.length; i += MAX_DESCRIBE_OPERATIONS) {
+      const batch = operations.slice(i, i + MAX_DESCRIBE_OPERATIONS);
+      const response = await client.callTool({
+        name: DESCRIBE_OPERATION_TOOL,
+        arguments: { operations: batch },
+      });
+      assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
+      for (const entry of response.structuredContent.operations) {
+        collected.set(entry.operation, entry.inputSchema);
+      }
+    }
+    return collected;
   });
 
   // 与 index.js 相同的 Ajv 配置，确保判定一致。
@@ -88,14 +105,15 @@ test("every guide example validates against the schemas the real server serves",
   assert.ok(examples.length >= 24, `expected a substantial example set, got ${examples.length}`);
 
   for (const example of examples) {
+    const operation = operationNameForTool(example.tool);
     assert.ok(
-      toolNames.has(example.tool),
-      `${example.recipeId}/${example.label} references unknown tool ${example.tool}`
+      schemas.has(operation),
+      `${example.recipeId}/${example.label} references unknown operation ${operation}`
     );
-    if (!validators.has(example.tool)) {
-      validators.set(example.tool, ajv.compile(schemas.get(example.tool)));
+    if (!validators.has(operation)) {
+      validators.set(operation, ajv.compile(schemas.get(operation)));
     }
-    const validate = validators.get(example.tool);
+    const validate = validators.get(operation);
     const valid = validate(example.arguments);
     assert.ok(
       valid,
@@ -179,7 +197,7 @@ test("the guide covers the required recipes and never invents host capabilities"
 
 test("the audition recipe offers A/B without promising an undoable temporary edit", () => {
   const { recipe } = musicWorkflowGuideRecipe("audition_for_human", "0.8.0");
-  const compare = recipe.steps.find((step) => step.tool === "sv_audition_compare");
+  const compare = recipe.steps.find((step) => step.operation === "compare");
   assert.ok(compare, "the guide must show the A/B comparison");
   const rules = compare.readingRules.join(" ");
   assert.match(rules, /fully stopped and restored BEFORE variant B starts/i);
@@ -202,7 +220,7 @@ test("recipes that consume range data declare what the capture must include", ()
   const analyzerRecipes = ["analyze_vocal_phrase", "quantize_notes", "verify_after_edit"];
   for (const id of analyzerRecipes) {
     const { recipe } = musicWorkflowGuideRecipe(id, "0.8.0");
-    const capture = recipe.steps.find((step) => step.tool === "sv_snapshot_range");
+    const capture = recipe.steps.find((step) => step.operation === "snapshot_range");
     assert.ok(capture, `${id} must start from a range capture`);
     assert.ok(
       Array.isArray(capture.requiredInclude) && capture.requiredInclude.length >= 1,
@@ -210,7 +228,7 @@ test("recipes that consume range data declare what the capture must include", ()
     );
     for (const field of capture.requiredInclude) {
       assert.ok(
-        capture.arguments.include.includes(field),
+        capture.arguments.arguments.include.includes(field),
         `${id} capture template must actually include ${field}`
       );
     }
@@ -218,13 +236,13 @@ test("recipes that consume range data declare what the capture must include", ()
 
   // quantize 依赖 meterMap（网格以小节为原点），必须显式声明。
   const quantize = musicWorkflowGuideRecipe("quantize_notes", "0.8.0").recipe;
-  const quantizeCapture = quantize.steps.find((step) => step.tool === "sv_snapshot_range");
+  const quantizeCapture = quantize.steps.find((step) => step.operation === "snapshot_range");
   assert.ok(quantizeCapture.requiredInclude.includes("meterMap"));
 
   // computed-pitch 相关 recipe 必须要求 computedPitch。
   for (const id of ["analyze_vocal_phrase", "verify_after_edit"]) {
     const { recipe } = musicWorkflowGuideRecipe(id, "0.8.0");
-    const capture = recipe.steps.find((step) => step.tool === "sv_snapshot_range");
+    const capture = recipe.steps.find((step) => step.operation === "snapshot_range");
     assert.ok(capture.requiredInclude.includes("computedPitch"), `${id} needs computedPitch`);
   }
 });
@@ -233,9 +251,10 @@ test("the diagnosis recipe leads with the composite analyzer, not four separate 
   const { recipe } = musicWorkflowGuideRecipe("analyze_vocal_phrase", "0.8.0");
   const required = recipe.steps.filter((step) => !step.optional);
   // 必做步骤应当只有"捕获 + 一次组合分析"；逐分析器调用降级为可选钻取。
+  // 投影后 step.tool 是 facade 名，step.operation 才是具体 operation。
   assert.deepEqual(
-    required.map((step) => step.tool),
-    ["sv_snapshot_range", "sv_analyze_vocal_context"]
+    required.map((step) => step.operation),
+    ["snapshot_range", "analyze_vocal_context"]
   );
   assert.equal(recipe.expectedCalls.min, 2);
 
@@ -250,13 +269,15 @@ test("the diagnosis recipe leads with the composite analyzer, not four separate 
   // 目录页的选工具表也要把它列为诊断入口。
   const index = musicWorkflowGuideIndex("0.8.0");
   assert.ok(
-    index.toolSelection.byNeed.some((entry) => entry.tool === "sv_analyze_vocal_context"),
+    index.toolSelection.byNeed.some((entry) => entry.tool === "sv_read(analyze_vocal_context)"),
     "the tool-selection table must offer the composite analyzer"
   );
 
   // P1-A：和声语境是 opt-in，且指南必须写明单旋律无法确定真实和弦。
   const drill = recipe.steps.find(
-    (step) => step.tool === "sv_analyze_phrase" && step.arguments.include.includes("chordCandidates")
+    (step) =>
+      step.operation === "analyze_phrase" &&
+      step.arguments.arguments.include.includes("chordCandidates")
   );
   assert.ok(drill, "the guide must show how to request the harmonic-context sections");
   const drillRules = drill.readingRules.join(" ");
@@ -296,7 +317,7 @@ test("every write recipe names the shared-target gate and the non-retryable outc
       `${id} must tell the model not to blind-retry outcome_unknown`
     );
     assert.ok(
-      recipe.steps.some((step) => step.arguments?.dryRun === true),
+      recipe.steps.some((step) => step.arguments?.arguments?.dryRun === true),
       `${id} must dry-run before committing`
     );
   }

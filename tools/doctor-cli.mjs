@@ -12,7 +12,6 @@ import { fileURLToPath } from "node:url";
 import { collectDoctorReport, summarizeHostProfiles } from "../server/src/doctor.js";
 import { apiManifest, apiManifestAvailable } from "../server/src/api-catalog.js";
 import { PipeRelay, resolvePipePaths } from "../server/src/transport-pipe.js";
-import { registeredToolProfiles } from "../server/src/tool-profile.js";
 
 const toolsDir = path.dirname(fileURLToPath(import.meta.url));
 const moduleDir = path.resolve(toolsDir, "..", "server", "src");
@@ -45,13 +44,9 @@ const report = collectDoctorReport({
     generatedAt: apiManifest.generatedAt,
     schemaVersion: apiManifest.schemaVersion ?? null,
   },
-  profile: {
-    active: process.env.SV_COPILOT_TOOL_PROFILE ?? "full",
-    registered: registeredToolProfiles(),
-    compactActive: process.env.SV_COPILOT_TOOL_PROFILE === "compact-v2",
-    enabledToolCount: null,
-    directToolCount: null,
-  },
+  // CLI 不构建 facade（那需要加载整个 index.js 并连接管道），因此按 null 如实
+  // 报告"未知"，而不是抄一份可能与运行时不一致的 facade 清单。
+  surface: { facades: null, facadeCount: null, operationCount: null },
   // CLI 没有运行中的 store。null 而不是 0：0 会读成"有 store 且为空"。
   stores: { artifacts: null, snapshotContexts: null },
   hostProfiles: summarizeHostProfiles(
@@ -69,7 +64,7 @@ if (asJson) {
 process.exit(report.ok ? 0 : 1);
 
 function printHuman(value) {
-  const { versions, bridge, transport, manifest, profile, findings } = value;
+  const { versions, bridge, transport, manifest, surface, findings } = value;
   console.log("SV Copilot doctor");
   console.log(`  interface        ${versions.interfaceVersion}`);
   console.log(`  proto expected   ${versions.protoVersionExpected}`);
@@ -88,8 +83,14 @@ function printHuman(value) {
   console.log("");
   console.log("Environment");
   console.log(`  API manifest     ${manifest.available ? `available (${manifest.generatedAt})` : "UNAVAILABLE"}`);
-  console.log(`  tool profile     ${profile.active}`);
-  console.log(`  profiles         ${profile.registered.join(", ")}`);
+  // CLI 不构建 facade，因此这里只能报告"未由本进程测得"，不猜一份清单。
+  console.log(
+    `  MCP surface      ${
+      surface.facadeCount === null
+        ? "not measured by the CLI (start the server to inspect it)"
+        : `${surface.facadeCount} facade tools, ${surface.operationCount} operations`
+    }`
+  );
   console.log("");
   if (findings.length === 0) {
     console.log("No findings.");

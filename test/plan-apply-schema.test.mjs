@@ -9,6 +9,11 @@ import { StdioClientTransport } from "../server/node_modules/@modelcontextprotoc
 import AjvModule from "../server/node_modules/ajv/dist/ajv.js";
 
 import { ArtifactStore } from "../server/src/artifact-store.js";
+import {
+  DESCRIBE_OPERATION_TOOL,
+  MAX_DESCRIBE_OPERATIONS,
+} from "../server/src/compact-facade.js";
+import { operationNameForTool } from "../server/src/operation-catalog.js";
 import { encodeDense } from "../server/src/dense-codec.js";
 import { ExpressionPlanService } from "../server/src/expression-plan.js";
 import { HarmonyPlanService } from "../server/src/harmony-plan.js";
@@ -21,7 +26,7 @@ import { SnapshotStore } from "../server/src/snapshot.js";
 // patchRequest 必须能通过真实 MCP 服务器对下游工具公布的 inputSchema——
 // 规划器新增字段（如 target.expectedNotes）而 index.js schema 未同步时，客户端会在
 // 提交阶段收到 schema 拒绝，这个测试让该漂移在 npm test 就失败。
-// 服务器不带 Lua bridge 启动：tools/list 不需要宿主连接。
+// 服务器不带 Lua bridge 启动：sv_describe 不需要宿主连接。
 
 const Ajv = AjvModule.default ?? AjvModule;
 const Q = 705600000;
@@ -63,6 +68,8 @@ function createStoredContext(store, notes) {
   return { stored, occurrenceId };
 }
 
+// facade 是唯一 surface，direct tool 的 schema 不在 tools/list 里；
+// 取 schema 的唯一途径就是模型自己会走的那条——sv_describe。
 async function fetchServedSchemas(toolNames) {
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -74,12 +81,22 @@ async function fetchServedSchemas(toolNames) {
   const client = new Client({ name: "plan-apply-schema-test", version: "1.0.0" });
   try {
     await client.connect(transport);
-    const listed = await client.listTools();
     const schemas = {};
-    for (const name of toolNames) {
-      const tool = listed.tools.find((item) => item.name === name);
-      assert.ok(tool, `server must expose ${name}`);
-      schemas[name] = tool.inputSchema;
+    // 每次最多描述 MAX_DESCRIBE_OPERATIONS 个，按批取完。
+    for (let i = 0; i < toolNames.length; i += MAX_DESCRIBE_OPERATIONS) {
+      const batch = toolNames.slice(i, i + MAX_DESCRIBE_OPERATIONS);
+      const response = await client.callTool({
+        name: DESCRIBE_OPERATION_TOOL,
+        arguments: { operations: batch.map(operationNameForTool) },
+      });
+      assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
+      for (const name of batch) {
+        const entry = response.structuredContent.operations.find(
+          (item) => item.operation === operationNameForTool(name)
+        );
+        assert.ok(entry, `server must expose ${name}`);
+        schemas[name] = entry.inputSchema;
+      }
     }
     return schemas;
   } finally {

@@ -107,7 +107,7 @@ function compareBridges(loaded, staging) {
  * @param {object} deps.pipePaths - {toSv, fromSv}
  * @param {object} deps.host - HostSession.getStatus() 的返回值
  * @param {object} deps.manifest - { available, generatedAt, schemaVersion }
- * @param {object} deps.profile - { active, registered, compactActive }
+ * @param {object} deps.surface - { facades, facadeCount, operationCount }
  * @param {object} deps.stores - { artifacts, contexts }
  * @param {object[]} [deps.hostProfiles] - 已提交 host profile 的摘要
  * @returns {object}
@@ -119,7 +119,7 @@ export function collectDoctorReport({
   pipePaths,
   host,
   manifest,
-  profile,
+  surface,
   stores,
   hostProfiles = [],
 }) {
@@ -214,7 +214,7 @@ export function collectDoctorReport({
       pendingExecutions: host.pendingExecutions ?? 0,
     },
     manifest,
-    profile,
+    surface,
     stores,
     hostProfiles,
     findings,

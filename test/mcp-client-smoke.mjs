@@ -8,6 +8,11 @@ import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/es
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 
 import { isErrorStatus } from "../server/src/mcp-result-encoder.js";
+import {
+  DESCRIBE_OPERATION_TOOL,
+  MAX_DESCRIBE_OPERATIONS,
+} from "../server/src/compact-facade.js";
+import { facadeForTool, operationNameForTool } from "../server/src/operation-catalog.js";
 
 const Q = 705600000;
 const MAX_SCHEMA_RESOURCE_CHARS = 16_000;
@@ -93,6 +98,44 @@ const transport = new StdioClientTransport({
 const client = new Client({ name: "sv-copilot-smoke-client", version: "1.0.0" });
 let bridge;
 
+// facade 是唯一 surface。用例仍按内部 handler 名书写（可读性最好，也让"哪个服务
+// 负责"一目了然），由这里统一投影成 facade 信封——与真实模型走同一条路。
+//
+// 注意内部 handler `sv_describe`（官方 API 描述）与公开的 schema discovery 工具
+// `sv_describe` 同名但不同物：前者投影成 sv_status(describe_api)，后者只由
+// describeTools() 直接调用。
+function facadeCall(request) {
+  return client.callTool({
+    name: facadeForTool(request.name),
+    arguments: {
+      operation: operationNameForTool(request.name),
+      arguments: request.arguments ?? {},
+    },
+  });
+}
+
+// direct tool 的 schema 与 description 只能从 sv_describe 取，因此 smoke 也走
+// 那条路：一次最多 MAX_DESCRIBE_OPERATIONS 个，分批取完。
+async function describeTools(names) {
+  const served = new Map();
+  for (let i = 0; i < names.length; i += MAX_DESCRIBE_OPERATIONS) {
+    const batch = names.slice(i, i + MAX_DESCRIBE_OPERATIONS);
+    const response = await client.callTool({
+      name: DESCRIBE_OPERATION_TOOL,
+      arguments: { operations: batch.map(operationNameForTool) },
+    });
+    assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
+    for (const name of batch) {
+      const entry = response.structuredContent.operations.find(
+        (item) => item.operation === operationNameForTool(name)
+      );
+      assert.ok(entry, `sv_describe must return ${name}`);
+      served.set(name, entry);
+    }
+  }
+  return served;
+}
+
 try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
@@ -105,37 +148,76 @@ try {
     windowsHide: true,
   });
 
+  // tools/list 现在只有 8 个 facade；operation 的 schema/description 从 sv_describe 取。
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 42);
-  console.log("[client] tools", listed.tools.map((tool) => tool.name));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_doctor"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_compare_computed_pitch"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_plan_expression"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_align_lyrics"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_phrase"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_style_profile"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_validate_lyrics_prosody"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_quantize_notes"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_generate_harmony"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_analyze_vocal_context"));
-  const releaseArtifactTool = listed.tools.find(
-    (tool) => tool.name === "sv_release_artifact"
+  assert.deepEqual(
+    listed.tools.map((tool) => tool.name).sort(),
+    [
+      DESCRIBE_OPERATION_TOOL,
+      "sv_artifact",
+      "sv_audition",
+      "sv_edit",
+      "sv_plan",
+      "sv_raw",
+      "sv_read",
+      "sv_status",
+    ].sort()
   );
-  assert.ok(releaseArtifactTool);
+  console.log("[client] tools", listed.tools.map((tool) => tool.name));
+  const listBytes = Buffer.byteLength(JSON.stringify(listed.tools), "utf8");
+  assert.ok(listBytes < 12 * 1024, `tools/list must stay under 12 KiB; got ${listBytes}`);
+
+  // 每个 operation 都必须从某个 facade 的 enum 里可达。
+  const reachable = new Set(
+    listed.tools
+      .filter((tool) => tool.name !== DESCRIBE_OPERATION_TOOL)
+      .flatMap((tool) => tool.inputSchema.properties.operation.enum)
+  );
+  for (const name of [
+    "sv_doctor",
+    "sv_search_api",
+    "sv_describe",
+    "sv_compare_computed_pitch",
+    "sv_plan_expression",
+    "sv_align_lyrics",
+    "sv_analyze_phrase",
+    "sv_style_profile",
+    "sv_validate_lyrics_prosody",
+    "sv_quantize_notes",
+    "sv_generate_harmony",
+    "sv_analyze_vocal_context",
+    "sv_get_audition_compare",
+    "sv_stop_audition_compare",
+  ]) {
+    assert.ok(reachable.has(operationNameForTool(name)), `${name} must stay reachable`);
+  }
+
+  const served = await describeTools([
+    "sv_release_artifact",
+    "sv_audition_compare",
+    "sv_set_selection",
+    "sv_call",
+    "sv_run",
+    "sv_wait_for_processing",
+    "sv_set_lyrics",
+    "sv_clone_track_from_template",
+    "sv_patch_parameter_curves",
+    "sv_edit_phrase",
+    "sv_snapshot_range",
+    "sv_start_audition",
+    "sv_restore_audition",
+    "sv_patch_notes",
+  ]);
+  const releaseArtifactTool = served.get("sv_release_artifact");
   assert.equal(releaseArtifactTool.inputSchema.additionalProperties, false);
   assert.deepEqual(releaseArtifactTool.inputSchema.required, ["artifactId"]);
-  const compareTool = listed.tools.find((tool) => tool.name === "sv_audition_compare");
-  assert.ok(compareTool);
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_get_audition_compare"));
-  assert.ok(listed.tools.some((tool) => tool.name === "sv_stop_audition_compare"));
+  const compareTool = served.get("sv_audition_compare");
   // A/B 只比较既有版本：不做"临时编辑 -> B -> 还原"，因为官方无 Undo 调用。
+  // 完整 description 必须经 sv_describe 完整送达，而不是被截成首句摘要。
   assert.match(compareTool.description, /NEVER applies a temporary musical edit/);
   assert.match(compareTool.description, /no project-content Undo record/);
   assert.match(compareTool.description, /human_only/);
-  const selectionTool = listed.tools.find((tool) => tool.name === "sv_set_selection");
-  assert.ok(selectionTool);
+  const selectionTool = served.get("sv_set_selection");
   // 高层 selection 的存在理由：宿主 boolean 不可信，必须以读回为准。
   assert.match(selectionTool.description, /never treats a host boolean as evidence/);
   assert.match(selectionTool.description, /creates no Undo record/);
@@ -145,10 +227,10 @@ try {
     "add",
     "remove",
   ]);
-  const callSchema = listed.tools.find((tool) => tool.name === "sv_call")?.inputSchema;
+  const callSchema = served.get("sv_call").inputSchema;
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "number"));
   assert.ok(callSchema.properties.args.items.anyOf.some((item) => item.type === "object"));
-  const runTool = listed.tools.find((tool) => tool.name === "sv_run");
+  const runTool = served.get("sv_run");
   assert.match(runTool.description, /#\/steps\/track\/result/);
   assert.match(runTool.description, /caller-owned/);
   assert.match(runTool.inputSchema.properties.steps.items.properties.target.description, /#\/roots\/project/);
@@ -164,18 +246,14 @@ try {
     /sv_free/
   );
   assert.match(runTool.inputSchema.properties.exports.description, /sv_free/);
-  const waitTool = listed.tools.find((tool) => tool.name === "sv_wait_for_processing");
-  const setLyricsTool = listed.tools.find((tool) => tool.name === "sv_set_lyrics");
-  const cloneTrackTool = listed.tools.find(
-    (tool) => tool.name === "sv_clone_track_from_template"
-  );
-  const batchCurveTool = listed.tools.find(
-    (tool) => tool.name === "sv_patch_parameter_curves"
-  );
-  const phraseTool = listed.tools.find((tool) => tool.name === "sv_edit_phrase");
-  const rangeTool = listed.tools.find((tool) => tool.name === "sv_snapshot_range");
-  const auditionTool = listed.tools.find((tool) => tool.name === "sv_start_audition");
-  const restoreAuditionTool = listed.tools.find((tool) => tool.name === "sv_restore_audition");
+  const waitTool = served.get("sv_wait_for_processing");
+  const setLyricsTool = served.get("sv_set_lyrics");
+  const cloneTrackTool = served.get("sv_clone_track_from_template");
+  const batchCurveTool = served.get("sv_patch_parameter_curves");
+  const phraseTool = served.get("sv_edit_phrase");
+  const rangeTool = served.get("sv_snapshot_range");
+  const auditionTool = served.get("sv_start_audition");
+  const restoreAuditionTool = served.get("sv_restore_audition");
   assert.equal(waitTool.inputSchema.properties.requireNonEmpty.default, false);
   assert.equal(waitTool.inputSchema.properties.occurrenceId.type, "string");
   assert.equal(waitTool.inputSchema.additionalProperties, false);
@@ -223,7 +301,7 @@ try {
   assert.ok(recoverySchema.required.includes("savedStatus"));
 
   const invalidStructureOperation = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_edit_phrase",
       arguments: {
         target: { contextId: "ctx_schema", occurrenceId: "occ_schema" },
@@ -403,14 +481,14 @@ try {
   assert.equal(compareSchema.properties.analysis.properties.vibrato.properties.hzRange.maxItems, 2);
   // compare 是纯内存服务：未知 context 直接结构化报错，不触碰宿主。
   const compareUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_compare_computed_pitch",
       arguments: { mode: "compare_to_target", contextId: "ctx_smoke_missing" },
     })
   );
   assert.equal(compareUnknownContext.error.code, "UNKNOWN_CONTEXT");
   const compareInvalidArguments = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_compare_computed_pitch",
       arguments: { mode: "compare_to_target", contextId: "ctx_smoke", bogus: true },
     })
@@ -442,14 +520,14 @@ try {
   ]);
   // planner 是纯内存服务：未知 context 直接结构化报错，不触碰宿主。
   const planUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_plan_expression",
       arguments: { contextId: "ctx_smoke_missing", intent: { genre: "jpop" } },
     })
   );
   assert.equal(planUnknownContext.error.code, "UNKNOWN_CONTEXT");
   const planInvalidArguments = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_plan_expression",
       arguments: { contextId: "ctx_smoke" },
     })
@@ -469,7 +547,7 @@ try {
     "cantonese",
   ]);
   const alignUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_align_lyrics",
       arguments: { contextId: "ctx_smoke_missing", lyrics: "あさひ" },
     })
@@ -497,7 +575,7 @@ try {
   assert.equal(analyzeSchema.properties.maxCadenceCandidates.minimum, 2);
   assert.deepEqual(analyzeSchema.properties.harmonicWindow.enum, ["bar", "half_bar"]);
   const analyzeUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_analyze_phrase",
       arguments: { contextId: "ctx_smoke_missing" },
     })
@@ -512,14 +590,14 @@ try {
   assert.equal(styleSchema.properties.targets.maxItems, 8);
   assert.ok(styleSchema.properties.targets.items.properties.label);
   const styleUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_style_profile",
       arguments: { targets: [{ contextId: "ctx_smoke_missing" }] },
     })
   );
   assert.equal(styleUnknownContext.error.code, "UNKNOWN_CONTEXT");
   const styleInvalidArguments = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_style_profile",
       arguments: { targets: [] },
     })
@@ -540,7 +618,7 @@ try {
     "phonemeCoverage",
   ]);
   const prosodyUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_validate_lyrics_prosody",
       arguments: { contextId: "ctx_smoke_missing" },
     })
@@ -568,14 +646,14 @@ try {
     "1/16T",
   ]);
   const quantizeUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_quantize_notes",
       arguments: { contextId: "ctx_smoke_missing", grid: { division: "1/8" } },
     })
   );
   assert.equal(quantizeUnknownContext.error.code, "UNKNOWN_CONTEXT");
   const quantizeInvalidArguments = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_quantize_notes",
       arguments: { contextId: "ctx_smoke", grid: { division: "1/8T" }, swing: 0.3 },
     })
@@ -599,7 +677,7 @@ try {
   assert.deepEqual(harmonyInterval.anyOf[1].properties.direction.enum, ["above", "below"]);
   assert.deepEqual(harmonySchema.properties.lyricsMode.enum, ["copy", "sustain"]);
   const harmonyUnknownContext = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_generate_harmony",
       arguments: {
         contextId: "ctx_smoke_missing",
@@ -610,7 +688,7 @@ try {
   );
   assert.equal(harmonyUnknownContext.error.code, "UNKNOWN_CONTEXT");
   const harmonyInvalidArguments = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_generate_harmony",
       arguments: {
         contextId: "ctx_smoke",
@@ -649,39 +727,44 @@ try {
   assert.ok(guideResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
   assert.equal(guide.interfaceVersion, "0.9.0");
   assert.ok(guide.recipes.length >= 8);
-  const toolNames = new Set(listed.tools.map((tool) => tool.name));
+  const facadeNames = new Set(listed.tools.map((tool) => tool.name));
   for (const summary of guide.recipes) {
     const recipe = parseResource(await client.readResource({ uri: summary.uri }));
     assert.equal(recipe.recipe.id, summary.id);
     for (const step of recipe.recipe.steps) {
-      assert.ok(toolNames.has(step.tool), `guide recipe ${summary.id} names unknown ${step.tool}`);
+      // 指南必须给出可直接调用的 facade 名与其 operation，而不是内部 handler 名。
+      assert.ok(
+        facadeNames.has(step.tool),
+        `guide recipe ${summary.id} names unknown facade ${step.tool}`
+      );
+      assert.equal(step.arguments.operation, step.operation);
     }
   }
   const apiClass = parseResource(await client.readResource({ uri: "svapi://class/Note" }));
   assert.equal(apiClass.class.name, "Note");
 
   const search = parseToolResult(
-    await client.callTool({ name: "sv_search_api", arguments: { query: "setLyrics" } })
+    await facadeCall({ name: "sv_search_api", arguments: { query: "setLyrics" } })
   );
   assert.ok(search.results.some((result) => result.className === "Note"));
   const description = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_describe",
       arguments: { class: "Automation", method: "remove" },
     })
   );
   assert.equal(description.overloads.length, 2);
 
-  const ping = parseToolResult(await client.callTool({ name: "sv_ping", arguments: {} }));
+  const ping = parseToolResult(await facadeCall({ name: "sv_ping", arguments: {} }));
   console.log("[client] sv_ping ->", ping);
 
-  const roots = parseToolResult(await client.callTool({ name: "sv_root", arguments: {} }));
+  const roots = parseToolResult(await facadeCall({ name: "sv_root", arguments: {} }));
   const projectHandle = roots.project.__handle__;
   console.log("[client] sv_root.project ->", roots.project);
   assert.equal(roots.project.__type__, "Project");
 
   const workflow = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_run",
       arguments: {
         mode: "read",
@@ -712,7 +795,7 @@ try {
   assert.equal(workflow.handleOwnership.callerMustFree, false);
 
   const legacyReturn = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_run",
       arguments: {
         mode: "read",
@@ -734,7 +817,7 @@ try {
     await client.readResource({ uri: "svcopilot://capabilities" })
   ).connection.knownHandleCount;
   const retainedWorkflow = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_run",
       arguments: {
         mode: "write",
@@ -760,7 +843,7 @@ try {
   ).connection.knownHandleCount;
   assert.equal(handlesAfterRetain, handlesBeforeRetain + 1);
   parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_free",
       arguments: { handle: retainedNote },
     })
@@ -771,7 +854,7 @@ try {
   assert.equal(handlesAfterFree, handlesBeforeRetain);
 
   const projectPage = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: {
         scope: { kind: "project" },
@@ -790,7 +873,7 @@ try {
   assert.equal(projectPage.data.snapshotComplete, true);
 
   const groupProcessing = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: {
         scope: { kind: "group", trackIndex: 0, groupIndex: 0 },
@@ -802,7 +885,7 @@ try {
   assert.equal(groupProcessing.data.processing.computedItems, 2);
 
   const selectionSnapshot = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: { scope: { kind: "selection" } },
     })
@@ -815,7 +898,7 @@ try {
   assert.equal(selectionSnapshot.data.capabilities.singerIdentity, "unobservable");
 
   const lyricEdit = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_set_lyrics",
       arguments: {
         contextId: selectionSnapshot.contextId,
@@ -835,7 +918,7 @@ try {
   assert.equal(lyricEdit.undo.boundaryCallsCompleted, 2);
 
   const editedSnapshot = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: { scope: { kind: "selection" }, include: ["notes"] },
     })
@@ -846,7 +929,7 @@ try {
   );
 
   const verifiedWrite = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_run",
       arguments: {
         mode: "write",
@@ -868,14 +951,13 @@ try {
   assert.ok(!verifiedWrite.warnings.some((warning) => warning.code === "UNVERIFIED_WRITE"));
 
   // sv_patch_notes 公开契约：dry-run 无副作用，真实写入带补偿语义与逐项读回。
-  const patchTool = listed.tools.find((tool) => tool.name === "sv_patch_notes");
-  assert.ok(patchTool, "sv_patch_notes must be listed");
+  const patchTool = served.get("sv_patch_notes");
   assert.equal(patchTool.inputSchema.properties.atomic.default, true);
   assert.equal(patchTool.inputSchema.properties.dryRun.default, false);
   assert.ok(patchTool.inputSchema.properties.patches.items.properties.set.properties.detuneCents);
 
   const patchSnapshot = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: { scope: { kind: "selection" } },
     })
@@ -894,7 +976,7 @@ try {
     timeoutMs: 1000,
   };
   const patchPlan = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_notes",
       arguments: { ...patchArguments, dryRun: true },
     })
@@ -906,7 +988,7 @@ try {
   assert.equal(patchPlan.data.plannedChangedNotes, 1);
 
   const patchApplied = parseToolResult(
-    await client.callTool({ name: "sv_patch_notes", arguments: patchArguments })
+    await facadeCall({ name: "sv_patch_notes", arguments: patchArguments })
   );
   assert.equal(okOf(patchApplied), true);
   assert.equal(patchApplied.status, "succeeded");
@@ -921,7 +1003,7 @@ try {
   assert.equal(patchApplied.data.processing.state, "ready");
 
   const patchedSnapshot = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: { scope: { kind: "selection" }, include: ["notes"] },
     })
@@ -935,7 +1017,7 @@ try {
   );
 
   const patchConflict = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_notes",
       arguments: {
         contextId: patchedSnapshot.contextId,
@@ -951,7 +1033,7 @@ try {
 
   // sv_snapshot_range 公开契约：bar/beat 双坐标、meter/tempo map、mixer 和 sinceToken。
   const rangeSnapshot = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot_range",
       arguments: {
         scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 2 } },
@@ -1000,7 +1082,7 @@ try {
   assert.ok(firstArtifactPage.page.bytesReturned > 0);
   assert.ok(firstArtifactPage.page.bytesReturned <= 8 * 1024);
   const releasedArtifact = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_release_artifact",
       arguments: { artifactId: rangeSnapshot.artifactRef.artifactId },
     })
@@ -1012,7 +1094,7 @@ try {
   );
 
   const rangeProcessing = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_wait_for_processing",
       arguments: {
         contextId: rangeSnapshot.contextId,
@@ -1034,7 +1116,7 @@ try {
   const rangeOccurrenceId = rangeSnapshot.data.tracks[0].groups[0].occurrenceId;
   const rangeNote = rangeSnapshot.data.notes[0];
   const rangePatchPlan = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_notes",
       arguments: {
         contextId: rangeSnapshot.contextId,
@@ -1058,7 +1140,7 @@ try {
   assert.equal(rangePatchPlan.data.plannedChangedNotes, 1);
 
   const rangeStructurePlan = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
         contextId: rangeSnapshot.contextId,
@@ -1083,7 +1165,7 @@ try {
   assert.equal(rangeStructurePlan.data.expectedNoteCount, 3);
 
   const invalidRangeArguments = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot_range",
       arguments: {
         scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 2 } },
@@ -1097,7 +1179,7 @@ try {
   assert.match(invalidRangeArguments.error.message, /responseMod/);
 
   const anchorDryRun = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
         target: {
@@ -1146,7 +1228,7 @@ try {
     anchorDryRun.warnings.some((warning) => warning.code === "SHARED_TARGET_CHECK_DEFERRED")
   );
   const rangeAgain = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot_range",
       arguments: {
         scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 2 } },
@@ -1160,7 +1242,7 @@ try {
   assert.match(rangeAgain.contextExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.ok(rangeAgain.page.detailCursor);
   const refreshedRangeIdentity = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot_range",
       arguments: { cursor: rangeAgain.page.detailCursor },
     })
@@ -1170,7 +1252,7 @@ try {
 
   // 参数曲线：读取（双坐标 + definition），replace 写入 + 精确读回验证。
   const curve = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_get_parameter_curve",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0 },
@@ -1186,7 +1268,7 @@ try {
   assert.equal(curve.data.points[1].localBlick, Q);
 
   const curvePatch = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_parameter_curve",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
@@ -1209,7 +1291,7 @@ try {
 
   // 批量工具必须经过真实 MCP + IO PIPE 路径完成预检、写入和内建回读验证。
   const batchCurvePatch = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
         target: {
@@ -1248,7 +1330,7 @@ try {
 
   // Relay 宿主故意把未知名称回退到默认曲线；高层工具必须在调用宿主前拒绝 typo。
   const typoCurvePatch = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0 },
@@ -1271,7 +1353,7 @@ try {
   assert.equal(typoCurvePatch.curves[0].resolvedParameter, null);
 
   const duplicateCurvePatch = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0 },
@@ -1293,7 +1375,7 @@ try {
   assert.equal(duplicateCurvePatch.undoRecords, 0);
 
   const curveOutOfRange = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_patch_parameter_curve",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
@@ -1308,10 +1390,10 @@ try {
 
   // 结构操作：split → merge 回原状，insert → delete 往返，全部走真实 pipe。
   const structureSnapshot = parseToolResult(
-    await client.callTool({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
+    await facadeCall({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
   );
   const splitResult = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
         contextId: structureSnapshot.contextId,
@@ -1328,7 +1410,7 @@ try {
   assert.equal(splitResult.atomicity, "verified_compensation");
 
   const afterSplit = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_snapshot",
       arguments: { scope: { kind: "selection" }, include: ["notes"] },
     })
@@ -1339,7 +1421,7 @@ try {
   );
 
   const mergeResult = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
         contextId: afterSplit.contextId,
@@ -1358,7 +1440,7 @@ try {
   assert.equal(mergeResult.data.finalNoteCount, 2);
 
   const insertSnapshot = parseToolResult(
-    await client.callTool({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
+    await facadeCall({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
   );
   assert.deepEqual(
     insertSnapshot.data.notes.map((note) => [note.lyrics, note.durationBlick]),
@@ -1368,7 +1450,7 @@ try {
     ]
   );
   const insertResult = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
         contextId: insertSnapshot.contextId,
@@ -1383,10 +1465,10 @@ try {
   assert.equal(insertResult.data.appliedOperations[0].indexInGroup, 2);
 
   const deleteSnapshot = parseToolResult(
-    await client.callTool({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
+    await facadeCall({ name: "sv_snapshot", arguments: { scope: { kind: "selection" } } })
   );
   const deleteResult = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
         contextId: deleteSnapshot.contextId,
@@ -1405,7 +1487,7 @@ try {
   assert.equal(deleteResult.data.finalNoteCount, 2);
 
   const autoAudition = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_start_audition",
       arguments: { fromBlick: 0, toBlick: Q, loop: false, autoStop: true },
     })
@@ -1413,7 +1495,7 @@ try {
   assert.equal(autoAudition.data.endPolicy, "auto_stop");
   await new Promise((resolve) => setTimeout(resolve, 650));
   const autoAuditionDone = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_get_audition",
       arguments: { auditionId: autoAudition.data.auditionId },
     })
@@ -1423,7 +1505,7 @@ try {
 
   // 试听闭环：start（solo + loop）→ get → stop（恢复 solo 与 playhead）。
   const auditionStart = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_start_audition",
       arguments: { fromBlick: 0, toBlick: 4 * Q, soloTrackIndices: [0], loop: true },
     })
@@ -1435,7 +1517,7 @@ try {
   assert.equal(auditionStart.data.recovery.mixerChanges[0].previousValue, false);
 
   const auditionStatus = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_get_audition",
       arguments: { auditionId: auditionStart.data.auditionId },
     })
@@ -1443,7 +1525,7 @@ try {
   assert.equal(auditionStatus.data.playbackStatus, "looping");
 
   const auditionStop = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_stop_audition",
       arguments: { auditionId: auditionStart.data.auditionId },
     })
@@ -1457,7 +1539,7 @@ try {
 
   // voice 降级接口：可观测参数 + 明确 unobservable；clone track 带读回验证。
   const voiceProfile = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_get_voice_profile",
       arguments: { trackIndex: 0 },
     })
@@ -1468,7 +1550,7 @@ try {
   assert.equal(voiceProfile.data.capabilities.singerIdentity, "unobservable");
 
   const clonedTrack = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_clone_track_from_template",
       arguments: { templateTrackIndex: 0, name: "Pipe Harmony" },
     })
@@ -1481,12 +1563,12 @@ try {
   assert.equal(clonedTrack.data.identityPreservation, "host_opaque");
 
   const note = parseToolResult(
-    await client.callTool({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
+    await facadeCall({ name: "sv_call", arguments: { method: "create", args: ["Note"] } })
   );
   assert.equal(note.__type__, "Note");
   // 预检把版本和方法存在性都交给权威宿主，调用被转发；harness 的 Note 没有实现
   // getRapAccent，所以拿到的是宿主自己的 "no such method"。
-  const versionDeferred = await client.callTool({
+  const versionDeferred = await facadeCall({
     name: "sv_call",
     arguments: { handle: note.__handle__, method: "getRapAccent", args: [] },
   });
@@ -1496,10 +1578,10 @@ try {
   assert.match(versionDeferred.structuredContent.error.message ?? "", /no such method/);
 
   parseToolResult(
-    await client.callTool({ name: "sv_free", arguments: { handle: note.__handle__ } })
+    await facadeCall({ name: "sv_free", arguments: { handle: note.__handle__ } })
   );
   const released = parseToolError(
-    await client.callTool({
+    await facadeCall({
       name: "sv_call",
       arguments: { handle: note.__handle__, method: "getDetune", args: [] },
     })
@@ -1507,7 +1589,7 @@ try {
   assert.equal(released.error.code, "UNKNOWN_HANDLE");
 
   const fileName = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_call",
       arguments: { handle: projectHandle, method: "getFileName", args: [] },
     })
@@ -1515,7 +1597,7 @@ try {
   console.log("[client] project:getFileName ->", fileName);
 
   const trackCount = parseToolResult(
-    await client.callTool({
+    await facadeCall({
       name: "sv_call",
       arguments: { handle: projectHandle, method: "getNumTracks", args: [] },
     })
@@ -1523,13 +1605,13 @@ try {
   console.log("[client] project:getNumTracks ->", trackCount);
 
   const quarter = parseToolResult(
-    await client.callTool({ name: "sv_index", arguments: { field: "QUARTER" } })
+    await facadeCall({ name: "sv_index", arguments: { field: "QUARTER" } })
   );
   console.log("[client] SV.QUARTER ->", quarter);
 
   // setLyrics 不是 Project 的方法(不在 Project 的 manifest 条目里)。预检交给宿主,
   // 转发后由宿主报告 "no such method"。
-  const methodDeferred = await client.callTool({
+  const methodDeferred = await facadeCall({
     name: "sv_call",
     arguments: { handle: projectHandle, method: "setLyrics", args: ["la"] },
   });
@@ -1539,7 +1621,7 @@ try {
   assert.equal(parseToolError(methodDeferred).error.code, "UNKNOWN_METHOD");
 
   const unknownField = parseToolError(
-    await client.callTool({ name: "sv_index", arguments: { field: "MISSING" } })
+    await facadeCall({ name: "sv_index", arguments: { field: "MISSING" } })
   );
   assert.equal(unknownField.error.code, "UNKNOWN_FIELD");
 

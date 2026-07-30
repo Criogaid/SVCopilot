@@ -14,28 +14,29 @@ const testDir = path.dirname(fileURLToPath(import.meta.url));
 const serverScript = path.resolve(testDir, "..", "server", "src", "index.js");
 const fixturesDir = path.resolve(testDir, "fixtures", "host-profiles");
 
-async function callDoctor(profile) {
+// doctor 只能通过 sv_status facade 到达：facade 是唯一 surface。
+async function callDoctor() {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
-    env: {
-      ...process.env,
-      ...(profile ? { SV_COPILOT_TOOL_PROFILE: profile } : {}),
-    },
+    env: process.env,
     cwd: path.dirname(serverScript),
     stderr: "pipe",
   });
   const client = new Client({ name: "doctor-test", version: "1.0.0" });
   try {
     await client.connect(transport);
-    const r = await client.callTool({ name: "sv_doctor", arguments: {} });
+    const r = await client.callTool({
+      name: "sv_status",
+      arguments: { operation: "doctor", arguments: {} },
+    });
     return r.structuredContent;
   } finally {
     await client.close().catch(() => {});
   }
 }
 
-test("sv_doctor is exposed in full, core, and raw profiles", async () => {
+test("the doctor operation is reachable through sv_status and stays read-only", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
@@ -47,17 +48,23 @@ test("sv_doctor is exposed in full, core, and raw profiles", async () => {
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.ok(listed.tools.some((t) => t.name === "sv_doctor"), "sv_doctor must appear in full profile");
-    const tool = listed.tools.find((t) => t.name === "sv_doctor");
-    assert.equal(tool.annotations.readOnlyHint, true);
-    assert.equal(tool.annotations.destructiveHint, false);
+    const status = listed.tools.find((t) => t.name === "sv_status");
+    assert.ok(status, "sv_status must be exposed");
+    assert.ok(status.inputSchema.properties.operation.enum.includes("doctor"));
+    // 整组 read-only：诊断绝不写宿主。
+    assert.equal(status.annotations.readOnlyHint, true);
+    assert.equal(status.annotations.destructiveHint, false);
+    // direct 工具名不可调用。
+    const direct = await client.callTool({ name: "sv_doctor", arguments: {} });
+    assert.equal(direct.isError, true);
+    assert.equal(direct.structuredContent.error.code, "UNKNOWN_TOOL");
   } finally {
     await client.close().catch(() => {});
   }
 });
 
 test("sv_doctor returns a structurally valid report", async () => {
-  const d = await callDoctor(null);
+  const d = await callDoctor();
   assert.equal(d.kind, "svcopilot-doctor");
   assert.equal(typeof d.ok, "boolean");
   assert.ok(d.generatedAt);
@@ -72,12 +79,12 @@ test("sv_doctor returns a structurally valid report", async () => {
   assert.deepEqual(d.transport.pipes, resolvePipePaths());
   assert.ok(Array.isArray(d.findings));
   assert.ok(Array.isArray(d.hostProfiles));
-  assert.ok(d.profile);
+  assert.ok(d.surface);
   assert.ok(d.stores);
 });
 
 test("sv_doctor reports host as not attached when no SynthV is running", async () => {
-  const d = await callDoctor(null);
+  const d = await callDoctor();
   // 测试环境没有真实宿主；Doctor 必须如实报告，不猜测。
   assert.notEqual(d.transport.hostState, "attached");
   const hostFinding = d.findings.find((f) => f.code === "HOST_NOT_ATTACHED");
@@ -88,7 +95,7 @@ test("sv_doctor reports host as not attached when no SynthV is running", async (
 });
 
 test("sv_doctor reports staging bridge as found", async () => {
-  const d = await callDoctor(null);
+  const d = await callDoctor();
   assert.equal(d.bridge.staging.status, "found");
   assert.ok(d.bridge.staging.sha256?.length === 64);
   assert.ok(d.bridge.staging.bytes > 0);
@@ -97,7 +104,7 @@ test("sv_doctor reports staging bridge as found", async () => {
 });
 
 test("sv_doctor does not expose script source or env var values", async () => {
-  const d = await callDoctor(null);
+  const d = await callDoctor();
   const text = JSON.stringify(d);
   // 只允许哈希和字节数，不允许脚本内容。
   assert.ok(!text.includes("IDLE_MS"), "script source must not appear in doctor output");
@@ -105,20 +112,20 @@ test("sv_doctor does not expose script source or env var values", async () => {
 });
 
 test("sv_doctor reports proto version matching the relay", async () => {
-  const d = await callDoctor(null);
+  const d = await callDoctor();
   // staging 脚本与 Relay 必须声明相同协议版本。
   assert.equal(d.versions.protoVersionExpected, d.bridge.staging.protoVersion);
   // 如果两者一致，不应有 PROTO_VERSION_MISMATCH finding。
   assert.ok(!d.findings.some((f) => f.code === "PROTO_VERSION_MISMATCH"));
 });
 
-test("sv_doctor reports profile and store counts", async () => {
-  const d = await callDoctor(null);
-  assert.equal(d.profile.active, "full");
-  assert.ok(d.profile.registered.includes("full"));
-  assert.ok(d.profile.registered.includes("compact-v2"));
-  assert.equal(typeof d.profile.enabledToolCount, "number");
-  assert.ok(d.profile.enabledToolCount > 0);
+test("sv_doctor reports the facade surface and store counts", async () => {
+  const d = await callDoctor();
+  // 没有 profile 可报告；surface 是固定 facade 集合，operation 数从 catalog 派生。
+  assert.equal("profile" in d, false);
+  assert.equal(d.surface.facadeCount, 8);
+  assert.ok(d.surface.operationCount > 0);
+  assert.ok(d.surface.facades.includes("sv_status"));
   assert.equal(typeof d.stores.artifacts.entries, "number");
   assert.equal(typeof d.stores.snapshotContexts.entries, "number");
   // accountedBytes 是逻辑驻留字节，不是 V8 heap 实测值；evictions 让配额是否生效可观测。
@@ -128,40 +135,8 @@ test("sv_doctor reports profile and store counts", async () => {
   assert.equal(typeof d.stores.snapshotContexts.maxTotalBytes, "number");
 });
 
-test("sv_doctor is reachable through the compact facade and reports that profile", async () => {
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [serverScript],
-    env: {
-      ...process.env,
-      SV_COPILOT_TOOL_PROFILE: "compact-v2",
-    },
-    cwd: path.dirname(serverScript),
-    stderr: "pipe",
-  });
-  const client = new Client({ name: "doctor-compact-test", version: "1.0.0" });
-  try {
-    await client.connect(transport);
-    // compact profile 只暴露 facade 工具，direct 名字必须被拒绝。
-    const direct = await client.callTool({ name: "sv_doctor", arguments: {} });
-    assert.equal(direct.isError, true);
-    assert.equal(direct.structuredContent.error.code, "TOOL_NOT_ENABLED");
-
-    const viaFacade = await client.callTool({
-      name: "sv_status",
-      arguments: { operation: "doctor", arguments: {} },
-    });
-    const d = viaFacade.structuredContent;
-    assert.equal(d.kind, "svcopilot-doctor");
-    assert.equal(d.profile.active, "compact-v2");
-    assert.equal(d.profile.compactActive, true);
-  } finally {
-    await client.close().catch(() => {});
-  }
-});
-
 test("sv_doctor summarizes committed host profiles", async () => {
-  const d = await callDoctor(null);
+  const d = await callDoctor();
   assert.ok(d.hostProfiles.length > 0, "at least one host profile fixture must be present");
   const profile = d.hostProfiles[0];
   assert.ok(profile.file.endsWith(".json"));
@@ -181,7 +156,7 @@ test("collectDoctorReport unit: findings are correct for a detached host", () =>
     pipePaths: { toSv: "a", fromSv: "b" },
     host: { state: "listening", epoch: 0, hostVersion: null, hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: false, generatedAt: null, schemaVersion: null },
-    profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
+    surface: { facades: ["sv_status"], facadeCount: 8, operationCount: 42 },
     stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   assert.equal(report.kind, "svcopilot-doctor");
@@ -201,7 +176,7 @@ test("collectDoctorReport unit: proto mismatch produces a finding per found scri
     pipePaths: { toSv: "a", fromSv: "b" },
     host: { state: "listening", epoch: 0, hostVersion: null, hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
-    profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
+    surface: { facades: ["sv_status"], facadeCount: 8, operationCount: 42 },
     stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   const mismatches = report.findings.filter((f) => f.code === "PROTO_VERSION_MISMATCH");
@@ -230,7 +205,7 @@ test("collectDoctorReport unit: attached host with no ops produces warning", () 
     pipePaths: { toSv: "a", fromSv: "b" },
     host: { state: "attached", epoch: 1, hostVersion: "2.2.1", hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
-    profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
+    surface: { facades: ["sv_status"], facadeCount: 8, operationCount: 42 },
     stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   const noOps = report.findings.find((f) => f.code === "NO_NEGOTIATED_HOST_OPS");
@@ -283,7 +258,7 @@ test("collectDoctorReport unit: never calls the host", () => {
     pipePaths: { toSv: "a", fromSv: "b" },
     host: forbiddenHost,
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
-    profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
+    surface: { facades: ["sv_status"], facadeCount: 8, operationCount: 42 },
     stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   assert.equal(report.transport.hostState, "listening");

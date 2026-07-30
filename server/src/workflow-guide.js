@@ -16,21 +16,69 @@
 // - svcopilot://guide/music-workflows/{recipeId} → 单个 recipe 全文
 // 顶层响应体积上限在测试中断言（< 60 KiB，实际远小于此）。
 
-export const GUIDE_VERSION = "1";
+import { facadeForTool, operationNameForTool } from "./operation-catalog.js";
+
+export const GUIDE_VERSION = "2";
 
 const GUIDE_BASE_URI = "svcopilot://guide/music-workflows";
 
 // 占位符常量：既要让模型看懂"这里填你自己的 id"，又要通过 schema 校验。
 const EXAMPLE = {
-  contextId: "ctx_EXAMPLE",
-  beforeContextId: "ctx_EXAMPLE_BEFORE",
-  afterContextId: "ctx_EXAMPLE_AFTER",
-  occurrenceId: "ctx_EXAMPLE:t:0:r:0",
-  targetOccurrenceId: "ctx_EXAMPLE:t:1:r:0",
-  noteId: "ctx_EXAMPLE:t:0:r:0:n:0",
-  secondNoteId: "ctx_EXAMPLE:t:0:r:0:n:1",
+  contextId: "c_EXAMPLE",
+  beforeContextId: "c_EXAMPLE_BEFORE",
+  afterContextId: "c_EXAMPLE_AFTER",
+  occurrenceId: "c_EXAMPLE:t:0:r:0",
+  targetOccurrenceId: "c_EXAMPLE:t:1:r:0",
+  noteId: "c_EXAMPLE:t:0:r:0:n:0",
+  secondNoteId: "c_EXAMPLE:t:0:r:0:n:1",
   auditionId: "aud_EXAMPLE",
 };
+
+// recipe 内部用内部 handler 名书写（`sv_patch_notes`），但模型只能调用 facade。
+// 因此每个 (tool, arguments) 模板在序列化时投影成真正可发送的 facade 请求：
+// tool 变成 facade 名，arguments 变成 {operation, arguments} 信封。
+// 单一来源：投影结果由 OperationCatalog 派生，指南里不手写第二套工具名。
+function projectCall(template) {
+  if (!template || typeof template.tool !== "string") return template;
+  const { tool, arguments: inner, ...rest } = template;
+  return {
+    ...rest,
+    tool: facadeForTool(tool),
+    operation: operationNameForTool(tool),
+    // 直接可发送的完整 arguments：模型照抄即可，不需要自己拼信封。
+    arguments: { operation: operationNameForTool(tool), arguments: inner },
+  };
+}
+
+function projectStep(step) {
+  const projected = projectCall(step);
+  if (step?.onInsufficientData) {
+    projected.onInsufficientData = projectCall(step.onInsufficientData);
+  }
+  return projected;
+}
+
+function projectRecipe(recipe) {
+  return {
+    ...recipe,
+    ...(recipe.captureTemplate ? { captureTemplate: projectCall(recipe.captureTemplate) } : {}),
+    steps: recipe.steps.map(projectStep),
+    ...(recipe.recoveryPath ? { recoveryPath: projectCall(recipe.recoveryPath) } : {}),
+  };
+}
+
+// byNeed 的 tool 字段有的是单个工具名，有的是散文（"sv_describe / sv_search_api"）。
+// 只投影能精确解析的那些，其余原样保留而不是猜。
+function projectNeed(entry) {
+  try {
+    return {
+      ...entry,
+      tool: `${facadeForTool(entry.tool)}(${operationNameForTool(entry.tool)})`,
+    };
+  } catch {
+    return entry;
+  }
+}
 
 // 全局规则：适用于所有 recipe，不在每个 step 里重复。
 const GLOBAL_RULES = {
@@ -1087,7 +1135,8 @@ function recipeSummary(recipe) {
     expectedCalls: recipe.expectedCalls,
     humanGates: recipe.humanGates,
     stepCount: recipe.steps.length,
-    tools: [...new Set(recipe.steps.map((step) => step.tool))],
+    // 摘要里列的必须是模型真能调用的 facade 名。
+    tools: [...new Set(recipe.steps.map((step) => facadeForTool(step.tool)))],
     uri: `${GUIDE_BASE_URI}/${recipe.id}`,
   };
 }
@@ -1100,7 +1149,7 @@ export function musicWorkflowGuideIndex(interfaceVersion) {
     description:
       "How to combine SV Copilot tools into safe musical workflows. Read one recipe URI for its full steps. This guide describes tool composition only; every project fact must come from a live sv_snapshot_range.",
     defaultWorkflow: DEFAULT_WORKFLOW,
-    toolSelection: TOOL_SELECTION,
+    toolSelection: { ...TOOL_SELECTION, byNeed: TOOL_SELECTION.byNeed.map(projectNeed) },
     globalRules: GLOBAL_RULES,
     recipes: RECIPES.map(recipeSummary),
   };
@@ -1112,11 +1161,12 @@ export function musicWorkflowGuideRecipe(recipeId, interfaceVersion) {
   return {
     guideVersion: GUIDE_VERSION,
     interfaceVersion,
-    recipe,
+    recipe: projectRecipe(recipe),
     seeAlso: {
       index: GUIDE_BASE_URI,
       capabilities: "svcopilot://capabilities",
-      schemaTemplate: "svcopilot://schemas/{tool}",
+      operations: "svcopilot://operations",
+      describeTool: "sv_describe",
     },
   };
 }
@@ -1126,6 +1176,8 @@ export function musicWorkflowGuideRecipeIds() {
 }
 
 // 测试与内部校验用：拿到每个 step 的 (tool, arguments) 对，逐一喂给真实 inputSchema。
+// 这里返回的是内部 handler 名与内层 arguments——被校验的正是那份严格业务 schema；
+// facade 信封由 projectCall 在资源序列化时加上。
 export function musicWorkflowGuideExamples() {
   const examples = [];
   for (const recipe of RECIPES) {

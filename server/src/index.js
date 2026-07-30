@@ -73,7 +73,6 @@ import {
   artifactReference,
   artifactResourceView,
 } from "./artifact-store.js";
-import { filterToolsByProfile, isToolEnabled, registerToolProfile, registeredToolProfiles } from "./tool-profile.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
 
@@ -87,8 +86,6 @@ const hostSession = new HostSession(bridge);
 // 使用进程级 session id 让同一 server 实例内的 tool/resource 共享 artifact。
 const serverSessionId = `sess_${randomUUID()}`;
 
-// 工具 profile 在进程启动时确定；默认 full 保持兼容。
-const toolProfileName = process.env.SV_COPILOT_TOOL_PROFILE ?? "full";
 const snapshotService = new SnapshotService(hostSession);
 const workflowExecutor = new WorkflowExecutor(hostSession);
 const artifactStore = new ArtifactStore();
@@ -2798,15 +2795,11 @@ export const TOOLS = [
   },
 ];
 
-// 根据启动时 profile 过滤工具清单；full 保持默认兼容。
-// compact-v2 是实验性 profile：只暴露 facade 工具，direct tool 的 schema 不变。
-const COMPACT_PROFILE = "compact-v2";
+// facade 是唯一 MCP surface：direct tool 只作为内部组织单位，不进入 tools/list。
+// 没有 profile 选择层——多套 profile 需要维护 N 份「哪些工具可达」的真相，而收益
+// 只是元数据体积，facade 已经解决了后者。
 const compactFacade = createCompactFacade(TOOLS);
-registerToolProfile(COMPACT_PROFILE, compactFacade.toolNames);
-const isCompactProfile = toolProfileName === COMPACT_PROFILE;
-const enabledTools = isCompactProfile
-  ? compactFacade.tools
-  : filterToolsByProfile(toolProfileName, TOOLS);
+const enabledTools = compactFacade.tools;
 
 const server = new Server(
   { name: "sv-copilot", version: INTERFACE_VERSION },
@@ -2850,7 +2843,7 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://operations",
       name: "SV Copilot compact operation catalog",
       description:
-        "Facade-to-operation routing for the experimental compact-v2 profile: which operation each facade tool accepts, which direct tool it calls, and which tools stay out of the compact profile.",
+        "Facade-to-operation routing: which operation each facade tool accepts and a one-line summary per operation. Call sv_describe for an operation's exact arguments schema.",
       mimeType: "application/json",
     },
     {
@@ -3005,58 +2998,60 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const requestedName = request.params.name;
-  if (!isToolEnabled(toolProfileName, requestedName)) {
+  // facade 是唯一 surface；direct tool 名不再可调用，否则 tools/list 与实际可达
+  // 集合就会分叉，模型也无从知道哪一套名字才算契约。
+  if (!compactFacade.isFacadeTool(requestedName)) {
     return toolError(
-      "TOOL_NOT_ENABLED",
-      `tool "${requestedName}" is not enabled in profile "${toolProfileName}"`
+      "UNKNOWN_TOOL",
+      `tool "${requestedName}" is not exposed; call one of ${compactFacade.toolNames.join(", ")}`
     );
   }
 
-  // compact facade 只做解析：把 facade 调用翻译成 direct tool 名 + arguments 之后，
-  // 后续每一步（normalize、Ajv 校验、dispatch）与 direct 调用共用同一条路径。
-  let name = requestedName;
-  let rawArguments = request.params.arguments ?? {};
-  if (compactFacade?.isFacadeTool(requestedName)) {
-    if (requestedName === DESCRIBE_OPERATION_TOOL) {
-      const validator = facadeArgumentValidators.get(requestedName);
-      if (!validator(rawArguments)) {
-        return toolError("INVALID_ARGUMENTS", formatSchemaErrors(validator.errors));
-      }
-      try {
-        return toolResult(compactFacade.describe(rawArguments.operations));
-      } catch (error) {
-        return toolError(
-          typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
-          error instanceof Error ? error.message : String(error),
-          error?.details
-        );
-      }
+  const facadeArguments = request.params.arguments ?? {};
+  const facadeValidator = facadeArgumentValidators.get(requestedName);
+
+  // sv_describe 是唯一不套 {operation, arguments} 信封的工具：它直接接受
+  // operations 数组，因为 schema discovery 本身不是某个 operation。
+  if (requestedName === DESCRIBE_OPERATION_TOOL) {
+    if (!facadeValidator(facadeArguments)) {
+      return toolError("INVALID_ARGUMENTS", formatSchemaErrors(facadeValidator.errors));
     }
-    let entry;
-    // 先解析 operation，再校验信封。schema 里的 enum 是给模型的可见清单，
-    // 但它对 unknown 与 cross-facade 都只报 INVALID_ARGUMENTS，无法告诉模型
-    // 「这个 operation 存在，只是在另一个 facade 上」——先解析才能给出可行动的错误。
-    // 缺失或非字符串 operation 属于信封本身的问题，交给下面的 schema 校验。
-    if (typeof rawArguments?.operation === "string") {
-      try {
-        entry = compactFacade.resolveOperation(requestedName, rawArguments.operation);
-      } catch (error) {
-        return toolError(
-          typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
-          error instanceof Error ? error.message : String(error),
-          error?.details
-        );
-      }
+    try {
+      return toolResult(compactFacade.describe(facadeArguments.operations));
+    } catch (error) {
+      return toolError(
+        typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
+        error instanceof Error ? error.message : String(error),
+        error?.details
+      );
     }
-    const validator = facadeArgumentValidators.get(requestedName);
-    if (!validator(rawArguments)) {
-      return toolError("INVALID_ARGUMENTS", formatSchemaErrors(validator.errors));
-    }
-    name = entry.tool;
-    rawArguments = rawArguments.arguments ?? {};
   }
 
-  const args = normalizeToolArguments(name, rawArguments);
+  // facade 只做解析：把 facade 调用翻译成内部 handler 名 + arguments 之后，
+  // 后续每一步（normalize、Ajv 校验、dispatch）与内部调用共用同一条路径。
+  //
+  // 先解析 operation，再校验信封。schema 里的 enum 是给模型的可见清单，
+  // 但它对 unknown 与 cross-facade 都只报 INVALID_ARGUMENTS，无法告诉模型
+  // 「这个 operation 存在，只是在另一个 facade 上」——先解析才能给出可行动的错误。
+  // 缺失或非字符串 operation 属于信封本身的问题，交给下面的 schema 校验。
+  let entry;
+  if (typeof facadeArguments?.operation === "string") {
+    try {
+      entry = compactFacade.resolveOperation(requestedName, facadeArguments.operation);
+    } catch (error) {
+      return toolError(
+        typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
+        error instanceof Error ? error.message : String(error),
+        error?.details
+      );
+    }
+  }
+  if (!facadeValidator(facadeArguments)) {
+    return toolError("INVALID_ARGUMENTS", formatSchemaErrors(facadeValidator.errors));
+  }
+  const name = entry.tool;
+
+  const args = normalizeToolArguments(name, facadeArguments.arguments ?? {});
   const argumentValidator = toolArgumentValidators.get(name);
   if (!argumentValidator) return toolError("UNKNOWN_TOOL", name);
   if (!argumentValidator(args)) {
@@ -3492,16 +3487,13 @@ function capabilities() {
         },
         directReadMaxBytes: MAX_ARTIFACT_DIRECT_READ_BYTES,
       },
-      toolProfile: toolProfileName,
-      // compact-v2 是实验性 profile：facade 只做 operation 路由，前置条件、
-      // 事务语义和失败模型与 direct tool 完全一致。
-      compact: {
-        profile: COMPACT_PROFILE,
-        active: isCompactProfile,
+      // facade 是唯一 surface，没有 profile 可选：facade 只做 operation 路由，
+      // 前置条件、事务语义和失败模型与内部 handler 完全一致。
+      surface: {
         facades: compactFacade.toolNames,
+        operations: compactFacade.operationCount,
         describeTool: DESCRIBE_OPERATION_TOOL,
         catalog: "svcopilot://operations",
-        semanticsEqualToDirectTools: true,
       },
       typedResultFormat: "typed-v2",
       guide: {
@@ -3590,12 +3582,12 @@ function doctorReport() {
       generatedAt: apiManifest.generatedAt,
       schemaVersion: apiManifest.schemaVersion ?? null,
     },
-    profile: {
-      active: toolProfileName,
-      registered: registeredToolProfiles(),
-      compactActive: isCompactProfile,
-      enabledToolCount: enabledTools.length,
-      directToolCount: TOOLS.length,
+    // 没有 profile 选择层可报告；surface 是固定的 facade 集合，operation 总数
+    // 从 OperationCatalog 派生而不是写死常量。
+    surface: {
+      facades: compactFacade.toolNames,
+      facadeCount: enabledTools.length,
+      operationCount: compactFacade.operationCount,
     },
     stores: {
       artifacts: {
