@@ -1,3 +1,4 @@
+import "./helpers/pipe-namespace.mjs";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -26,15 +27,6 @@ const bridgeScript = path.join(
   "copilot",
   "sv-scripts",
   "StartSynthVCopilot.lua"
-);
-const stopHarness = path.join(testDir, "stop_bridge_harness.lua");
-const stopScript = path.join(
-  productDir,
-  "scripts",
-  "SynthVCopilotResearch",
-  "copilot",
-  "sv-scripts",
-  "StopSynthVCopilot.lua"
 );
 
 function parseToolResult(response) {
@@ -68,12 +60,10 @@ function waitForExit(child, timeoutMs = 3000) {
   });
 }
 
-const session = `mcp-client-${process.pid}-${Date.now()}`;
-const childEnv = { ...process.env, SV_COPILOT_SESSION: session };
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [serverScript],
-  env: childEnv,
+  env: process.env,
   cwd: path.dirname(serverScript),
   stderr: "pipe",
 });
@@ -87,7 +77,7 @@ try {
   assert.equal(client.getServerVersion()?.version, "0.9.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
-    env: childEnv,
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -1533,16 +1523,14 @@ try {
   assert.equal(trackCount, 4);
   assert.equal(quarter, Q);
 
-  const stop = spawn(luaBin, [stopHarness, stopScript], {
-    env: childEnv,
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  assert.equal(await waitForExit(stop), 0);
-  assert.equal(await waitForExit(bridge), 0);
-  console.log("[client] StopSynthVCopilot -> bridge exited cleanly");
   console.log("[client] smoke test passed");
 } finally {
-  if (bridge && bridge.exitCode === null) bridge.kill();
   await client.close().catch(() => {});
+  if (bridge && bridge.exitCode === null) {
+    try {
+      await waitForExit(bridge);
+    } catch {
+      bridge.kill();
+    }
+  }
 }

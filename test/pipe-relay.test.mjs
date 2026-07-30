@@ -3,7 +3,25 @@ import net from "node:net";
 import test from "node:test";
 import { once } from "node:events";
 
-import { PipeRelay } from "../server/src/transport-pipe.js";
+import "./helpers/pipe-namespace.mjs";
+import { PipeRelay, resolvePipePaths } from "../server/src/transport-pipe.js";
+
+test("transport uses one fixed data-pipe pair without a session namespace", () => {
+  // 正式安装不设置 SV_COPILOT_PIPE_NAMESPACE，管道名必须恰好是这一对。
+  assert.deepEqual(resolvePipePaths(""), {
+    toSv: "\\\\.\\pipe\\SVCopilot-to-sv",
+    fromSv: "\\\\.\\pipe\\SVCopilot-from-sv",
+  });
+});
+
+test("the test-only pipe namespace never changes the installed pipe pair", () => {
+  // 命名空间只是测试隔离手段：它只能加前缀，不能改变 to-sv/from-sv 的后缀形状。
+  assert.deepEqual(resolvePipePaths("t123"), {
+    toSv: "\\\\.\\pipe\\SVCopilot-t123-to-sv",
+    fromSv: "\\\\.\\pipe\\SVCopilot-t123-from-sv",
+  });
+  assert.throws(() => resolvePipePaths("bad namespace"), /SV_COPILOT_PIPE_NAMESPACE/);
+});
 
 function connect(pipePath) {
   return new Promise((resolve, reject) => {
@@ -65,8 +83,7 @@ function writeFrame(socket, frame) {
 }
 
 test("PipeRelay validates handshake and preserves lockstep serialization", async (t) => {
-  const session = `relay-test-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  const relay = new PipeRelay({ timeoutMs: 1000 });
   await relay.init();
 
   const toSv = await connect(relay.paths.toSv);
@@ -82,11 +99,11 @@ test("PipeRelay validates handshake and preserves lockstep serialization", async
   assert.deepEqual(JSON.parse(await nextReply()), {
     type: "error",
     code: "PROTO_MISMATCH",
-    expected: 1,
+    expected: 2,
   });
 
-  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
-  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 1, session });
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 2 });
+  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 2 });
 
   writeFrame(fromSv, "{invalid-json");
   assert.deepEqual(JSON.parse(await nextReply()), { type: "error", code: "INVALID_JSON" });
@@ -114,8 +131,7 @@ test("PipeRelay validates handshake and preserves lockstep serialization", async
 });
 
 test("sequential awaited calls chain through the result reply without a poll wait", async (t) => {
-  const session = `relay-chain-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  const relay = new PipeRelay({ timeoutMs: 1000 });
   await relay.init();
 
   const toSv = await connect(relay.paths.toSv);
@@ -127,7 +143,7 @@ test("sequential awaited calls chain through the result reply without a poll wai
     await relay.close();
   });
 
-  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 2 });
   JSON.parse(await nextReply());
 
   // 顺序 await：第二条命令只有在第一条 resolve 之后才会入队。
@@ -153,34 +169,8 @@ test("sequential awaited calls chain through the result reply without a poll wai
   assert.deepEqual(await sequence, ["pong", 705600000]);
 });
 
-test("control pipe requests bridge shutdown", async (t) => {
-  const session = `control-test-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 1000 });
-  await relay.init();
-
-  const toSv = await connect(relay.paths.toSv);
-  const fromSv = await connect(relay.paths.fromSv);
-  const nextReply = createLineReader(toSv);
-  t.after(async () => {
-    toSv.destroy();
-    fromSv.destroy();
-    await relay.close();
-  });
-
-  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
-  await nextReply();
-
-  const control = await connect(relay.paths.control);
-  control.end('{"type":"shutdown"}\n');
-  await once(control, "close");
-
-  writeFrame(fromSv, { type: "poll" });
-  assert.deepEqual(JSON.parse(await nextReply()), { type: "shutdown" });
-});
-
 test("oversized result frames fail the command without detaching the bridge", async (t) => {
-  const session = `relay-oversize-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 2000 });
+  const relay = new PipeRelay({ timeoutMs: 2000 });
   await relay.init();
   const toSv = await connect(relay.paths.toSv);
   const fromSv = await connect(relay.paths.fromSv);
@@ -191,7 +181,7 @@ test("oversized result frames fail the command without detaching the bridge", as
     await relay.close();
   });
 
-  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 2 });
   JSON.parse(await nextReply());
   let detached = false;
   relay.on("detach", () => {
@@ -226,8 +216,7 @@ test("oversized result frames fail the command without detaching the bridge", as
 });
 
 test("PipeRelay negotiates bridge opcodes per connection and forgets them on detach", async (t) => {
-  const session = `relay-caps-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  const relay = new PipeRelay({ timeoutMs: 1000 });
   await relay.init();
 
   const toSv = await connect(relay.paths.toSv);
@@ -247,11 +236,11 @@ test("PipeRelay negotiates bridge opcodes per connection and forgets them on det
   writeFrame(fromSv, {
     type: "hello",
     role: "sv",
-    proto: 1,
+    proto: 2,
     ops: ["read_note_fingerprints_v1", 42, "another_op"],
   });
-  // 握手回复不携带 ops：能力是桥 -> Relay 的单向声明，回复保持逐字节兼容旧桥。
-  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 1, session });
+  // 握手回复不携带 ops：能力是桥 -> Relay 的单向声明。
+  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 2 });
 
   assert.equal(relay.supportsOp("read_note_fingerprints_v1"), true);
   assert.equal(relay.supportsOp("another_op"), true);
@@ -269,8 +258,7 @@ test("PipeRelay negotiates bridge opcodes per connection and forgets them on det
 });
 
 test("PipeRelay treats a bridge without an ops field as capability-free", async (t) => {
-  const session = `relay-nocaps-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 1000 });
+  const relay = new PipeRelay({ timeoutMs: 1000 });
   await relay.init();
 
   const toSv = await connect(relay.paths.toSv);
@@ -282,9 +270,9 @@ test("PipeRelay treats a bridge without an ops field as capability-free", async 
     await relay.close();
   });
 
-  // 旧桥的 hello 没有 ops 字段；握手必须照常成功，只是不具备任何 internal op。
-  writeFrame(fromSv, { type: "hello", role: "sv", proto: 1 });
-  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 1, session });
+  // 未声明 ops 的桥仍可握手，但不具备任何 internal op。
+  writeFrame(fromSv, { type: "hello", role: "sv", proto: 2 });
+  assert.deepEqual(JSON.parse(await nextReply()), { type: "hello", proto: 2 });
   assert.equal(relay.getStatus().state, "attached");
   assert.equal(relay.supportsOp("read_note_fingerprints_v1"), false);
   assert.deepEqual(relay.getStatus().hostOps, []);
@@ -292,7 +280,7 @@ test("PipeRelay treats a bridge without an ops field as capability-free", async 
 
 test("_closeServers tears down servers unconditionally, including ones still binding", async () => {
   const { EventEmitter } = await import("node:events");
-  const relay = new PipeRelay({ session: "close-race-test" });
+  const relay = new PipeRelay();
   const events = [];
   // 模拟 net.Server：close() 在未 listening 时以 ERR_SERVER_NOT_RUNNING 回调，
   // 但异步绑定仍可能随后完成——旧实现按 listening 短路会把它泄漏成无引用 server。

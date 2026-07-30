@@ -2,40 +2,40 @@ import net from "node:net";
 import { EventEmitter } from "node:events";
 
 const PIPE_PREFIX = "\\\\.\\pipe\\";
-const DEFAULT_SESSION = "default";
 
-export function resolveSession() {
-  return process.env.SV_COPILOT_SESSION || DEFAULT_SESSION;
+// 真实安装只使用固定的一对管道名。SV_COPILOT_PIPE_NAMESPACE 仅供自动测试隔离：
+// 测试会与开发机上真实运行的 Relay 抢同一个管道名（EADDRINUSE），因此需要一个
+// 前缀让每个测试进程独占一对管道。桥脚本读同一个变量。
+export function resolvePipeNamespace() {
+  return process.env.SV_COPILOT_PIPE_NAMESPACE || "";
 }
 
-export function resolvePipePaths(session = resolveSession()) {
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(session)) {
+export function resolvePipePaths(namespace = resolvePipeNamespace()) {
+  if (namespace !== "" && !/^[A-Za-z0-9._-]{1,64}$/.test(namespace)) {
     throw new Error(
-      "SV_COPILOT_SESSION must contain 1-64 ASCII letters, digits, dots, underscores, or hyphens"
+      "SV_COPILOT_PIPE_NAMESPACE must contain 1-64 ASCII letters, digits, dots, underscores, or hyphens"
     );
   }
+  const infix = namespace ? `${namespace}-` : "";
   return {
-    toSv: `${PIPE_PREFIX}SVCopilot-${session}-to-sv`,
-    fromSv: `${PIPE_PREFIX}SVCopilot-${session}-from-sv`,
-    control: `${PIPE_PREFIX}SVCopilot-${session}-control`,
+    toSv: `${PIPE_PREFIX}SVCopilot-${infix}to-sv`,
+    fromSv: `${PIPE_PREFIX}SVCopilot-${infix}from-sv`,
   };
 }
 
 export class PipeRelay extends EventEmitter {
   constructor({
-    session = resolveSession(),
-    proto = 1,
+    proto = 2,
     timeoutMs = 10000,
     maxQueue = 64,
     maxFrameBytes = 64 * 1024,
   } = {}) {
     super();
-    this.session = session;
     this.proto = proto;
     this.timeoutMs = timeoutMs;
     this.maxQueue = maxQueue;
     this.maxFrameBytes = maxFrameBytes;
-    this.paths = resolvePipePaths(session);
+    this.paths = resolvePipePaths();
 
     this.counter = 0;
     this.queue = [];
@@ -47,12 +47,11 @@ export class PipeRelay extends EventEmitter {
     this.discardingOversized = false;
     this.pendingReply = null;
     this.handshakeComplete = false;
-    this.shutdownRequested = false;
     this.initialized = false;
     this.closed = false;
     this.detaching = false;
     this.connectionEpoch = 0;
-    // 桥在 hello 里宣告的 internal opcode。旧桥不发该字段 -> 空集合 -> 只走逐调用路径。
+    // 桥在 hello 里声明 internal opcode；未声明时只走逐调用路径。
     this.hostOps = new Set();
   }
 
@@ -62,14 +61,12 @@ export class PipeRelay extends EventEmitter {
 
     const toSvServer = net.createServer((socket) => this._acceptToSv(socket));
     const fromSvServer = net.createServer((socket) => this._acceptFromSv(socket));
-    const controlServer = net.createServer((socket) => this._acceptControl(socket));
-    this.servers = [toSvServer, fromSvServer, controlServer];
+    this.servers = [toSvServer, fromSvServer];
 
     try {
       await Promise.all([
         this._listen(toSvServer, this.paths.toSv),
         this._listen(fromSvServer, this.paths.fromSv),
-        this._listen(controlServer, this.paths.control),
       ]);
       this.initialized = true;
     } catch (error) {
@@ -103,7 +100,7 @@ export class PipeRelay extends EventEmitter {
         this.queue = this.queue.filter((entry) => entry.id !== id);
         reject(
           new Error(
-            `Timeout waiting for SynthV bridge (id=${id}). Is "Start SV Copilot" running? session=${this.session}`
+            `Timeout waiting for SynthV bridge (id=${id}). Is "Start SV Copilot" running?`
           )
         );
       }, this.timeoutMs);
@@ -155,31 +152,6 @@ export class PipeRelay extends EventEmitter {
     socket.on("close", () => {
       if (this.fromSvSocket === socket) this._detach("from-sv pipe closed");
     });
-  }
-
-  _acceptControl(socket) {
-    let buffer = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, "utf8") > this.maxFrameBytes) {
-        socket.destroy();
-        return;
-      }
-      let newline;
-      while ((newline = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!line) continue;
-        try {
-          const frame = JSON.parse(line);
-          if (frame.type === "shutdown") this._requestShutdown();
-        } catch {
-          // 控制管道是单向的；无效帧只能丢弃，不能在同一连接上回包。
-        }
-      }
-    });
-    socket.on("error", () => {});
   }
 
   _onFromSvData(chunk) {
@@ -261,11 +233,10 @@ export class PipeRelay extends EventEmitter {
         );
         this.emit("attach", {
           epoch: this.connectionEpoch,
-          session: this.session,
           ops: [...this.hostOps],
         });
       }
-      this._sendReply({ type: "hello", proto: this.proto, session: this.session });
+      this._sendReply({ type: "hello", proto: this.proto });
       return;
     }
 
@@ -300,11 +271,6 @@ export class PipeRelay extends EventEmitter {
   }
 
   _reply() {
-    if (this.shutdownRequested) {
-      this.shutdownRequested = false;
-      this._sendReply({ type: "shutdown" });
-      return;
-    }
     if (this.inflight.size === 0 && this.queue.length > 0) {
       const next = this.queue.shift();
       this.inflight.set(next.id, next);
@@ -326,12 +292,6 @@ export class PipeRelay extends EventEmitter {
   _writeRaw(encoded) {
     if (!this.toSvSocket || this.toSvSocket.destroyed) return;
     this.toSvSocket.write(encoded);
-  }
-
-  _requestShutdown() {
-    const error = new Error("SynthV bridge shutdown requested");
-    this._rejectCommands(error);
-    this.shutdownRequested = true;
   }
 
   _rejectCommands(error) {
@@ -358,7 +318,6 @@ export class PipeRelay extends EventEmitter {
     this.discardingOversized = false;
     this.pendingReply = null;
     this.handshakeComplete = false;
-    this.shutdownRequested = false;
     // 能力属于单次连接：断开后必须清空，否则重连前的调用会以为旧 opcode 仍可用。
     this.hostOps = new Set();
     this._rejectCommands(new Error(`SynthV bridge detached: ${reason}`));
@@ -377,7 +336,6 @@ export class PipeRelay extends EventEmitter {
     return {
       state: this.handshakeComplete ? "attached" : this.initialized ? "listening" : "stopped",
       epoch: this.connectionEpoch,
-      session: this.session,
       hostOps: [...this.hostOps],
     };
   }

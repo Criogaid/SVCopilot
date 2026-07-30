@@ -1,3 +1,4 @@
+import "./helpers/pipe-namespace.mjs";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -20,16 +21,7 @@ const bridgeScript = path.join(
   "sv-scripts",
   "StartSynthVCopilot.lua"
 );
-const stopScript = path.join(
-  productDir,
-  "scripts",
-  "SynthVCopilotResearch",
-  "copilot",
-  "sv-scripts",
-  "StopSynthVCopilot.lua"
-);
 const harnessScript = path.join(testDir, "pipe_bridge_harness.lua");
-const stopHarnessScript = path.join(testDir, "stop_bridge_harness.lua");
 
 function handleOf(value) {
   assert.equal(typeof value?.__handle__, "number");
@@ -55,12 +47,11 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
     return;
   }
 
-  const session = `e2e-${process.pid}-${Date.now()}`;
-  const relay = new PipeRelay({ session, timeoutMs: 3000 });
+  const relay = new PipeRelay({ timeoutMs: 3000 });
   await relay.init();
 
   const child = spawn(luaBin, [harnessScript, bridgeScript], {
-    env: { ...process.env, SV_COPILOT_SESSION: session },
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -229,13 +220,7 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
   // 结构化拒绝之后锁步必须仍然存活：桥没被拖死，后续命令照常返回。
   assert.equal(await relay.call({ op: "ping" }), "pong");
 
-  const stopChild = spawn(luaBin, [stopHarnessScript, stopScript], {
-    env: { ...process.env, SV_COPILOT_SESSION: session },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  const stopExit = await waitForExit(stopChild);
-  assert.equal(stopExit.code, 0);
+  await relay.close();
   const exit = await waitForExit(child);
   assert.equal(exit.code, 0, `Lua failed\nstdout: ${stdout}\nstderr: ${stderr}`);
 });

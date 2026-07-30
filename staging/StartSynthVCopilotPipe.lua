@@ -4,13 +4,17 @@
 ]]
 
 IDLE_MS = 20
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
-local SESSION = os.getenv("SV_COPILOT_SESSION")
-if not SESSION or SESSION == "" then SESSION = "default" end
 -- RelayProbe-style escaping: \\\\.\\pipe\\ -> \\.\pipe\
-local PIPE_TO_SV   = "\\\\.\\pipe\\SVCopilot-" .. SESSION .. "-to-sv"    -- Relay -> SV (we read)
-local PIPE_FROM_SV = "\\\\.\\pipe\\SVCopilot-" .. SESSION .. "-from-sv"  -- SV -> Relay (we write)
+-- 真实安装只使用固定的一对管道名。SV_COPILOT_PIPE_NAMESPACE 仅供自动测试隔离，
+-- 让每个测试进程独占一对管道，避免与开发机上真实运行的 Relay 抢同名管道。
+local NAMESPACE = os.getenv("SV_COPILOT_PIPE_NAMESPACE")
+if not NAMESPACE or not NAMESPACE:match("^[A-Za-z0-9._-]+$") then NAMESPACE = "" end
+if NAMESPACE ~= "" then NAMESPACE = NAMESPACE .. "-" end
+
+local PIPE_TO_SV   = "\\\\.\\pipe\\SVCopilot-" .. NAMESPACE .. "to-sv"    -- Relay -> SV (we read)
+local PIPE_FROM_SV = "\\\\.\\pipe\\SVCopilot-" .. NAMESPACE .. "from-sv"  -- SV -> Relay (we write)
 
 -- ===================================================================== --
 -- JSON (pure Lua) -- identical to StartSynthVCopilot.lua
@@ -608,8 +612,8 @@ function main()
   outPipe:setvbuf("no")
 
   -- handshake
-  -- ops 是能力协商：旧 Relay 会忽略该字段，新 Relay 只在这里出现的 opcode 上走批量路径。
-  -- PROTO_VERSION 不变，握手对两个方向都保持兼容。
+  -- ops 是能力协商：Relay 只对已声明的 opcode 启用批量路径。
+  -- 协议 v2 使用固定管道名，握手不再携带传输 session。
   local hello = json.stringify({
     type = 'hello',
     role = 'sv',
@@ -621,7 +625,7 @@ function main()
   if helloLine == nil then finish("no hello from Relay (EOF)", true); return end
   local response, parseError = parseFrame(helloLine)
   if not response then finish(parseError, true); return end
-  if response.type ~= 'hello' or response.proto ~= PROTO_VERSION or response.session ~= SESSION then
+  if response.type ~= 'hello' or response.proto ~= PROTO_VERSION then
     finish("Relay handshake mismatch", true)
     return
   end

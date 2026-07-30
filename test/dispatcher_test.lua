@@ -32,9 +32,7 @@ function fakeOut:setvbuf(_mode) return true end
 function fakeOut:close() end
 
 -- main() 会同步等待 hello，因此在调用前放入 Relay 的握手响应。
-local session = os.getenv("SV_COPILOT_SESSION")
-if not session or session == "" then session = "default" end
-incoming[#incoming + 1] = '{"type":"hello","proto":1,"session":"' .. session .. '"}'
+incoming[#incoming + 1] = '{"type":"hello","proto":2}'
 
 local realOpen = io.open
 io.open = function(path, mode)
@@ -331,12 +329,12 @@ r = step('{"id":40,"op":"read_note_fingerprints_v2","trackIndex":0}')
 check("unknown opcode still fails cleanly instead of hanging",
   r:find('"ok":false', 1, true) and r:find("unknown op", 1, true), r)
 
--- 能力协商：握手必须宣告 opcode，旧 Relay 忽略该字段即可。
+-- 能力协商：握手必须声明当前桥支持的 opcode。
 local helloFrame = outgoing[1]
 check("hello advertises the bulk opcode for capability negotiation",
   helloFrame and helloFrame:find('"ops"', 1, true)
     and helloFrame:find("read_note_fingerprints_v1", 1, true)
-    and helloFrame:find('"proto":1', 1, true), helloFrame)
+    and helloFrame:find('"proto":2', 1, true), helloFrame)
 
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

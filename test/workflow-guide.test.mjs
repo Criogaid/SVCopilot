@@ -1,3 +1,4 @@
+import "./helpers/pipe-namespace.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
@@ -53,7 +54,7 @@ async function withServer(run) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
-    env: { ...process.env, SV_COPILOT_SESSION: `guide-${process.pid}-${Date.now()}` },
+    env: process.env,
     cwd: path.dirname(serverScript),
     stderr: "pipe",
   });

@@ -1,3 +1,4 @@
+import "./helpers/pipe-namespace.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
@@ -27,7 +28,6 @@ async function withClient(profile, fn) {
     args: [serverScript],
     env: {
       ...process.env,
-      SV_COPILOT_SESSION: `compact-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       ...(profile ? { SV_COPILOT_TOOL_PROFILE: profile } : {}),
     },
     cwd: path.dirname(serverScript),

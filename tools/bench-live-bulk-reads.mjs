@@ -33,7 +33,6 @@ import { READ_NOTE_FINGERPRINTS_V1 } from "../server/src/note-fingerprint-reader
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, "out");
-const SESSION = process.env.SV_COPILOT_SESSION || `liveperf-${process.pid}`;
 
 // 计划 §7 Phase 1「实机验收」固定的参数，不可由命令行放宽——
 // 可调的门禁不是门禁。
@@ -88,7 +87,7 @@ const report = {
 
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
-  const relay = new PipeRelay({ session: SESSION, timeoutMs: 30_000 });
+  const relay = new PipeRelay({ timeoutMs: 30_000 });
   await relay.init();
   const host = new HostSession(relay);
   try {
@@ -437,13 +436,13 @@ function quantile(sorted, fraction) {
 async function waitForBridge(relay, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   console.error(
-    `[perf] waiting for the SV Copilot bridge (session=${SESSION}); start StartSynthVCopilot in SynthV…`
+    "[perf] waiting for the SV Copilot bridge; start StartSynthVCopilot in SynthV…"
   );
   while (Date.now() < deadline) {
     if ((relay.getStatus?.() ?? {}).state === "attached") return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`bridge did not attach within ${timeoutMs}ms (session=${SESSION})`);
+  throw new Error(`bridge did not attach within ${timeoutMs}ms`);
 }
 
 function writeReport() {

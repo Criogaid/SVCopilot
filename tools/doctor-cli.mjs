@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { collectDoctorReport, summarizeHostProfiles } from "../server/src/doctor.js";
 import { apiManifest, apiManifestAvailable } from "../server/src/api-catalog.js";
-import { PipeRelay, resolvePipePaths, resolveSession } from "../server/src/transport-pipe.js";
+import { PipeRelay, resolvePipePaths } from "../server/src/transport-pipe.js";
 import { registeredToolProfiles } from "../server/src/tool-profile.js";
 
 const toolsDir = path.dirname(fileURLToPath(import.meta.url));
@@ -26,12 +26,11 @@ const interfaceVersion = JSON.parse(
 // 构造 PipeRelay 不监听任何管道；只读它的协议版本默认值。
 const protoVersion = new PipeRelay().proto;
 
-const session = resolveSession();
 const report = collectDoctorReport({
   interfaceVersion,
   moduleDir,
   protoVersion,
-  session: { name: session, paths: resolvePipePaths(session) },
+  pipePaths: resolvePipePaths(),
   // CLI 不建立连接，因此宿主状态只能是 "not_started"——如实报告，不假装 listening。
   host: {
     state: "not_started",
@@ -83,10 +82,8 @@ function printHuman(value) {
   if (bridge.comparison.note) console.log(`                   ${bridge.comparison.note}`);
   console.log("");
   console.log("Transport");
-  console.log(`  session          ${transport.session}`);
   console.log(`  to-sv            ${transport.pipes.toSv}`);
   console.log(`  from-sv          ${transport.pipes.fromSv}`);
-  console.log(`  control          ${transport.pipes.control}`);
   console.log(`  host state       ${transport.hostState}`);
   console.log("");
   console.log("Environment");

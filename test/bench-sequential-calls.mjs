@@ -1,5 +1,6 @@
 // 临时基准：真实 Lua 桥上 200 次顺序 ping，统计 result 帧后的回包类型。
 // 每一次 "result→noop" 在真实 SynthV 宿主中等价于一次 20ms 空闲轮询等待。
+import "./helpers/pipe-namespace.mjs";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -31,8 +32,7 @@ if (!existsSync(luaBin)) {
   process.exit(1);
 }
 
-const session = `bench-${process.pid}-${Date.now()}`;
-const relay = new PipeRelay({ session, timeoutMs: 3000 });
+const relay = new PipeRelay({ timeoutMs: 3000 });
 let child = null;
 let childDone = null;
 
@@ -62,7 +62,7 @@ try {
   };
 
   child = spawn(luaBin, [harnessScript, bridgeScript], {
-    env: { ...process.env, SV_COPILOT_SESSION: session },
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

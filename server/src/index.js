@@ -60,7 +60,7 @@ import { SelectionService } from "./selection.js";
 import { VocalContextAnalysisService } from "./vocal-context.js";
 import { MAX_PROJECT_PAGE_ITEMS, SnapshotService } from "./snapshot.js";
 import { StyleProfileService } from "./style-profile.js";
-import { PipeRelay, resolvePipePaths, resolveSession } from "./transport-pipe.js";
+import { PipeRelay, resolvePipePaths } from "./transport-pipe.js";
 import { VoiceProfileService } from "./voice-profile.js";
 import { WorkflowExecutor } from "./workflow.js";
 import { encodeToolError, encodeToolResult } from "./mcp-result-encoder.js";
@@ -3583,7 +3583,7 @@ function doctorReport() {
     interfaceVersion: INTERFACE_VERSION,
     moduleDir,
     protoVersion: bridge.proto,
-    session: { name: resolveSession(), paths: resolvePipePaths(resolveSession()) },
+    pipePaths: resolvePipePaths(),
     host: hostSession.getStatus(),
     manifest: {
       available: apiManifestAvailable,
@@ -3677,9 +3677,8 @@ function serializeResource(uri, payload) {
 
 async function main() {
   await bridge.init();
-  const session = resolveSession();
-  const paths = resolvePipePaths(session);
-  console.error(`[sv-copilot] IO PIPE relay listening (session=${session})`);
+  const paths = resolvePipePaths();
+  console.error("[sv-copilot] IO PIPE relay listening");
   console.error(`[sv-copilot] to-sv: ${paths.toSv}`);
   console.error(`[sv-copilot] from-sv: ${paths.fromSv}`);
   const transport = new StdioServerTransport();

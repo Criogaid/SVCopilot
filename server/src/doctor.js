@@ -104,7 +104,7 @@ function compareBridges(loaded, staging) {
  * @param {string} deps.interfaceVersion
  * @param {string} deps.moduleDir - server/src 的绝对路径（用于解析脚本候选位置）
  * @param {number} deps.protoVersion - Node 侧期望的传输协议版本
- * @param {object} deps.session - { name, paths: {toSv, fromSv, control} }
+ * @param {object} deps.pipePaths - {toSv, fromSv}
  * @param {object} deps.host - HostSession.getStatus() 的返回值
  * @param {object} deps.manifest - { available, generatedAt, schemaVersion }
  * @param {object} deps.profile - { active, registered, compactActive }
@@ -116,7 +116,7 @@ export function collectDoctorReport({
   interfaceVersion,
   moduleDir,
   protoVersion,
-  session,
+  pipePaths,
   host,
   manifest,
   profile,
@@ -204,8 +204,7 @@ export function collectDoctorReport({
     },
     bridge: { loaded, staging, comparison: bridgeComparison },
     transport: {
-      session: session.name,
-      pipes: session.paths,
+      pipes: pipePaths,
       hostState: host.state,
       epoch: host.epoch,
       // 宿主版本只有连上之后才可读；未连接时是 null，不是"未知版本"。

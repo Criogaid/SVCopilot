@@ -82,7 +82,7 @@ test("typed wire values preserve empty and sparse arrays, maps, nil, and handle 
 test("HostSession rejects epoch-bound handles after the bridge reconnects", async () => {
   class FakeBridge extends EventEmitter {
     getStatus() {
-      return { state: "listening", epoch: 0, session: "test" };
+      return { state: "listening", epoch: 0 };
     }
 
     async call(command) {
@@ -789,7 +789,7 @@ test("ProcessingService resolves single and explicit range occurrences", async (
 test("HostSession classifies stable host failures", async () => {
   class ErrorBridge extends EventEmitter {
     getStatus() {
-      return { state: "listening", epoch: 1, session: "errors" };
+      return { state: "listening", epoch: 1 };
     }
 
     async call(command) {
@@ -1242,7 +1242,7 @@ function handle(id, type) {
 test("HostSession rejects epoch-less handles after any reconnect", async () => {
   class FakeBridge extends EventEmitter {
     getStatus() {
-      return { state: "listening", epoch: 0, session: "test" };
+      return { state: "listening", epoch: 0 };
     }
 
     async call(command) {

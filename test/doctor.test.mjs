@@ -1,3 +1,4 @@
+import "./helpers/pipe-namespace.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/es
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 
 import { collectDoctorReport, summarizeHostProfiles } from "../server/src/doctor.js";
+import { resolvePipePaths } from "../server/src/transport-pipe.js";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const serverScript = path.resolve(testDir, "..", "server", "src", "index.js");
@@ -18,7 +20,6 @@ async function callDoctor(profile) {
     args: [serverScript],
     env: {
       ...process.env,
-      SV_COPILOT_SESSION: `doctor-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       ...(profile ? { SV_COPILOT_TOOL_PROFILE: profile } : {}),
     },
     cwd: path.dirname(serverScript),
@@ -38,7 +39,7 @@ test("sv_doctor is exposed in full, core, and raw profiles", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
-    env: { ...process.env, SV_COPILOT_SESSION: `doctor-list-${Date.now()}` },
+    env: process.env,
     cwd: path.dirname(serverScript),
     stderr: "pipe",
   });
@@ -66,6 +67,9 @@ test("sv_doctor returns a structurally valid report", async () => {
   assert.equal(typeof d.versions?.protoVersionExpected, "number");
   assert.ok(d.bridge);
   assert.ok(d.transport);
+  assert.equal("session" in d.transport, false);
+  // 子进程继承测试命名空间，因此与同一解析器比对，而不是写死安装期名字。
+  assert.deepEqual(d.transport.pipes, resolvePipePaths());
   assert.ok(Array.isArray(d.findings));
   assert.ok(Array.isArray(d.hostProfiles));
   assert.ok(d.profile);
@@ -102,7 +106,7 @@ test("sv_doctor does not expose script source or env var values", async () => {
 
 test("sv_doctor reports proto version matching the relay", async () => {
   const d = await callDoctor(null);
-  // staging 脚本声明 PROTO_VERSION = 1；relay 也期望 1。
+  // staging 脚本与 Relay 必须声明相同协议版本。
   assert.equal(d.versions.protoVersionExpected, d.bridge.staging.protoVersion);
   // 如果两者一致，不应有 PROTO_VERSION_MISMATCH finding。
   assert.ok(!d.findings.some((f) => f.code === "PROTO_VERSION_MISMATCH"));
@@ -125,7 +129,6 @@ test("sv_doctor is reachable through the compact facade and reports that profile
     args: [serverScript],
     env: {
       ...process.env,
-      SV_COPILOT_SESSION: `doctor-compact-${Date.now()}`,
       SV_COPILOT_TOOL_PROFILE: "compact-v2",
     },
     cwd: path.dirname(serverScript),
@@ -169,8 +172,8 @@ test("collectDoctorReport unit: findings are correct for a detached host", () =>
   const report = collectDoctorReport({
     interfaceVersion: "0.9.0",
     moduleDir,
-    protoVersion: 1,
-    session: { name: "test", paths: { toSv: "a", fromSv: "b", control: "c" } },
+    protoVersion: 2,
+    pipePaths: { toSv: "a", fromSv: "b" },
     host: { state: "listening", epoch: 0, hostVersion: null, hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: false, generatedAt: null, schemaVersion: null },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
@@ -190,7 +193,7 @@ test("collectDoctorReport unit: proto mismatch produces a finding per found scri
     interfaceVersion: "0.9.0",
     moduleDir,
     protoVersion: 99,
-    session: { name: "test", paths: { toSv: "a", fromSv: "b", control: "c" } },
+    pipePaths: { toSv: "a", fromSv: "b" },
     host: { state: "listening", epoch: 0, hostVersion: null, hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
@@ -218,8 +221,8 @@ test("collectDoctorReport unit: attached host with no ops produces warning", () 
   const report = collectDoctorReport({
     interfaceVersion: "0.9.0",
     moduleDir,
-    protoVersion: 1,
-    session: { name: "test", paths: { toSv: "a", fromSv: "b", control: "c" } },
+    protoVersion: 2,
+    pipePaths: { toSv: "a", fromSv: "b" },
     host: { state: "attached", epoch: 1, hostVersion: "2.2.1", hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
@@ -271,8 +274,8 @@ test("collectDoctorReport unit: never calls the host", () => {
   const report = collectDoctorReport({
     interfaceVersion: "0.9.0",
     moduleDir,
-    protoVersion: 1,
-    session: { name: "test", paths: { toSv: "a", fromSv: "b", control: "c" } },
+    protoVersion: 2,
+    pipePaths: { toSv: "a", fromSv: "b" },
     host: forbiddenHost,
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },

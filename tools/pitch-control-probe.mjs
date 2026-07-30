@@ -30,7 +30,6 @@ import { PipeRelay } from "../server/src/transport-pipe.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, "out");
-const SESSION = process.env.SV_COPILOT_SESSION || `probe-${process.pid}`;
 
 const observations = [];
 const conclusions = [];
@@ -50,7 +49,7 @@ function conclude(id, question, result, evidence, note = "") {
 
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
-  const relay = new PipeRelay({ session: SESSION, timeoutMs: 5000 });
+  const relay = new PipeRelay({ timeoutMs: 5000 });
   await relay.init();
   const host = new HostSession(relay);
   let located = null;
@@ -94,13 +93,13 @@ async function main() {
 // 等待 SV Copilot 桥接入（人可能先启 probe 再启桥）。最多等 60s。
 async function waitForBridge(relay, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
-  console.error(`[probe] waiting for the SV Copilot bridge (session=${SESSION}); start StartSynthVCopilot in SynthV…`);
+  console.error("[probe] waiting for the SV Copilot bridge; start StartSynthVCopilot in SynthV…");
   while (Date.now() < deadline) {
     const status = relay.getStatus?.() ?? {};
     if (status.state === "attached" || status.attached === true || status.connected === true) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`bridge did not attach within ${timeoutMs}ms (session=${SESSION})`);
+  throw new Error(`bridge did not attach within ${timeoutMs}ms`);
 }
 
 // 定位第一个非 instrumental、带音符的 vocal group 作为 fixture。
