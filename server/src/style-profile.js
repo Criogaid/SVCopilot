@@ -3,6 +3,7 @@ import { analyzeStatistics } from "./phrase-analysis.js";
 import { ServiceTiming } from "./service-timing.js";
 import { isBreathEventLyrics } from "./vocal-event-semantics.js";
 import { getVocalModeNames } from "./voice-parameters.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_style_profile：工程级风格统计聚合（HANDOFF §7 P2 / 研究提示 Layer B）。
 //
@@ -91,10 +92,7 @@ function resolveProfileTarget(store, target, index) {
   const label = `targets[${index}]`;
   const stored = store.get(target.contextId);
   if (!stored) {
-    throw codedError(
-      "UNKNOWN_CONTEXT",
-      `${label}: contextId not found or expired; re-run sv_snapshot_range`
-    );
+    throw unknownContextError(store, target.contextId, label);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

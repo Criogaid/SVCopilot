@@ -5,6 +5,7 @@ import {
   analyzeVocalEventSequence,
   isBreathEventLyrics as isBreathLyrics,
 } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_validate_lyrics_prosody：咬字/韵律校验器（黑盒审计 M-02 / 研究提示 Layer C）。
 //
@@ -74,7 +75,7 @@ export class LyricProsodyService {
 function resolveValidateSource(store, input) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

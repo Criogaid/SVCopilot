@@ -1,4 +1,4 @@
-import { createHostScope } from "./snapshot.js";
+import { createHostScope, unknownContextError } from "./snapshot.js";
 
 // sv_set_selection：高层 selection 操作（主计划 P1-E）。
 //
@@ -154,10 +154,7 @@ async function resolvePositions(service, input, scope, target, warnings) {
   if (input.contextId !== undefined) {
     const stored = service.snapshotService.store.get(input.contextId);
     if (!stored) {
-      throw codedError(
-        "UNKNOWN_CONTEXT",
-        "contextId not found or expired; re-run sv_snapshot or sv_snapshot_range"
-      );
+      throw unknownContextError(service.snapshotService.store, input.contextId);
     }
     const expectedGroupUuids = new Set();
     for (const noteId of input.noteIds) {

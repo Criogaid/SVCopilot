@@ -121,6 +121,11 @@ test("sv_doctor reports profile and store counts", async () => {
   assert.ok(d.profile.enabledToolCount > 0);
   assert.equal(typeof d.stores.artifacts.entries, "number");
   assert.equal(typeof d.stores.snapshotContexts.entries, "number");
+  // accountedBytes 是逻辑驻留字节，不是 V8 heap 实测值；evictions 让配额是否生效可观测。
+  assert.equal(typeof d.stores.snapshotContexts.accountedBytes, "number");
+  assert.equal(typeof d.stores.snapshotContexts.evictions, "number");
+  assert.equal(d.stores.snapshotContexts.ttlMs, 30 * 60_000);
+  assert.equal(typeof d.stores.snapshotContexts.maxTotalBytes, "number");
 });
 
 test("sv_doctor is reachable through the compact facade and reports that profile", async () => {
@@ -177,7 +182,7 @@ test("collectDoctorReport unit: findings are correct for a detached host", () =>
     host: { state: "listening", epoch: 0, hostVersion: null, hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: false, generatedAt: null, schemaVersion: null },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
-    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, ttlMs: 300000 } },
+    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   assert.equal(report.kind, "svcopilot-doctor");
   const codes = report.findings.map((f) => f.code);
@@ -197,7 +202,7 @@ test("collectDoctorReport unit: proto mismatch produces a finding per found scri
     host: { state: "listening", epoch: 0, hostVersion: null, hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
-    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, ttlMs: 300000 } },
+    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   const mismatches = report.findings.filter((f) => f.code === "PROTO_VERSION_MISMATCH");
   assert.ok(mismatches.length > 0, "PROTO_VERSION_MISMATCH finding must be present");
@@ -226,7 +231,7 @@ test("collectDoctorReport unit: attached host with no ops produces warning", () 
     host: { state: "attached", epoch: 1, hostVersion: "2.2.1", hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
-    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, ttlMs: 300000 } },
+    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   const noOps = report.findings.find((f) => f.code === "NO_NEGOTIATED_HOST_OPS");
   assert.ok(noOps, "NO_NEGOTIATED_HOST_OPS warning must be present when attached with empty ops");
@@ -279,7 +284,7 @@ test("collectDoctorReport unit: never calls the host", () => {
     host: forbiddenHost,
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     profile: { active: "full", registered: ["full"], compactActive: false, enabledToolCount: 42, directToolCount: 42 },
-    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, ttlMs: 300000 } },
+    stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
   });
   assert.equal(report.transport.hostState, "listening");
   assert.equal(report.transport.hostVersion, null);

@@ -7,6 +7,7 @@ import { analyzeKey } from "./phrase-analysis.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 import { isBreathEventLyrics } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_generate_harmony：调内和声规划器（HANDOFF §8.16 "仍未实现"清单最后一个规划项）。
 //
@@ -123,7 +124,7 @@ const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
 function resolveHarmonySource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

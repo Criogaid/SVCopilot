@@ -5,6 +5,7 @@ import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js
 import { MAX_PATCHES } from "./note-patch.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_quantize_notes：无副作用量化规划器（HANDOFF §8.16 "仍未实现"清单项）。
 //
@@ -88,7 +89,7 @@ const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
 function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

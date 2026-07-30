@@ -9,6 +9,7 @@ import {
   analyzeVocalEventSequence,
   isBreathEventLyrics,
 } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_plan_expression：dry-run 演唱表现规划器（M-03 / §6.1 演唱表现手法生成器）。
 //
@@ -142,7 +143,7 @@ export class ExpressionPlanService {
 function resolvePlanSource(store, input) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

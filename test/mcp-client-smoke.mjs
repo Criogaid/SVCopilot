@@ -339,7 +339,7 @@ try {
   assert.equal(capabilities.limits.rangeRequest.computedPitchFramesPerGroup, 2000);
   assert.equal(capabilities.limits.rangePage.defaults.computedPitchFrames, 2000);
   assert.equal(capabilities.limits.rangePage.maximums.computedPitchFrames, 20000);
-  assert.equal(capabilities.limits.snapshotContextTtlMs, 5 * 60_000);
+  assert.equal(capabilities.limits.snapshotContextTtlMs, 30 * 60_000);
   assert.equal(capabilities.knownLimits.singer.installedCatalogObservable, false);
   const workflowSchemaIndex = parseResource(
     await client.readResource({ uri: "svcopilot://schemas/music-workflow" })
@@ -960,7 +960,7 @@ try {
     })
   );
   assert.equal(okOf(rangeSnapshot), true);
-  assert.match(rangeSnapshot.contextId, /^ctx_/);
+  assert.match(rangeSnapshot.contextId, /^c_[A-Za-z0-9_-]{16}$/);
   assert.equal(rangeSnapshot.data.barBase, 1);
   assert.equal(rangeSnapshot.data.range.to.blick, 4 * Q);
   assert.equal(rangeSnapshot.data.timebase.quarterBlick, Q);
@@ -976,7 +976,7 @@ try {
   assert.equal(rangeSnapshot.data.meterMap[0].numerator, 4);
   assert.equal(rangeSnapshot.data.tracks[0].mixer.muted, false);
   assert.ok(rangeSnapshot.warnings.some((warning) => warning.code === "UNSUPPORTED_INCLUDE"));
-  assert.match(rangeSnapshot.data.tracks[0].groups[0].occurrenceId, /^ctx_/);
+  assert.match(rangeSnapshot.data.tracks[0].groups[0].occurrenceId, /^c_/);
   assert.match(rangeSnapshot.data.notes[0].id, /:n:0$/);
   assert.ok(Number.isFinite(rangeSnapshot.timings.serviceTotalMs));
   assert.ok(rangeSnapshot.artifactRef);

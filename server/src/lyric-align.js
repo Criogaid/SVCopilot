@@ -9,6 +9,7 @@ import {
   analyzeVocalEventSequence,
   classifyVocalEvent,
 } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_align_lyrics：无副作用咬字/铺词规划器（HANDOFF §7 P2 定位）。
 //
@@ -98,7 +99,7 @@ const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
 function resolveAlignSource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

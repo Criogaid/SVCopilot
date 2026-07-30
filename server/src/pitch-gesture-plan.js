@@ -5,6 +5,7 @@ import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 import { analyzeVocalEventSequence } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_plan_pitch_gesture —— 把"起音上滑 / 句尾下坠 / 转音 / 颤音"等音乐意图编译成
 // PitchControlCurve 的 add 操作（主计划 P1-C Phase 3，目标写面 sv_patch_pitch_controls）。
@@ -93,7 +94,7 @@ export class PitchGesturePlanService {
 function resolvePlanSource(store, input) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

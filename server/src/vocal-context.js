@@ -24,6 +24,7 @@ import { PhraseAnalysisService } from "./phrase-analysis.js";
 import { project, registerProjection } from "./response-projection.js";
 import { ServiceTiming } from "./service-timing.js";
 import { StyleProfileService } from "./style-profile.js";
+import { unknownContextError } from "./snapshot.js";
 
 const SECTIONS = ["phrase", "prosody", "style", "computedPitch"];
 const PROJECTION_KIND = "vocal-context-analysis";
@@ -197,7 +198,7 @@ export class VocalContextAnalysisService {
 function resolveTarget(store, input) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

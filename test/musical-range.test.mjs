@@ -456,7 +456,8 @@ test("range snapshot returns one editable context with all tuning includes", asy
     computedPitchSampling: { frames: 4 },
   });
 
-  assert.match(result.contextId, /^ctx_/);
+  // 96-bit Base64URL 短 ID，不再是 UUID 文本。
+  assert.match(result.contextId, /^c_[A-Za-z0-9_-]{16}$/);
   assert.equal(result.data.notes.length, 4);
   assert.equal(result.data.attributes.length, 4);
   assert.equal(result.data.automation.length, 1);

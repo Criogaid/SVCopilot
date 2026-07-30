@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { canonicalClone } from "./canonical-json.js";
 
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
@@ -11,26 +11,66 @@ const MAX_PAGE_SIZE = 200;
 const MAX_SNAPSHOT_NOTES = 2_000;
 export const MAX_PROJECT_PAGE_ITEMS = 16;
 
+// TTL 从 5 分钟提高到 30 分钟，消除「读大 Artifact -> 分析 -> 生成大请求 ->
+// UNKNOWN_CONTEXT」整轮重做。但延长租期必须与字节配额同时落地：否则 64 个
+// 373-note Context 可以长期共存，把 TTL 收益换成无界驻留内存。
+export const DEFAULT_CONTEXT_TTL_MS = 30 * 60_000;
+export const MAX_CONTEXT_TTL_MS = 60 * 60_000;
+export const DEFAULT_CONTEXT_QUOTAS = Object.freeze({
+  maxEntries: 64,
+  maxContextBytes: 8 * 1024 * 1024,
+  maxTotalBytes: 64 * 1024 * 1024,
+  // tombstone 让 UNKNOWN_CONTEXT 能区分 expired / evicted_by_quota /
+  // invalidated_by_mutation / epoch_changed，而不是一律报 unknown。
+  maxTombstones: 256,
+});
+
+// Context 失效原因。伪造的 ID 只能是 unknown，不得声称可恢复。
+export const CONTEXT_UNAVAILABLE_REASONS = Object.freeze([
+  "unknown",
+  "expired",
+  "epoch_changed",
+  "invalidated_by_mutation",
+  "evicted_by_quota",
+]);
+
 export class SnapshotStore {
-  constructor({ ttlMs = 5 * 60_000, maxEntries = 64, now = () => Date.now() } = {}) {
-    this.ttlMs = ttlMs;
-    this.maxEntries = maxEntries;
+  constructor({
+    ttlMs = DEFAULT_CONTEXT_TTL_MS,
+    maxEntries,
+    quotas = {},
+    now = () => Date.now(),
+  } = {}) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+      throw new TypeError("SnapshotStore ttlMs must be a positive safe integer");
+    }
+    this.ttlMs = Math.min(ttlMs, MAX_CONTEXT_TTL_MS);
+    this.quotas = {
+      ...DEFAULT_CONTEXT_QUOTAS,
+      ...quotas,
+      // maxEntries 是旧构造参数，保留为配额的别名而不是第二套限制。
+      ...(maxEntries === undefined ? {} : { maxEntries }),
+    };
     this.now = now;
     this.entries = new Map();
+    // contextId -> { reason, at }。只登记失效原因和时间，不留内容。
+    this.tombstones = new Map();
+    this.accountedBytes = 0;
+    this.evictions = 0;
+    this._pinned = new Set();
   }
 
   create(snapshot) {
     this._prune();
-    while (this.entries.size >= this.maxEntries) {
-      this.entries.delete(this.entries.keys().next().value);
-    }
-    const contextId = `ctx_${randomUUID()}`;
-    this.entries.set(contextId, {
+    const contextId = createContextId();
+    const entry = {
       ...snapshot,
       contextId,
       createdAt: this.now(),
       expiresAt: this.now() + this.ttlMs,
-    });
+    };
+    entry.accountedBytes = estimateRetainedBytes(entry);
+    this._admit(entry);
     return this.entries.get(contextId);
   }
 
@@ -39,14 +79,40 @@ export class SnapshotStore {
     return this.entries.get(contextId) ?? null;
   }
 
+  /**
+   * Context 不可用的原因。有界 tombstone 之外一律是 unknown——伪造的 ID
+   * 不得被描述成"过期"，那会让调用方以为重试或重新快照必然可行。
+   *
+   * @param {string} contextId
+   * @returns {"unknown"|"expired"|"epoch_changed"|"invalidated_by_mutation"|"evicted_by_quota"}
+   */
+  reasonFor(contextId) {
+    this._prune();
+    if (this.entries.has(contextId)) return null;
+    return this.tombstones.get(contextId)?.reason ?? "unknown";
+  }
+
+  /**
+   * 在解析期固定 Context，避免另一个 snapshot 请求把它按 LRU 淘汰。
+   *
+   * @param {string} contextId
+   * @returns {() => void} 释放函数
+   */
+  pin(contextId) {
+    this._pinned.add(contextId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._pinned.delete(contextId);
+    };
+  }
+
   restore(contextId, snapshot) {
     this._prune();
     if (this.entries.has(contextId)) return this.entries.get(contextId);
     if (typeof contextId !== "string" || !contextId || !snapshot || typeof snapshot !== "object") {
       throw codedError("INVALID_ARGUMENTS", "restored snapshot requires contextId and snapshot");
-    }
-    while (this.entries.size >= this.maxEntries) {
-      this.entries.delete(this.entries.keys().next().value);
     }
     const restored = {
       ...canonicalClone(snapshot),
@@ -54,12 +120,33 @@ export class SnapshotStore {
       createdAt: this.now(),
       expiresAt: this.now() + this.ttlMs,
     };
-    this.entries.set(contextId, restored);
-    return restored;
+    restored.accountedBytes = estimateRetainedBytes(restored);
+    this._admit(restored);
+    return this.entries.get(contextId);
   }
 
-  delete(contextId) {
-    return this.entries.delete(contextId);
+  delete(contextId, reason = "invalidated_by_mutation") {
+    const entry = this.entries.get(contextId);
+    if (!entry) return false;
+    this.accountedBytes -= entry.accountedBytes ?? 0;
+    this.entries.delete(contextId);
+    this._tombstone(contextId, reason);
+    return true;
+  }
+
+  /**
+   * 存储可观测面，供 doctor 报告。accountedBytes 是逻辑驻留字节
+   * （canonical payload 的 UTF-8 bytes），不是 V8 heap 实测值。
+   */
+  stats() {
+    this._prune();
+    return {
+      entries: this.entries.size,
+      accountedBytes: this.accountedBytes,
+      evictions: this.evictions,
+      ttlMs: this.ttlMs,
+      maxTotalBytes: this.quotas.maxTotalBytes,
+    };
   }
 
   encodeCursor(contextId, offset, kind = "notes") {
@@ -82,11 +169,103 @@ export class SnapshotStore {
     }
   }
 
+  _admit(entry) {
+    if (entry.accountedBytes > this.quotas.maxContextBytes) {
+      throw codedError(
+        "CONTEXT_CAPACITY_EXCEEDED",
+        `snapshot context ${entry.accountedBytes} bytes exceeds max ${this.quotas.maxContextBytes}`
+      );
+    }
+    this.entries.set(entry.contextId, entry);
+    this.accountedBytes += entry.accountedBytes;
+    this.tombstones.delete(entry.contextId);
+    this._enforceQuotas(entry.contextId);
+  }
+
+  // LRU 只淘汰非活跃 Context：正在被 planner 解析的 Context 必须留下，
+  // 否则一次并发 snapshot 会让解析中途的 contextId 突然消失。
+  _enforceQuotas(protectedId) {
+    while (
+      this.entries.size > this.quotas.maxEntries ||
+      this.accountedBytes > this.quotas.maxTotalBytes
+    ) {
+      const victim = this._oldestEvictable(protectedId);
+      if (victim === null) break;
+      const entry = this.entries.get(victim);
+      this.accountedBytes -= entry.accountedBytes ?? 0;
+      this.entries.delete(victim);
+      this._tombstone(victim, "evicted_by_quota");
+      this.evictions += 1;
+    }
+  }
+
+  _oldestEvictable(protectedId) {
+    for (const key of this.entries.keys()) {
+      if (key === protectedId || this._pinned.has(key)) continue;
+      return key;
+    }
+    return null;
+  }
+
+  _tombstone(contextId, reason) {
+    this.tombstones.set(contextId, { reason, at: this.now() });
+    while (this.tombstones.size > this.quotas.maxTombstones) {
+      this.tombstones.delete(this.tombstones.keys().next().value);
+    }
+  }
+
   _prune() {
     const now = this.now();
     for (const [key, entry] of this.entries) {
-      if (entry.expiresAt <= now) this.entries.delete(key);
+      if (entry.expiresAt <= now) {
+        this.accountedBytes -= entry.accountedBytes ?? 0;
+        this.entries.delete(key);
+        this._tombstone(key, "expired");
+      }
     }
+    // tombstone 也必须有界：按 TTL 之外再留一个 TTL 的诊断窗口。
+    const cutoff = now - this.ttlMs;
+    for (const [key, record] of this.tombstones) {
+      if (record.at <= cutoff) this.tombstones.delete(key);
+    }
+  }
+}
+
+/**
+ * 统一的 UNKNOWN_CONTEXT 错误。Context 失效有五种原因，调用方的正确动作各不相同：
+ * expired / evicted_by_quota 重新快照即可；epoch_changed 说明桥重连过；
+ * invalidated_by_mutation 说明写入已生效；unknown 则可能根本是伪造的 ID。
+ * 只报一个笼统的"not found or expired"会让模型猜。
+ *
+ * @param {SnapshotStore} store
+ * @param {string} contextId
+ * @param {string} [label] - 多 context 请求里用于定位是哪一个
+ * @returns {Error}
+ */
+export function unknownContextError(store, contextId, label) {
+  const reason = store?.reasonFor?.(contextId) ?? "unknown";
+  const prefix = label ? `${label}: ` : "";
+  const error = new Error(
+    `${prefix}contextId is not available (${reason}); re-run sv_snapshot_range`
+  );
+  error.code = "UNKNOWN_CONTEXT";
+  error.details = { reason };
+  return error;
+}
+
+// 96-bit Base64URL 随机值，不再使用 UUID 文本：短、无结构、不编码时间或宿主身份。
+function createContextId() {
+  return `c_${randomBytes(12).toString("base64url")}`;
+}
+
+// 逻辑驻留字节：canonical payload 的 UTF-8 bytes。这不是 V8 heap 实测值，
+// 字段名（accountedBytes）必须体现这一点，避免被当成真实内存占用。
+function estimateRetainedBytes(entry) {
+  try {
+    return Buffer.byteLength(JSON.stringify(entry) ?? "", "utf8");
+  } catch {
+    // 循环引用等无法序列化的情况不应让快照失败；退化为 0 并继续按条数配额约束。
+    return 0;
   }
 }
 
@@ -487,6 +666,7 @@ async function captureProjectPage(capture, roots, stored, requestedPageSize, sto
     status: "succeeded",
     contextId: stored.contextId,
     observedAt: stored.observedAt,
+    contextExpiresAt: new Date(stored.expiresAt).toISOString(),
     consistency: "best-effort-paged",
     data: {
       scope: "project",
@@ -634,6 +814,8 @@ function formatSnapshotPage(stored, offset, pageSize, store) {
         : "succeeded",
     contextId: stored.contextId,
     observedAt: stored.observedAt,
+    // 每个 Context 引用携带自己的到期时间；调用方不必从 doctor 聚合值反推。
+    contextExpiresAt: new Date(stored.expiresAt).toISOString(),
     consistency: "best-effort",
     data: { ...stored.baseData, notes },
     page: {

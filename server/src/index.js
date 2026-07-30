@@ -3602,10 +3602,9 @@ function doctorReport() {
         entries: artifactStore.entries.size,
         bytes: artifactStore.totalBytes,
       },
-      snapshotContexts: {
-        entries: snapshotService.store.entries.size,
-        ttlMs: snapshotService.store.ttlMs,
-      },
+      // accountedBytes 是逻辑驻留字节，不是 V8 heap 实测值；evictions 让配额
+      // 生效与否可观测，而不是只能看条数。
+      snapshotContexts: snapshotService.store.stats(),
     },
     hostProfiles: summarizeHostProfiles(
       path.resolve(moduleDir, "../../test/fixtures/host-profiles")

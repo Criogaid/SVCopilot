@@ -5,6 +5,7 @@ import {
   analyzeVocalEventSequence,
   summarizeExcludedVocalEvents,
 } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_compare_computed_pitch：客观演唱分析（音准 / 颤音 / 转换 / 异常区段）。
 //
@@ -143,10 +144,7 @@ function loadContextsSources(store, input, warnings) {
 function resolveCompareSource(store, contextId, occurrenceId, label) {
   const stored = store.get(contextId);
   if (!stored) {
-    throw codedError(
-      "UNKNOWN_CONTEXT",
-      `${label} contextId not found or expired; re-run sv_snapshot_range`
-    );
+    throw unknownContextError(store, contextId, label);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(

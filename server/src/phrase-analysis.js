@@ -12,6 +12,7 @@ import {
   analyzeVocalEventSequence,
   summarizeExcludedVocalEvents,
 } from "./vocal-event-semantics.js";
+import { unknownContextError } from "./snapshot.js";
 
 // sv_analyze_phrase：只读乐理分析（调性候选 / 音级 / 乐句 / 统计）。
 //
@@ -121,7 +122,7 @@ export class PhraseAnalysisService {
 function resolveAnalysisSource(store, input) {
   const stored = store.get(input.contextId);
   if (!stored) {
-    throw codedError("UNKNOWN_CONTEXT", "contextId not found or expired; re-run sv_snapshot_range");
+    throw unknownContextError(store, input.contextId);
   }
   if (stored.context?.kind !== "range") {
     throw codedError(
