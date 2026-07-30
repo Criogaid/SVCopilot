@@ -93,8 +93,9 @@ try {
   });
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 41);
+  assert.equal(listed.tools.length, 42);
   console.log("[client] tools", listed.tools.map((tool) => tool.name));
+  assert.ok(listed.tools.some((tool) => tool.name === "sv_doctor"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_search_api"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_describe"));
   assert.ok(listed.tools.some((tool) => tool.name === "sv_compare_computed_pitch"));

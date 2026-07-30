@@ -57,6 +57,7 @@ export function registeredToolProfiles() {
 // core：普通消费者常用的快照、分析、编辑、等待和试听闭环。
 const CORE_TOOLS = [
   "sv_ping",
+  "sv_doctor",
   "sv_release_artifact",
   "sv_snapshot",
   "sv_snapshot_range",
@@ -103,6 +104,7 @@ const RAW_TOOLS = [
   "sv_call",
   "sv_index",
   "sv_free",
+  "sv_doctor",
   "sv_search_api",
   "sv_describe",
   "sv_run",

@@ -73,8 +73,9 @@ import {
   artifactReference,
   artifactResourceView,
 } from "./artifact-store.js";
-import { filterToolsByProfile, isToolEnabled, registerToolProfile } from "./tool-profile.js";
+import { filterToolsByProfile, isToolEnabled, registerToolProfile, registeredToolProfiles } from "./tool-profile.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
+import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处。
@@ -623,6 +624,13 @@ export const TOOLS = [
       required: ["artifactId"],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  },
+  {
+    name: "sv_doctor",
+    description:
+      "Read-only installation doctor: interface and protocol versions, loaded-vs-staging Lua bridge hashes and declared ops, pipe paths, negotiated capabilities, manifest state, active tool profile, and store counts. Never connects to the host or writes anything; reports detached state honestly instead of guessing.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {}, required: [] },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
     name: "sv_search_api",
@@ -3076,6 +3084,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_ping":
         result = await hostSession.ping();
         break;
+      case "sv_doctor":
+        result = doctorReport();
+        break;
       case "sv_release_artifact":
         result = {
           ok: true,
@@ -3563,6 +3574,43 @@ function capabilities() {
       },
     },
   };
+}
+
+// Doctor 只读采集：不连接宿主、不写盘，宿主未连接时如实报当前状态。
+function doctorReport() {
+  const moduleDir = path.dirname(import.meta.filename);
+  return collectDoctorReport({
+    interfaceVersion: INTERFACE_VERSION,
+    moduleDir,
+    protoVersion: bridge.proto,
+    session: { name: resolveSession(), paths: resolvePipePaths(resolveSession()) },
+    host: hostSession.getStatus(),
+    manifest: {
+      available: apiManifestAvailable,
+      generatedAt: apiManifest.generatedAt,
+      schemaVersion: apiManifest.schemaVersion ?? null,
+    },
+    profile: {
+      active: toolProfileName,
+      registered: registeredToolProfiles(),
+      compactActive: isCompactProfile,
+      enabledToolCount: enabledTools.length,
+      directToolCount: TOOLS.length,
+    },
+    stores: {
+      artifacts: {
+        entries: artifactStore.entries.size,
+        bytes: artifactStore.totalBytes,
+      },
+      snapshotContexts: {
+        entries: snapshotService.store.entries.size,
+        ttlMs: snapshotService.store.ttlMs,
+      },
+    },
+    hostProfiles: summarizeHostProfiles(
+      path.resolve(moduleDir, "../../test/fixtures/host-profiles")
+    ),
+  });
 }
 
 function musicWorkflowSchemaIndex() {

@@ -32,7 +32,7 @@ assert.ok(report.fixtures, "report.fixtures 必须存在");
 // ListTools 指标：minified 应小于 pretty，且与 PRD 基线接近。
 assert.ok(report.listTools.minifiedBytes > 0, "ListTools minified bytes 必须大于 0");
 assert.ok(report.listTools.prettyBytes > report.listTools.minifiedBytes, "pretty 必须大于 minified");
-assert.strictEqual(report.listTools.toolCount, 41, "当前工具数应保持 41");
+assert.strictEqual(report.listTools.toolCount, 42, "当前工具数应保持 42");
 assert.ok(
   report.listTools.descriptionBytes > 0,
   "description bytes 必须大于 0"

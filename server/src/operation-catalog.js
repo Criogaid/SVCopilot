@@ -22,6 +22,7 @@ const FACADE_BY_TOOL = new Map([
   ["sv_run", null],
 
   ["sv_ping", "status"],
+  ["sv_doctor", "status"],
   ["sv_search_api", "status"],
   ["sv_describe", "status"],
 
