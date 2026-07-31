@@ -4,6 +4,7 @@ import {
   ensureSharedTargetConfirmed,
   resolveContextTarget,
 } from "./context-target.js";
+import { settlePlanLedger } from "./plan-reference.js";
 import { createOperationDiagnostics } from "./operation-diagnostics.js";
 import { waitForProcessing } from "./processing.js";
 
@@ -47,6 +48,7 @@ export class NotePatchService {
       now: this.now,
     });
     let resolvedRequest = request;
+    let ledgerRef = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const { resolvePlanReference } = await import("./plan-reference.js");
@@ -59,8 +61,10 @@ export class NotePatchService {
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
         snapshotStore: this.snapshotService.store,
+        planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolved.mutationRequest;
+      ledgerRef = resolved.ledgerRef;
     }
     if (diagnostics && resolvedRequest !== request) {
       resolvedRequest = { ...resolvedRequest, diagnostics: true };
@@ -451,6 +455,7 @@ export class NotePatchService {
         await resolved?.scope.releaseAll();
       }
     });
+    settlePlanLedger(this.artifactStore?.planLedger ?? null, ledgerRef, result);
     return diagnostics ? { ...result, diagnostics: diagnostics.finish() } : result;
   }
 

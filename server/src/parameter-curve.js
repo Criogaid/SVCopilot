@@ -1,4 +1,5 @@
 import { createHostScope } from "./snapshot.js";
+import { settlePlanLedger } from "./plan-reference.js";
 import { getVocalModeNames, normalizeVoiceParameters } from "./voice-parameters.js";
 import {
   musicalToBlick,
@@ -139,6 +140,7 @@ export class ParameterCurveService {
   async patchCurves(request) {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
+    let ledgerRef = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const { resolvePlanReference } = await import("./plan-reference.js");
@@ -151,23 +153,30 @@ export class ParameterCurveService {
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
         snapshotStore: this.snapshotService?.store,
+        planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolved.mutationRequest;
+      ledgerRef = resolved.ledgerRef;
     }
     let input;
     try {
       input = normalizeBatchPatchRequest(resolvedRequest);
     } catch (error) {
-      return formatBatchValidationFailure(resolvedRequest, error, {
+      const failure = formatBatchValidationFailure(resolvedRequest, error, {
         elapsedMs: elapsed(serviceStartedAt, this.now()),
       });
+      return settlePlanLedger(this.artifactStore?.planLedger ?? null, ledgerRef, failure);
     }
     const coordinatorRequestedAt = this.now();
     const transaction = await this._runTransaction(input, {
       serviceStartedAt,
       coordinatorRequestedAt,
     });
-    return formatBatchTransaction(transaction, input);
+    return settlePlanLedger(
+      this.artifactStore?.planLedger ?? null,
+      ledgerRef,
+      formatBatchTransaction(transaction, input)
+    );
   }
 
   async _runTransaction(input, timingOrigin = {}) {

@@ -4,7 +4,7 @@ import {
   resolveContextTarget,
 } from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
-import { resolvePlanReference } from "./plan-reference.js";
+import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
 
 // 结构操作按调用方顺序逐个执行；每步都在执行时读取活动 index，避免删除导致的漂移。
 // MAX_OPERATIONS 导出供 harmony 规划器对齐单次可提交批量上限。
@@ -26,8 +26,9 @@ export class NoteStructureService {
 
   async restructureNotes(request) {
     let resolvedRequest = request;
+    let ledgerRef = null;
     if (request?.planRef && this.artifactStore && this.sessionId) {
-      resolvedRequest = resolvePlanReference({
+      const resolvedPlan = resolvePlanReference({
         planRef: request.planRef,
         action: request.action,
         confirmations: request.confirmations,
@@ -36,10 +37,13 @@ export class NoteStructureService {
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
         snapshotStore: this.snapshotService.store,
-      }).mutationRequest;
+        planLedger: this.artifactStore.planLedger ?? null,
+      });
+      resolvedRequest = resolvedPlan.mutationRequest;
+      ledgerRef = resolvedPlan.ledgerRef;
     }
     const input = normalizeRequest(resolvedRequest);
-    return this.session.withExclusive(async (host) => {
+    const result = await this.session.withExclusive(async (host) => {
       let resolved;
       let boundaryCalls = 0;
       let writeAttempted = false;
@@ -276,6 +280,7 @@ export class NoteStructureService {
         await resolved?.scope.releaseAll();
       }
     });
+    return settlePlanLedger(this.artifactStore?.planLedger ?? null, ledgerRef, result);
   }
 
   async _closeBoundary(scope, resolved, warnings, onSuccess) {

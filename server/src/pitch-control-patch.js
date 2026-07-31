@@ -13,7 +13,7 @@ import {
   pitchEquals,
 } from "./pitch-control.js";
 import { waitForProcessing } from "./processing.js";
-import { resolvePlanReference } from "./plan-reference.js";
+import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
 import { ServiceTiming } from "./service-timing.js";
 import { createHostScope } from "./snapshot.js";
 
@@ -60,6 +60,7 @@ export class PitchControlPatchService {
   async patch(request) {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
+    let ledgerRef = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const resolved = resolvePlanReference({
@@ -71,17 +72,22 @@ export class PitchControlPatchService {
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
         snapshotStore: this.snapshotService.store,
+        planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolved.mutationRequest;
+      ledgerRef = resolved.ledgerRef;
     }
     let input;
     try {
       input = normalizeRequest(resolvedRequest);
     } catch (error) {
-      return formatValidationFailure(resolvedRequest, error, { elapsedMs: elapsed(serviceStartedAt, this.now()) });
+      const failure = formatValidationFailure(resolvedRequest, error, {
+        elapsedMs: elapsed(serviceStartedAt, this.now()),
+      });
+      return settlePlanLedger(this.artifactStore?.planLedger ?? null, ledgerRef, failure);
     }
     const coordinatorRequestedAt = this.now();
-    return this.session.withExclusive(async (host) => {
+    const result = await this.session.withExclusive(async (host) => {
       const acquiredAt = this.now();
       const scope = createHostScope(host);
       try {
@@ -95,6 +101,7 @@ export class PitchControlPatchService {
         await scope.releaseAll();
       }
     });
+    return settlePlanLedger(this.artifactStore?.planLedger ?? null, ledgerRef, result);
   }
 
   async _execute(scope, host, input, clock) {

@@ -23,7 +23,8 @@ const EXECUTION_OPTIONS_BY_TOOL = Object.freeze({
  * @param {string} options.expectedTargetTool - 调用方期望的目标工具名
  * @param {string} options.sessionId
  * @param {ArtifactStore} options.artifactStore
- * @returns {{ targetTool: string, mutationRequest: object }}
+ * @param {PlanExecutionLedger} [options.planLedger] - 防重放；缺省时不做执行态检查
+ * @returns {{ targetTool: string, mutationRequest: object, ledgerRef: string|null }}
  */
 export function resolvePlanReference({
   planRef,
@@ -34,6 +35,7 @@ export function resolvePlanReference({
   sessionId,
   artifactStore,
   snapshotStore,
+  planLedger = null,
 }) {
   if (!planRef || typeof planRef.artifactId !== "string" || typeof planRef.contentHash !== "string") {
     throw codedError("INVALID_ARGUMENTS", "planRef must contain artifactId and contentHash");
@@ -56,6 +58,13 @@ export function resolvePlanReference({
   if (!["dry_run", "commit"].includes(action)) {
     throw codedError("INVALID_ARGUMENTS", "planRef action must be dry_run or commit");
   }
+  // 执行态检查必须在展开请求**之前**：一个已提交的计划不该走到 live preflight，
+  // 因为 preflight 会通过——工程状态确实满足计划的前提，计划只是已经生效过了
+  // （§4.3.1）。这一点 preflight 无法自己发现。
+  if (planLedger) {
+    if (action === "commit") planLedger.beginCommit(planRef.artifactId);
+    else planLedger.noteDryRun(planRef.artifactId);
+  }
   if (
     plan.contextSnapshot &&
     snapshotStore &&
@@ -72,7 +81,34 @@ export function resolvePlanReference({
   return {
     targetTool: plan.targetTool,
     mutationRequest,
+    // commit 的结果必须回填 ledger；null 表示这次不是 commit 或未启用 ledger。
+    ledgerRef: planLedger && action === "commit" ? planRef.artifactId : null,
   };
+}
+
+/**
+ * 用写入结果推进 ledger 终态。
+ *
+ * 必须在**每条**返回路径上调用，包括失败路径：beginCommit 已经把条目推进到
+ * committing，不 settle 就会永久停在那里并拒绝一切后续 commit。零写入的失败
+ * （failed/conflict）由 ledger 自己退回 dry_run_seen，因此这里无须区分。
+ *
+ * @param {PlanExecutionLedger|null} planLedger
+ * @param {string|null} ledgerRef - resolvePlanReference 返回的 ledgerRef
+ * @param {object} result - 目标工具的返回值（读取 status）
+ * @returns {object} 原样返回 result，便于 `return settlePlanLedger(...)`
+ */
+export function settlePlanLedger(planLedger, ledgerRef, result) {
+  if (!planLedger || !ledgerRef) return result;
+  const status = typeof result?.status === "string" ? result.status : null;
+  // status 不在写入结论矩阵里（例如 dry_run）说明调用方把非 commit 结果传了进来；
+  // 静默忽略比抛错更危险，但这里也不能让一次记账失败掩盖真实的写入结果。
+  try {
+    if (status) planLedger.settle(ledgerRef, status);
+  } catch {
+    // ledger 记账失败不改变宿主已经发生的事实，因此不覆盖 result。
+  }
+  return result;
 }
 
 /**

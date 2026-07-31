@@ -73,6 +73,7 @@ import {
   artifactReference,
   artifactResourceView,
 } from "./artifact-store.js";
+import { PlanExecutionLedger } from "./plan-ledger.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 import { dedupeSchema } from "./schema-defs.js";
 import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
@@ -89,7 +90,10 @@ const serverSessionId = `sess_${randomUUID()}`;
 
 const snapshotService = new SnapshotService(hostSession);
 const workflowExecutor = new WorkflowExecutor(hostSession);
-const artifactStore = new ArtifactStore();
+// Plan 执行 ledger：同一个 planRef 至多 commit 一次（§4.3.1）。挂在 ArtifactStore 上，
+// 因为 seal 是"计划开始存在"的唯一时刻，登记放在别处就会漏掉某条封存路径。
+const planLedger = new PlanExecutionLedger();
+const artifactStore = new ArtifactStore({ planLedger });
 const processingService = new ProcessingService(hostSession, snapshotService);
 const lyricsService = new LyricsService(hostSession, snapshotService);
 const notePatchService = new NotePatchService(hostSession, snapshotService, {

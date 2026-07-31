@@ -6,6 +6,7 @@ import {
   resolvePlanReference,
 } from "../server/src/plan-reference.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
+import { PlanExecutionLedger } from "../server/src/plan-ledger.js";
 
 const sessionId = "sess_plan";
 
@@ -178,6 +179,110 @@ const sessionId = "sess_plan";
   };
   assert.deepStrictEqual(buildPlanArtifact(options), buildPlanArtifact(options));
   assert.strictEqual(Object.hasOwn(buildPlanArtifact(options).payload, "sealedAt"), false);
+}
+
+// ledger 接线：一个 planRef 至多 commit 一次。
+//
+// 这里测的不是 ledger 的状态机（plan-ledger.test.mjs 已覆盖），而是**接线**：
+// seal 是否登记、resolve 是否在展开请求前检查、settle 是否推进终态。没有接线时
+// 三者各自正确也挡不住重放。
+{
+  const ledger = new PlanExecutionLedger();
+  const store = new ArtifactStore({ planLedger: ledger });
+  const planPayload = buildPlanArtifact({
+    targetTool: "sv_patch_notes",
+    mutationRequest: { contextId: "ctx_1", patches: [{ note: 0, set: { lyrics: "x" } }] },
+  });
+  const artifact = store.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload: planPayload.payload,
+  });
+  const planRef = { artifactId: artifact.id, contentHash: artifact.contentHash };
+  const base = {
+    planRef,
+    expectedTargetTool: "sv_patch_notes",
+    sessionId,
+    artifactStore: store,
+    planLedger: ledger,
+  };
+
+  // seal 即登记。
+  assert.strictEqual(ledger.get(artifact.id)?.state, "sealed");
+
+  // commit 必须先 dry-run：这把"先审阅再提交"从建议变成服务端约束。
+  assert.throws(
+    () => resolvePlanReference({ ...base, action: "commit" }),
+    (error) => error.code === "PLAN_DRY_RUN_REQUIRED"
+  );
+
+  // dry-run 可重复，且不推进终态。
+  resolvePlanReference({ ...base, action: "dry_run" });
+  resolvePlanReference({ ...base, action: "dry_run" });
+  assert.strictEqual(ledger.get(artifact.id).state, "dry_run_seen");
+  assert.strictEqual(ledger.get(artifact.id).dryRunCount, 2);
+
+  // 首次 commit 放行，并交回 ledgerRef 供 settle 使用。
+  const committed = resolvePlanReference({ ...base, action: "commit" });
+  assert.strictEqual(committed.ledgerRef, artifact.id);
+  assert.strictEqual(ledger.get(artifact.id).state, "committing");
+
+  // 停在 committing 时不得重放：宿主状态未知，重放会在未知之上再写一次。
+  assert.throws(
+    () => resolvePlanReference({ ...base, action: "commit" }),
+    (error) => error.code === "PLAN_ALREADY_EXECUTED"
+  );
+
+  ledger.settle(artifact.id, "succeeded");
+  assert.strictEqual(ledger.get(artifact.id).state, "committed");
+
+  // 终态后连 dry-run 都拒绝：计划已生效，再"预览"会让调用方以为还能提交。
+  assert.throws(
+    () => resolvePlanReference({ ...base, action: "dry_run" }),
+    (error) => error.code === "PLAN_ALREADY_EXECUTED"
+  );
+}
+
+// 零写入的失败让计划回到可提交状态：mode:"add" 的重复叠加风险只存在于真的写过之后。
+{
+  const ledger = new PlanExecutionLedger();
+  const store = new ArtifactStore({ planLedger: ledger });
+  const artifact = store.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload: buildPlanArtifact({
+      targetTool: "sv_patch_notes",
+      mutationRequest: { contextId: "ctx_1", patches: [{ note: 0, set: { lyrics: "x" } }] },
+    }).payload,
+  });
+  const base = {
+    planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+    expectedTargetTool: "sv_patch_notes",
+    sessionId,
+    artifactStore: store,
+    planLedger: ledger,
+  };
+  resolvePlanReference({ ...base, action: "dry_run" });
+  resolvePlanReference({ ...base, action: "commit" });
+  ledger.settle(artifact.id, "failed");
+  assert.strictEqual(ledger.get(artifact.id).state, "dry_run_seen");
+  // 因此可以再次提交。
+  assert.doesNotThrow(() => resolvePlanReference({ ...base, action: "commit" }));
+}
+
+// 非 plan artifact 不进 ledger：它们是只读证据，重复读取没有副作用。
+{
+  const ledger = new PlanExecutionLedger();
+  const store = new ArtifactStore({ planLedger: ledger });
+  const artifact = store.seal({
+    kind: "analysis",
+    schemaVersion: "1",
+    sessionId,
+    payload: { rows: [] },
+  });
+  assert.strictEqual(ledger.get(artifact.id), null);
 }
 
 console.log("plan-reference.test.mjs passed");

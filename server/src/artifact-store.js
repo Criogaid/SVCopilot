@@ -59,6 +59,11 @@ export class ArtifactStore {
     now = () => Date.now(),
     quotas = {},
     cursorSecret = randomBytes(32),
+    // 计划执行 ledger（可选）。在这里注入而不是让 5 个 planner 各自登记：
+    // seal 是"计划开始存在"的唯一时刻，登记放在别处就会漏掉某条封存路径，
+    // 而漏登记的 planRef 在 commit 时会被 UNKNOWN_PLAN_REF 拒绝——一个只在
+    // 特定 planner 上出现的假故障。
+    planLedger = null,
   } = {}) {
     this.now = now;
     this.quotas = { ...DEFAULT_ARTIFACT_QUOTAS, ...quotas };
@@ -67,6 +72,7 @@ export class ArtifactStore {
       throw new TypeError("cursorSecret must be a Buffer of at least 16 bytes");
     }
     this.cursorSecret = Buffer.from(cursorSecret);
+    this.planLedger = planLedger;
     this.entries = new Map();
     this.expiredIds = new Map();
     this.totalBytes = 0;
@@ -147,6 +153,11 @@ export class ArtifactStore {
 
     this.entries.set(id, artifact);
     this.totalBytes += bytes;
+    // 只有 plan 需要执行态：其余 artifact（analysis/detail）是纯只读证据，重复读取
+    // 没有副作用，登记它们只会浪费 ledger 配额。
+    if (kind === "plan" && this.planLedger) {
+      this.planLedger.register(id, { ownerInstanceId: sessionId ?? null });
+    }
 
     return artifact;
   }
