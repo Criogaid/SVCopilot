@@ -98,7 +98,6 @@ export function analyzeVocalEventSequence(notes = []) {
     });
     const event = {
       note: item.note,
-      noteId: item.note.noteId,
       onsetBlick: item.onsetBlick,
       endBlick: item.onsetBlick + item.durationBlick,
       semanticRole: classification.role,
@@ -107,7 +106,6 @@ export function analyzeVocalEventSequence(notes = []) {
       melodicEligible: classification.melodicEligibleByDefault,
       continuationValid: null,
       chainHeadNote: activeLexicalHead?.note ?? null,
-      chainHeadNoteId: activeLexicalHead?.noteId ?? null,
       syllableOrdinal: null,
     };
 
@@ -116,7 +114,6 @@ export function analyzeVocalEventSequence(notes = []) {
         ...warning,
         severity: "warning",
         notes: [event.note],
-        noteIds: event.noteId ? [event.noteId] : [],
         semanticRole: classification.role,
         lyrics: classification.rawLyrics,
         startBlick: event.onsetBlick,
@@ -129,7 +126,6 @@ export function analyzeVocalEventSequence(notes = []) {
       activeSyllableOrdinal = 1;
       previousChainEvent = event;
       event.chainHeadNote = event.note ?? null;
-      event.chainHeadNoteId = event.noteId ?? null;
       event.syllableOrdinal = 1;
     } else if (classification.role === "syllable_continuation") {
       if (!activeLexicalHead) {
@@ -146,7 +142,6 @@ export function analyzeVocalEventSequence(notes = []) {
       } else {
         event.continuationValid = true;
         event.chainHeadNote = activeLexicalHead.note ?? null;
-        event.chainHeadNoteId = activeLexicalHead.noteId ?? null;
         activeSyllableOrdinal += 1;
         event.syllableOrdinal = activeSyllableOrdinal;
         appendChainSpacingIssue(issues, previousChainEvent, event);
@@ -168,7 +163,6 @@ export function analyzeVocalEventSequence(notes = []) {
       } else {
         event.continuationValid = true;
         event.chainHeadNote = activeLexicalHead?.note ?? null;
-        event.chainHeadNoteId = activeLexicalHead?.noteId ?? null;
         event.syllableOrdinal = activeSyllableOrdinal;
         previousChainEvent = event;
       }
@@ -195,7 +189,6 @@ export function summarizeExcludedVocalEvents(events = []) {
     count: excluded.length,
     byRole,
     items: excluded.map((event) => ({
-      ...(event.noteId ? { noteId: event.noteId } : {}),
       lyrics: event.classification.rawLyrics,
       semanticRole: event.semanticRole,
       evidence: event.semanticEvidence,
@@ -220,7 +213,6 @@ function appendChainSpacingIssue(issues, previous, current) {
       ),
       gapBlick,
       notes: [previous.note, current.note],
-      noteIds: [previous.noteId, current.noteId].filter(Boolean),
     });
   } else if (gapBlick < 0) {
     issues.push({
@@ -232,23 +224,20 @@ function appendChainSpacingIssue(issues, previous, current) {
       ),
       overlapBlick: -gapBlick,
       notes: [previous.note, current.note],
-      noteIds: [previous.noteId, current.noteId].filter(Boolean),
     });
   }
 }
 
-// issue 同时携带 `notes`（调用方传入的 note 对象引用）与 `noteIds`（字符串 ID）。
+// issue 只携带 `notes`：调用方传入的 note 对象引用，原样回传。
 //
-// 本模块被 6 个 planner 共用，而计划 §B2 步骤 5 要求 planner 逐对迁移到 fingerprint
-// 身份。`notes` 是身份无关的：本模块只把调用方给的对象原样回传，由调用方决定对外
-// 怎么表达身份。`noteIds` 服务于尚未迁移的调用方，随各自那一对迁移时删除——在这里
-// 一次性改掉会把另外五对的工作全拽进同一个提交，正是分对迁移要避免的。
+// 本模块被 6 个 planner 共用，因此它刻意**不知道**身份长什么样——由调用方决定对外
+// 怎么表达（现在统一是组内 index）。曾经并存的 `noteIds` 字符串字段随最后一个
+// planner 迁移完成而删除。
 function sequenceIssue(code, severity, event, message) {
   return {
     code,
     severity,
     notes: [event.note],
-    noteIds: event.noteId ? [event.noteId] : [],
     semanticRole: event.semanticRole,
     lyrics: event.classification.rawLyrics,
     startBlick: event.onsetBlick,

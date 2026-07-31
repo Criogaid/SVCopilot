@@ -12,7 +12,6 @@ export async function resolveContextTarget(
     verify = true,
     acceptRange = false,
     occurrenceId,
-    noteIds,
     noteIndicesInGroup,
     diagnostics = null,
   } = {}
@@ -27,8 +26,7 @@ export async function resolveContextTarget(
     return resolveRangeContextTarget(host, stored, {
       verify,
       occurrenceId,
-      noteIds,
-      noteIndicesInGroup,
+        noteIndicesInGroup,
       diagnostics,
     });
   }
@@ -120,7 +118,7 @@ export async function resolveContextTarget(
 async function resolveRangeContextTarget(
   host,
   stored,
-  { verify, occurrenceId, noteIds, noteIndicesInGroup, diagnostics }
+  { verify, occurrenceId, noteIndicesInGroup, diagnostics }
 ) {
   const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
   const vocal = occurrences.filter(
@@ -142,7 +140,7 @@ async function resolveRangeContextTarget(
   } else {
     const error = codedError(
       "AMBIGUOUS_CONTEXT",
-      "range context has multiple vocal occurrences; provide occurrenceId or noteIds from a single occurrence"
+      "range context has multiple vocal occurrences; provide occurrenceId"
     );
     error.candidateOccurrences = vocal.map((item) => item.occurrenceId);
     error.details = { candidateOccurrences: error.candidateOccurrences };
@@ -177,22 +175,20 @@ async function resolveRangeContextTarget(
     });
     const notes = [];
     const fingerprints = [];
-    const positionByNoteId = new Map();
-    const contextPositionByNoteId = new Map();
+    const positionByIndexInGroup = new Map();
     const contextPositionByIndexInGroup = new Map();
     const expectedFingerprints = selectRangeFingerprints(occurrence, {
-      noteIds,
       noteIndicesInGroup,
     });
     const allContextPositions = new Map(
-      (occurrence.noteFingerprints ?? []).map((fingerprint, index) => [fingerprint.noteId, index])
+      (occurrence.noteFingerprints ?? []).map((fingerprint, index) => [fingerprint.indexInGroup, index])
     );
     await measureDiagnosticPhase(diagnostics, "fingerprintVerificationMs", async () => {
-      // 批量读取前先做范围校验：越界必须仍然按 noteId 报 STALE_CONTEXT，
+      // 批量读取前先做范围校验：越界必须仍然报 STALE_CONTEXT，
       // 而不是让整批以宿主的索引错误失败、丢掉是哪个音符过期的信息。
       for (const expected of expectedFingerprints) {
         if (!Number.isSafeInteger(expected.indexInGroup) || expected.indexInGroup >= targetNoteCount) {
-          throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
+          throw codedError("STALE_CONTEXT", `note ${expected.indexInGroup} no longer exists`);
         }
       }
       // 写入仍需要 note handle；先按 occurrence 顺序解析，再一次性批量读指纹。
@@ -202,7 +198,7 @@ async function resolveRangeContextTarget(
           inferredType: "Note",
         });
         if (!note?.__handle__) {
-          throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
+          throw codedError("STALE_CONTEXT", `note ${expected.indexInGroup} no longer exists`);
         }
         resolvedNotes.push(note);
       }
@@ -222,14 +218,13 @@ async function resolveRangeContextTarget(
         if (verify && !isDeepStrictEqual(observed, pickRangeFingerprint(expected))) {
           throw codedError(
             "STALE_CONTEXT",
-            `note ${expected.noteId} changed after the snapshot was captured`
+            `note ${expected.indexInGroup} changed after the snapshot was captured`
           );
         }
-        positionByNoteId.set(expected.noteId, notes.length);
-        contextPositionByNoteId.set(expected.noteId, allContextPositions.get(expected.noteId));
+        positionByIndexInGroup.set(expected.indexInGroup, notes.length);
         contextPositionByIndexInGroup.set(
           expected.indexInGroup,
-          allContextPositions.get(expected.noteId)
+          allContextPositions.get(expected.indexInGroup)
         );
         notes.push(note);
         fingerprints.push(observed);
@@ -245,8 +240,7 @@ async function resolveRangeContextTarget(
       fingerprints,
       contextKind: "range",
       occurrence,
-      positionByNoteId,
-      contextPositionByNoteId,
+      positionByIndexInGroup,
       contextPositionByIndexInGroup,
       targetNoteCount,
       bulkStats,
@@ -261,73 +255,13 @@ async function resolveRangeContextTarget(
   }
 }
 
-function selectRangeFingerprints(occurrence, { noteIds, noteIndicesInGroup }) {
+function selectRangeFingerprints(occurrence, { noteIndicesInGroup }) {
   const all = occurrence.noteFingerprints ?? [];
-  const requestedIds = new Set((noteIds ?? []).filter((value) => typeof value === "string"));
   const requestedIndices = new Set(
     (noteIndicesInGroup ?? []).filter((value) => Number.isSafeInteger(value))
   );
-  if (requestedIds.size === 0 && requestedIndices.size === 0) return all;
-  return all.filter(
-    (fingerprint) =>
-      requestedIds.has(fingerprint.noteId) || requestedIndices.has(fingerprint.indexInGroup)
-  );
-}
-
-// 从 noteId 集合推导 range occurrenceId。range noteId 形如 <contextId>:t:X:r:Y:n:Z，
-// occurrence 前缀即去掉 ":n:Z" 的部分。推导不了（无 noteId）时返回 undefined，交由
-// resolveContextTarget 做单 occurrence 自动选择或返回 AMBIGUOUS_CONTEXT。
-export function deriveRangeOccurrenceId(stored, noteIds) {
-  if (stored?.context?.kind !== "range") return undefined;
-  const prefixes = new Set();
-  for (const noteId of noteIds) {
-    if (typeof noteId !== "string") continue;
-    const cut = noteId.lastIndexOf(":n:");
-    if (cut <= 0) continue;
-    prefixes.add(noteId.slice(0, cut));
-  }
-  if (prefixes.size === 0) return undefined;
-  if (prefixes.size > 1) {
-    throw codedError(
-      "INVALID_NOTE_ID",
-      "all noteIds in one request must belong to the same range occurrence"
-    );
-  }
-  return prefixes.values().next().value;
-}
-
-// 统一 noteId → 上下文位置：group/selection 走 <contextId>:n:<position> 旧格式，
-// range 走 occurrence noteFingerprints 建立的映射。
-export function parseContextNoteId(noteId, contextId, resolved) {
-  if (resolved.contextKind === "range") {
-    const position = resolved.positionByNoteId.get(noteId);
-    if (position === undefined) {
-      throw codedError(
-        "UNKNOWN_NOTE_ID",
-        `noteId is not part of the resolved occurrence: ${noteId}`
-      );
-    }
-    return position;
-  }
-  const prefix = `${contextId}:n:`;
-  if (typeof noteId !== "string" || !noteId.startsWith(prefix)) {
-    throw codedError(
-      "INVALID_NOTE_ID",
-      `noteId must be of the form ${prefix}<index> from the same snapshot context`
-    );
-  }
-  const suffix = noteId.slice(prefix.length);
-  const position = Number(suffix);
-  if (!/^\d+$/.test(suffix) || !Number.isSafeInteger(position)) {
-    throw codedError("INVALID_NOTE_ID", `noteId index is not a non-negative integer: ${noteId}`);
-  }
-  if (position >= resolved.notes.length) {
-    throw codedError(
-      "NOTE_INDEX_OUT_OF_RANGE",
-      `noteId ${noteId} refers to position ${position}, but the context has ${resolved.notes.length} note(s)`
-    );
-  }
-  return position;
+  if (requestedIndices.size === 0) return all;
+  return all.filter((fingerprint) => requestedIndices.has(fingerprint.indexInGroup));
 }
 
 export function contextGroupNoteCount(stored, fallback = null) {

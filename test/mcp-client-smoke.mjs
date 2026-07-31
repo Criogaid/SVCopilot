@@ -1099,7 +1099,8 @@ try {
   assert.equal(typeof firstGroup.groupNoteCount, "number");
   assert.equal(typeof firstGroup.capturedNotes, "number");
   assert.ok(firstGroup.capturedNotes <= firstGroup.groupNoteCount);
-  assert.match(rangeSnapshot.data.notes[0].id, /:n:0$/);
+  // 身份是组内 index（§3.1）：note.id 就是 indexInGroup。
+  assert.equal(rangeSnapshot.data.notes[0].id, rangeSnapshot.data.notes[0].indexInGroup);
   assert.ok(Number.isFinite(rangeSnapshot.timings.serviceTotalMs));
   assert.ok(rangeSnapshot.artifactRef);
   const rangeArtifactResource = await client.readResource({
@@ -1288,7 +1289,11 @@ try {
     })
   );
   assert.equal(refreshedRangeIdentity.contextId, rangeAgain.contextId);
-  assert.match(refreshedRangeIdentity.data.notes[0].id, new RegExp(`^${rangeAgain.contextId}`));
+  // 身份不再内嵌 contextId；同一 context 重新取页仍给出同一组内 index。
+  assert.equal(
+    refreshedRangeIdentity.data.notes[0].id,
+    refreshedRangeIdentity.data.notes[0].indexInGroup
+  );
 
   // 参数曲线：读取（双坐标 + definition），replace 写入 + 精确读回验证。
   const curve = parseToolResult(

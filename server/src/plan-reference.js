@@ -110,22 +110,10 @@ export function buildPlanArtifact({
   };
 }
 
-// 选择器有两种写法，因为 5 个 planner 共用本构造器，而计划 §B2 步骤 5 要求逐对迁移：
-//   noteIndexes —— 组内 index（§3.1），已迁移的那一对使用；
-//   noteIds     —— 字符串 ID，尚未迁移的 planner 使用，随各自那一对迁移时删除。
-//
-// 两者都不传表示"封存全部指纹"。这里刻意**不**做静默兜底：如果把未知选择器当成
-// "不过滤"，一次拼错的键名就会让 capsule 封存整个 occurrence，而那正是 capsule
-// 要避免的（§4.3.2 最小完整集）。
-export function buildPlanContextSnapshot(stored, occurrence, { noteIndexes, noteIds } = {}) {
+// 选择器是组内 index（§3.1）。不传表示"封存全部指纹"。
+export function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {}) {
   if (!stored || typeof stored.contextId !== "string" || !occurrence) {
     throw codedError("INVALID_ARGUMENTS", "plan context snapshot requires a stored context and occurrence");
-  }
-  if (noteIndexes !== undefined && noteIds !== undefined) {
-    throw codedError(
-      "INVALID_ARGUMENTS",
-      "pass either noteIndexes or noteIds, not both"
-    );
   }
   const fingerprints = Array.isArray(occurrence.noteFingerprints)
     ? occurrence.noteFingerprints
@@ -151,20 +139,6 @@ export function buildPlanContextSnapshot(stored, occurrence, { noteIndexes, note
       throw codedError(
         "INVALID_ARGUMENTS",
         "plan context snapshot noteIndexes must belong to the selected occurrence"
-      );
-    }
-  } else if (noteIds !== undefined) {
-    if (!Array.isArray(noteIds) || noteIds.some((noteId) => typeof noteId !== "string")) {
-      throw codedError("INVALID_ARGUMENTS", "plan context snapshot noteIds must be strings");
-    }
-    const requested = new Set(noteIds);
-    selectedFingerprints = fingerprints.filter((fingerprint) =>
-      requested.has(fingerprint.noteId)
-    );
-    if (selectedFingerprints.length !== requested.size) {
-      throw codedError(
-        "INVALID_ARGUMENTS",
-        "plan context snapshot noteIds must belong to the selected occurrence"
       );
     }
   }

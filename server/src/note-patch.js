@@ -1,9 +1,7 @@
 import {
   appendSharedTargetDryRunWarnings,
   contextGroupNoteCount,
-  deriveRangeOccurrenceId,
   ensureSharedTargetConfirmed,
-  parseContextNoteId,
   resolveContextTarget,
 } from "./context-target.js";
 import { createOperationDiagnostics } from "./operation-diagnostics.js";

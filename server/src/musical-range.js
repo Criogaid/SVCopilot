@@ -506,10 +506,9 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       ? occurrencesByTarget.get(occurrence.targetGroupUuid)
       : [];
     occurrence.group.sharedTargetOccurrences = sharedTargetOccurrences;
-    const noteFingerprints = occurrence.noteFingerprints.map((fingerprint) => {
-      const noteId = `${occurrence.occurrenceId}:n:${fingerprint.indexInGroup}`;
-      return { ...fingerprint, noteId };
-    });
+    // 身份就是 fingerprint.indexInGroup（§3.1）；不再铸造 <occurrenceId>:n:<index>
+    // 这种把同一事实拼长的字符串。
+    const noteFingerprints = occurrence.noteFingerprints;
     // ordinal 是 §3.1 的稳定身份：它索引**完整** occurrences 数组，与"是否捕获到
     // Note"无关。写在这里而不是让消费方 indexOf，是为了让它随 Context 一起冻结——
     // 消费方各自推导会在数组被过滤后给出不同编号。
@@ -557,8 +556,7 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
         (collectionName === "notes" || collectionName === "attributes") &&
         Number.isSafeInteger(item.indexInGroup)
       ) {
-        item.noteId = `${occurrence.occurrenceId}:n:${item.indexInGroup}`;
-        if (collectionName === "notes") item.id = item.noteId;
+        if (collectionName === "notes") item.id = item.indexInGroup;
       }
       if (collectionName === "pitchControls") {
         // 最终 controlId：SVCopilot 自有对象用持久 scriptData ID，外部/无标签对象用
@@ -698,7 +696,6 @@ function denseRangeDetail(data) {
 function flattenRangeNote(note) {
   return {
     occurrenceId: note.occurrenceId,
-    noteId: note.noteId,
     trackIndex: note.trackIndex,
     groupIndex: note.groupIndex,
     groupUuid: note.groupUuid,

@@ -363,7 +363,7 @@ test("range snapshot token is stable and sinceToken returns no_change", async ()
   assert.ok(second.page.detailCursor);
   const identityPage = await service.snapshot({ cursor: second.page.detailCursor });
   assert.equal(identityPage.contextId, second.contextId);
-  assert.ok(identityPage.data.notes.every((note) => note.id.startsWith(second.contextId)));
+  assert.ok(identityPage.data.notes.every((note) => Number.isSafeInteger(note.id)));
   assert.ok(hostCallsAfterRefresh > hostCallsAfterFirst);
   assert.equal(model.hostCalls.length, hostCallsAfterRefresh);
 
@@ -472,7 +472,8 @@ test("range snapshot returns one editable context with all tuning includes", asy
   assert.equal(result.data.computedPitch[0].values.length, 4);
   assert.equal(result.data.tracks[0].groups[0].processing.state, "ready");
   const occurrenceId = result.data.tracks[0].groups[0].occurrenceId;
-  assert.ok(result.data.notes.every((note) => note.id.startsWith(`${occurrenceId}:n:`)));
+  // 身份是组内 index（§3.1）：note.id 与 indexInGroup 是同一个值。
+  assert.ok(result.data.notes.every((note) => note.id === note.indexInGroup));
   const stored = service.store.get(result.contextId);
   assert.equal(stored.context.kind, "range");
   assert.equal(stored.context.occurrences[0].targetGroupUuid, "uuid-verse");
