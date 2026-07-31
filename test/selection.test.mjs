@@ -239,17 +239,17 @@ test("selection never creates an Undo record", async () => {
   assert.ok(!model.calls.includes("newUndoRecord"));
 });
 
-test("group-context noteIds resolve through the stored indexInGroup", async () => {
+test("group-context notes resolve through the stored indexInGroup", async () => {
   const model = createModel({ selected: [] });
   const store = new SnapshotStore({ now: () => 1000 });
   const { service } = createService(model, store);
-  // 选择区快照里第 0、1 项分别是 group 内的第 2、5 个音符。
+  // 快照只捕获了 group 内第 2、5 个音符；引用直接用组内 index。
   const stored = createGroupContext(store, [2, 5]);
 
   const result = await service.setSelection({
     operation: "select",
     contextId: stored.contextId,
-    noteIds: [`${stored.contextId}:n:0`, `${stored.contextId}:n:1`],
+    notes: [2, 5],
   });
 
   assert.deepEqual(result.data.requestedPositions, [2, 5]);
@@ -260,7 +260,7 @@ test("group-context noteIds resolve through the stored indexInGroup", async () =
   );
 });
 
-test("range-context noteIds resolve and can be narrowed by occurrenceId", async () => {
+test("range-context notes resolve and can be narrowed by occurrenceId", async () => {
   const model = createModel({ selected: [] });
   const store = new SnapshotStore({ now: () => 1000 });
   const { service } = createService(model, store);
@@ -270,7 +270,7 @@ test("range-context noteIds resolve and can be narrowed by occurrenceId", async 
     operation: "select",
     contextId: stored.contextId,
     occurrenceId,
-    noteIds: [`${occurrenceId}:n:0`, `${occurrenceId}:n:2`],
+    notes: [1, 4],
   });
 
   assert.deepEqual(result.data.requestedPositions, [1, 4]);
@@ -282,13 +282,13 @@ test("range-context noteIds resolve and can be narrowed by occurrenceId", async 
         operation: "select",
         contextId: stored.contextId,
         occurrenceId: `${stored.contextId}:t:9:r:9`,
-        noteIds: [`${occurrenceId}:n:0`],
+        notes: [1],
       }),
-    (error) => error.code === "UNKNOWN_NOTE_ID"
+    (error) => error.code === "NOTE_NOT_IN_CONTEXT"
   );
 });
 
-test("context noteIds reject a different current editor group before selection changes", async () => {
+test("context notes reject a different current editor group before selection changes", async () => {
   const model = createModel({ selected: [1], groupUuid: "uuid-current-editor" });
   const { service, store } = createService(model);
   const { stored, occurrenceId } = createRangeContext(store, [1, 2]);
@@ -299,7 +299,7 @@ test("context noteIds reject a different current editor group before selection c
         operation: "select",
         contextId: stored.contextId,
         occurrenceId,
-        noteIds: [`${occurrenceId}:n:1`],
+        notes: [1],
       }),
     (error) =>
       error.code === "CURRENT_GROUP_MISMATCH" &&
@@ -326,7 +326,7 @@ test("a note index beyond the live group fails instead of selecting the wrong no
       service.setSelection({
         operation: "select",
         contextId: stored.contextId,
-        noteIds: [`${stored.contextId}:n:0`],
+        notes: [9],
       }),
     (error) => error.code === "NOTE_INDEX_OUT_OF_RANGE"
   );
@@ -353,7 +353,7 @@ test("an expired context is rejected rather than silently ignored", async () => 
       service.setSelection({
         operation: "select",
         contextId: "ctx_gone",
-        noteIds: ["ctx_gone:n:0"],
+        notes: [0],
       }),
     (error) => error.code === "UNKNOWN_CONTEXT"
   );
@@ -367,12 +367,12 @@ test("malformed requests are rejected before touching the host", async () => {
     { operation: "toggle" },
     { operation: "clear", indexInGroup: [0] },
     { operation: "select" },
-    { operation: "select", indexInGroup: [0], noteIds: ["x"] },
-    { operation: "select", noteIds: ["x"] },
+    { operation: "select", indexInGroup: [0], notes: [0] },
+    { operation: "select", notes: [0] },
     { operation: "select", indexInGroup: [] },
     { operation: "select", indexInGroup: [-1] },
     { operation: "select", indexInGroup: [0], contextId: "ctx_x" },
-    { operation: "select", contextId: "ctx_x", noteIds: [] },
+    { operation: "select", contextId: "ctx_x", notes: [] },
     { operation: "select", unknownField: true },
   ];
   for (const request of cases) {

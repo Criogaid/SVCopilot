@@ -8,7 +8,7 @@ import { createHostScope, unknownContextError } from "./snapshot.js";
 // - 同时保留 hostResults 原始布尔值供调试对照，并在两者矛盾时发警告；
 // - selection 是 UI 状态，不创建 Undo 记录（官方 API 也没有为它提供 Undo）。
 //
-// 身份：noteId 只在签发它的 contextId 内有效。本服务按 group 内序号（indexInGroup）
+// 身份：组内序号（indexInGroup），只在签发它的 contextId 内有效。本服务按该序号
 // 定位音符，因此 context 与宿主之间的结构漂移会被 NOTE_INDEX_OUT_OF_RANGE 拦住，
 // 而不是悄悄选中另一个音符。
 
@@ -157,15 +157,15 @@ async function resolvePositions(service, input, scope, target, warnings) {
       throw unknownContextError(service.snapshotService.store, input.contextId);
     }
     const expectedGroupUuids = new Set();
-    for (const noteId of input.noteIds) {
-      const resolved = resolveContextNotePosition(stored, input, noteId);
+    for (const noteIndex of input.notes) {
+      const resolved = resolveContextNotePosition(stored, input, noteIndex);
       positions.push(resolved.indexInGroup);
       expectedGroupUuids.add(resolved.targetGroupUuid);
     }
     if (expectedGroupUuids.size !== 1 || expectedGroupUuids.has(null)) {
       throw codedError(
         "INVALID_CONTEXT",
-        "the supplied noteIds do not identify exactly one target NoteGroup"
+        "the supplied notes do not identify exactly one target NoteGroup"
       );
     }
     const expectedGroupUuid = expectedGroupUuids.values().next().value;
@@ -200,9 +200,9 @@ async function resolvePositions(service, input, scope, target, warnings) {
   return unique;
 }
 
-// context 内的 noteId 一律解析为 group 内序号。range context 的 noteId 自带 occurrence，
-// 但本服务只作用于宿主"当前编辑组"，因此 occurrence 与当前组不一致时必须明确拒绝。
-function resolveContextNotePosition(stored, input, noteId) {
+// context 内的引用一律是组内 index（§3.1）。本服务只作用于宿主"当前编辑组"，
+// 因此 occurrence 与当前组不一致时必须明确拒绝（组 UUID 比对在调用方完成）。
+function resolveContextNotePosition(stored, input, noteIndex) {
   if (stored.context?.kind === "range") {
     const occurrences = Array.isArray(stored.context.occurrences)
       ? stored.context.occurrences
@@ -212,7 +212,7 @@ function resolveContextNotePosition(stored, input, noteId) {
         continue;
       }
       const fingerprint = (occurrence.noteFingerprints ?? []).find(
-        (item) => item.noteId === noteId
+        (item) => item.indexInGroup === noteIndex
       );
       if (fingerprint) {
         return {
@@ -223,27 +223,20 @@ function resolveContextNotePosition(stored, input, noteId) {
       }
     }
     throw codedError(
-      "UNKNOWN_NOTE_ID",
-      `noteId is not part of the supplied range context${input.occurrenceId !== undefined ? " and occurrenceId" : ""}: ${noteId}`
+      "NOTE_NOT_IN_CONTEXT",
+      `note ${noteIndex} is not part of the supplied range context${input.occurrenceId !== undefined ? " and occurrenceId" : ""}`,
+      { got: noteIndex }
     );
   }
-  const prefix = `${stored.contextId}:n:`;
-  if (typeof noteId !== "string" || !noteId.startsWith(prefix)) {
-    throw codedError(
-      "INVALID_NOTE_ID",
-      `noteId must be of the form ${prefix}<index> from the same snapshot context`
-    );
-  }
-  const suffix = noteId.slice(prefix.length);
-  if (!/^\d+$/.test(suffix)) {
-    throw codedError("INVALID_NOTE_ID", `noteId index is not a non-negative integer: ${noteId}`);
-  }
-  const selectedIndex = Number(suffix);
-  const note = (stored.notes ?? [])[selectedIndex];
+  // group/selection 上下文：stored.notes 是捕获顺序，每项带自己的 indexInGroup。
+  // 按 indexInGroup 查而不是按数组下标——快照可能只捕获了组内的一个子集，
+  // 用下标会静默选中另一个音符。
+  const note = (stored.notes ?? []).find((item) => item.indexInGroup === noteIndex);
   if (!note || !Number.isSafeInteger(note.indexInGroup)) {
     throw codedError(
-      "UNKNOWN_NOTE_ID",
-      `noteId ${noteId} is not present in the supplied snapshot context`
+      "NOTE_NOT_IN_CONTEXT",
+      `note ${noteIndex} is not present in the supplied snapshot context`,
+      { got: noteIndex }
     );
   }
   return {
@@ -259,32 +252,32 @@ function resolveContextNotePosition(stored, input, noteId) {
 
 function normalizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(request, ["operation", "contextId", "occurrenceId", "noteIds", "indexInGroup"], "request");
+  assertKnownKeys(request, ["operation", "contextId", "occurrenceId", "notes", "indexInGroup"], "request");
   const operation = request.operation;
   if (!OPERATIONS.includes(operation)) {
     throw codedError("INVALID_ARGUMENTS", `operation must be one of ${OPERATIONS.join(", ")}`);
   }
   if (operation === "clear") {
-    for (const key of ["contextId", "occurrenceId", "noteIds", "indexInGroup"]) {
+    for (const key of ["contextId", "occurrenceId", "notes", "indexInGroup"]) {
       if (request[key] !== undefined) {
         throw codedError("INVALID_ARGUMENTS", `operation "clear" does not accept ${key}`);
       }
     }
     return { operation };
   }
-  const hasNoteIds = request.noteIds !== undefined;
+  const hasNotes = request.notes !== undefined;
   const hasIndices = request.indexInGroup !== undefined;
-  if (hasNoteIds === hasIndices) {
+  if (hasNotes === hasIndices) {
     throw codedError(
       "INVALID_ARGUMENTS",
-      'provide exactly one of noteIds (with contextId) or indexInGroup'
+      'provide exactly one of notes (with contextId) or indexInGroup'
     );
   }
-  if (hasNoteIds) {
+  if (hasNotes) {
     if (typeof request.contextId !== "string" || request.contextId.length === 0) {
-      throw codedError("INVALID_ARGUMENTS", "noteIds requires a non-empty contextId");
+      throw codedError("INVALID_ARGUMENTS", "notes requires a non-empty contextId");
     }
-    assertIdArray(request.noteIds, "noteIds");
+    assertIndexArray(request.notes, "notes");
     if (
       request.occurrenceId !== undefined &&
       (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
@@ -295,7 +288,7 @@ function normalizeRequest(request) {
       operation,
       contextId: request.contextId,
       occurrenceId: request.occurrenceId,
-      noteIds: request.noteIds,
+      notes: request.notes,
     };
   }
   if (request.contextId !== undefined || request.occurrenceId !== undefined) {
@@ -322,13 +315,16 @@ function normalizeRequest(request) {
   return { operation, indexInGroup: request.indexInGroup };
 }
 
-function assertIdArray(value, label) {
+function assertIndexArray(value, label) {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_NOTE_IDS) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must be an array of 1-${MAX_NOTE_IDS} ids`);
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `${label} must be an array of 1-${MAX_NOTE_IDS} note indexes`
+    );
   }
   for (const entry of value) {
-    if (typeof entry !== "string" || entry.length === 0) {
-      throw codedError("INVALID_ARGUMENTS", `${label} entries must be non-empty strings`);
+    if (!Number.isSafeInteger(entry) || entry < 0) {
+      throw codedError("INVALID_ARGUMENTS", `${label} entries must be non-negative integers`);
     }
   }
 }

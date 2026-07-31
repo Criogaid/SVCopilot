@@ -2652,7 +2652,7 @@ export const TOOLS = [
   {
     name: "sv_set_selection",
     description:
-      'Set the editor note selection with a trustworthy result. SynthV has been observed CHANGING selection state while unselectNote() returned false, so this tool never treats a host boolean as evidence: it reads the selection before and after the operation and derives `changed` from that read-back, reporting the raw hostResults alongside and warning HOST_RETURN_DISAGREES_WITH_READBACK when they contradict each other. Operations: "clear" (unselect all notes), "select" (replace the selection), "add" (extend it), "remove" (unselect the listed notes). Target notes either by noteIds from a sv_snapshot or sv_snapshot_range context (resolved to group-local indices; a range noteId may be narrowed with occurrenceId) or by indexInGroup against the host\'s CURRENT editor group directly. Context noteIds are accepted only when their target NoteGroup UUID matches the current editor group; otherwise CURRENT_GROUP_MISMATCH is returned before any selection mutation. If the group shrank after the snapshot, the call fails NOTE_INDEX_OUT_OF_RANGE instead of quietly selecting a different note. Selection is UI state: this creates no Undo record, because the official API does not make one for it.',
+      'Set the editor note selection with a trustworthy result. SynthV has been observed CHANGING selection state while unselectNote() returned false, so this tool never treats a host boolean as evidence: it reads the selection before and after the operation and derives `changed` from that read-back, reporting the raw hostResults alongside and warning HOST_RETURN_DISAGREES_WITH_READBACK when they contradict each other. Operations: "clear" (unselect all notes), "select" (replace the selection), "add" (extend it), "remove" (unselect the listed notes). Target notes either by `notes` (0-based group indexes from a sv_snapshot or sv_snapshot_range context; a range reference may be narrowed with occurrenceId) or by indexInGroup against the host\'s CURRENT editor group directly. Context references are accepted only when their target NoteGroup UUID matches the current editor group; otherwise CURRENT_GROUP_MISMATCH is returned before any selection mutation. If the group shrank after the snapshot, the call fails NOTE_INDEX_OUT_OF_RANGE instead of quietly selecting a different note. Selection is UI state: this creates no Undo record, because the official API does not make one for it.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2665,19 +2665,19 @@ export const TOOLS = [
         contextId: {
           type: "string",
           minLength: 1,
-          description: "Required with noteIds; the context that issued them.",
+          description: "Required with notes; the context that issued them.",
         },
         occurrenceId: {
           type: "string",
           minLength: 1,
           description:
-            "Optional narrowing for range-context noteIds. The host selection always applies to the current editor group.",
+            "Optional narrowing for range-context notes. The host selection always applies to the current editor group.",
         },
-        noteIds: {
+        notes: {
           type: "array",
           minItems: 1,
           maxItems: 200,
-          items: { type: "string", minLength: 1 },
+          items: { type: "integer", minimum: 0 },
           description: "Note ids from the supplied contextId. Mutually exclusive with indexInGroup.",
         },
         indexInGroup: {
@@ -2686,7 +2686,7 @@ export const TOOLS = [
           maxItems: 200,
           items: { type: "integer", minimum: 0 },
           description:
-            "0-based note indices in the host's CURRENT editor group, for when no snapshot context is held. Mutually exclusive with noteIds/contextId.",
+            "0-based note indices in the host's CURRENT editor group, for when no snapshot context is held. Mutually exclusive with notes/contextId.",
         },
       },
       required: ["operation"],
