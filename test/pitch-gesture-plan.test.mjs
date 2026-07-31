@@ -47,7 +47,8 @@ async function snapshotNotes(snapshots) {
   });
 }
 
-const nid = (snapshot, index) => `${snapshot.contextId}:t:0:r:0:n:${index}`;
+// 身份就是组内 index（§3.1）；保留 helper 让测试改动最小、意图仍可读。
+const nid = (_snapshot, index) => index;
 
 test("a full gesture set compiles to bounded group-local add curves with a unified apply envelope", async () => {
   const { snapshots, planner } = createFixture();
@@ -55,10 +56,10 @@ test("a full gesture set compiles to bounded group-local add curves with a unifi
   const result = await planner.plan({
     contextId: snapshot.contextId,
     gestures: [
-      { type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3, direction: "up" },
-      { type: "transition", fromNoteId: nid(snapshot, 0), toNoteId: nid(snapshot, 1), width: { quarters: 0.5 } },
-      { type: "release", noteId: nid(snapshot, 2), depthSemitone: 0.4, direction: "down" },
-      { type: "vibrato", noteId: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5.5, startSeconds: 0.3 },
+      { type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3, direction: "up" },
+      { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 0.5 } },
+      { type: "release", note: nid(snapshot, 2), depthSemitone: 0.4, direction: "down" },
+      { type: "vibrato", note: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5.5, startSeconds: 0.3 },
     ],
   });
   assert.equal(result.ok, true);
@@ -96,8 +97,8 @@ test("planner output is schema-valid and plannable against the live host (dry-ru
   const plan = await planner.plan({
     contextId: snapshot.contextId,
     gestures: [
-      { type: "transition", fromNoteId: nid(snapshot, 0), toNoteId: nid(snapshot, 1), width: { quarters: 0.5 } },
-      { type: "release", noteId: nid(snapshot, 2), depthSemitone: 0.4 },
+      { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 0.5 } },
+      { type: "release", note: nid(snapshot, 2), depthSemitone: 0.4 },
     ],
   });
   // apply.arguments 逐字（含 dryRun:true）喂给真实事务核：应 dry_run 且零写、零 Undo。
@@ -123,8 +124,8 @@ test("identical input produces a byte-stable plan id and apply arguments", async
   const request = {
     contextId: snapshot.contextId,
     gestures: [
-      { type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 },
-      { type: "vibrato", noteId: nid(snapshot, 2), rateHz: 5, depthSemitone: 0.25 },
+      { type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 },
+      { type: "vibrato", note: nid(snapshot, 2), rateHz: 5, depthSemitone: 0.25 },
     ],
   };
   const first = await planner.plan(request);
@@ -139,7 +140,7 @@ test("transition follows the source and target pitches without overshooting", as
   const result = await planner.plan({
     contextId: snapshot.contextId,
     gestures: [
-      { type: "transition", fromNoteId: nid(snapshot, 0), toNoteId: nid(snapshot, 1), width: { quarters: 1 } },
+      { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 1 } },
     ],
   });
   const control = result.apply.arguments.operations[0].control;
@@ -162,7 +163,7 @@ test("vibrato stays within depth and reports its sampling", async () => {
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
-    gestures: [{ type: "vibrato", noteId: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5 }],
+    gestures: [{ type: "vibrato", note: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5 }],
   });
   const points = result.apply.arguments.operations[0].control.points;
   assert.ok(points.length > 4);
@@ -177,7 +178,7 @@ test("transition between non-adjacent notes is rejected", async () => {
   await assert.rejects(
     planner.plan({
       contextId: snapshot.contextId,
-      gestures: [{ type: "transition", fromNoteId: nid(snapshot, 0), toNoteId: nid(snapshot, 2) }],
+      gestures: [{ type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 2) }],
     }),
     (error) => error.code === "TRANSITION_NOT_ADJACENT"
   );
@@ -189,7 +190,7 @@ test("vibrato on a too-short note is rejected", async () => {
   await assert.rejects(
     planner.plan({
       contextId: snapshot.contextId,
-      gestures: [{ type: "vibrato", noteId: nid(snapshot, 0), rateHz: 5 }],
+      gestures: [{ type: "vibrato", note: nid(snapshot, 0), rateHz: 5 }],
     }),
     (error) => error.code === "CONSTRAINT_VIOLATION"
   );
@@ -201,7 +202,7 @@ test("seconds-based durations convert through the tempo map", async () => {
   const result = await planner.plan({
     contextId: snapshot.contextId,
     gestures: [
-      { type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3, length: { seconds: 0.25 } },
+      { type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3, length: { seconds: 0.25 } },
     ],
   });
   // 120bpm 下 0.25s = 0.5 quarter = Q/2。
@@ -216,7 +217,7 @@ test("depth clamping to constraints is reported as a warning", async () => {
   const result = await planner.plan({
     contextId: snapshot.contextId,
     constraints: { maxAbsDepthSemitone: 0.5 },
-    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 2 }],
+    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 2 }],
   });
   assert.ok(result.warnings.some((w) => w.code === "CONSTRAINT_CLAMPED"));
   const points = result.apply.arguments.operations[0].control.points;
@@ -230,7 +231,7 @@ test("breath targets default to warn-and-skip with a zero-write no-change plan",
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
-    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
   });
 
   assert.equal(result.status, "no_change");
@@ -246,7 +247,7 @@ test("breath targets default to warn-and-skip with a zero-write no-change plan",
   const warning = result.warnings.find(
     (item) => item.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
   );
-  assert.equal(warning.noteId, nid(snapshot, 0));
+  assert.equal(warning.noteIndex, 0);
   assert.equal(warning.semanticRole, "breath_event");
   assert.equal(warning.evidence, "official_documented_special_lyric_br");
 });
@@ -259,7 +260,7 @@ test("breath targets require explicit include, while low-level dry-run remains a
   const result = await planner.plan({
     contextId: snapshot.contextId,
     specialEventPolicy: "include",
-    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
   });
 
   assert.equal(result.status, "planned");
@@ -278,7 +279,7 @@ test("near-miss breath spelling stays melodic but carries the shared semantic wa
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
-    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
   });
 
   assert.equal(result.status, "planned");
@@ -288,7 +289,7 @@ test("near-miss breath spelling stays melodic but carries the shared semantic wa
     result.warnings.some(
       (warning) =>
         warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT" &&
-        warning.noteIds.includes(nid(snapshot, 0))
+        warning.notes.some((note) => note.indexInGroup === 0)
     )
   );
 });
@@ -306,13 +307,13 @@ test("special-event error policy rejects the whole pitch plan before compilation
       contextId: snapshot.contextId,
       specialEventPolicy: "error",
       gestures: [
-        { type: "attack", noteId: nid(snapshot, 0) },
-        { type: "release", noteId: nid(snapshot, 1) },
+        { type: "attack", note: nid(snapshot, 0) },
+        { type: "release", note: nid(snapshot, 1) },
       ],
     }),
     (error) => {
       assert.equal(error.code, "NON_MELODIC_SPECIAL_EVENT_TARGETED");
-      assert.equal(error.details.noteId, nid(snapshot, 1));
+      assert.equal(error.details.noteIndex, 1);
       assert.equal(error.details.semanticRole, "breath_event");
       return true;
     }
@@ -329,7 +330,7 @@ test("release auto direction never infers melody from a following breath event",
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
-    gestures: [{ type: "release", noteId: nid(snapshot, 0), direction: "auto" }],
+    gestures: [{ type: "release", note: nid(snapshot, 0), direction: "auto" }],
   });
   assert.equal(result.gestures[0].params.direction, "down");
 });
@@ -340,7 +341,7 @@ test("the planner never touches the host", async () => {
   const callsBefore = model.hostCalls.length;
   await planner.plan({
     contextId: snapshot.contextId,
-    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
   });
   assert.equal(model.hostCalls.length, callsBefore);
   assert.equal(model.undoCount, 0);
@@ -352,7 +353,7 @@ test("planRef path: planner returns short planRef and executor resolves it", asy
   const snapshot = await snapshotNotes(snapshots);
   const plan = await planner.plan({
     contextId: snapshot.contextId,
-    gestures: [{ type: "attack", noteId: nid(snapshot, 0), depthSemitone: 0.3 }],
+    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
     usePlanRef: true,
   });
   assert.equal(plan.status, "planned");

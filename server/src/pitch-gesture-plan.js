@@ -6,6 +6,7 @@ import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 import { analyzeVocalEventSequence } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
+import { resolveMutationScope, resolveNoteIndex } from "./scope-source.js";
 
 // sv_plan_pitch_gesture —— 把"起音上滑 / 句尾下坠 / 转音 / 颤音"等音乐意图编译成
 // PitchControlCurve 的 add 操作（主计划 P1-C Phase 3，目标写面 sv_patch_pitch_controls）。
@@ -66,7 +67,10 @@ export class PitchGesturePlanService {
     timer.requestCoordinator();
     const warnings = [];
     const loaded = await timer.measure("loadMs", async () => resolvePlanSource(this.store, input));
-    const selection = selectGesturesForPolicy(input.gestures, loaded, input, warnings);
+    // 紧凑 index 引用在此解析成 Context 内被冻结的 fingerprint 引用（§3.5）。
+    // 必须早于策略选择：那一步也要按 Note 判断语义资格。
+    const resolvedGestures = resolveGestureNotes(input.gestures, loaded);
+    const selection = selectGesturesForPolicy(resolvedGestures, loaded, input, warnings);
     const gestures = await timer.measure("buildMs", async () =>
       selection.included.map(({ gesture, requestIndex }) =>
         instantiateGesture(gesture, loaded, input, warnings, requestIndex)
@@ -102,52 +106,13 @@ function resolvePlanSource(store, input) {
       'sv_plan_pitch_gesture needs a range context from sv_snapshot_range with include ["notes"]'
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
-  );
-  // noteId 前缀（去掉 :n:Z）即 occurrenceId；同一计划的所有 noteId 必须同属一个 occurrence。
-  const derived = new Set();
-  for (const noteId of input.referencedNoteIds) {
-    const cut = noteId.lastIndexOf(":n:");
-    if (cut > 0) derived.add(noteId.slice(0, cut));
-  }
-  if (derived.size > 1) {
-    throw codedError("INVALID_NOTE_ID", "all noteIds in one plan must belong to the same range occurrence");
-  }
-  const derivedId = derived.size === 1 ? derived.values().next().value : undefined;
-  if (input.occurrenceId !== undefined && derivedId !== undefined && input.occurrenceId !== derivedId) {
-    throw codedError("INVALID_NOTE_ID", "noteIds belong to a different occurrence than occurrenceId");
-  }
-  const wantedId = input.occurrenceId ?? derivedId;
-  let occurrence = null;
-  if (wantedId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === wantedId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
-    }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'sv_plan_pitch_gesture needs note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId or noteIds"
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
-  }
-  if (!Array.isArray(occurrence.noteFingerprints) || occurrence.noteFingerprints.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'the selected occurrence has no note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  }
+  // 身份解析统一走 scope-source（§3.5）：Context/Occurrence/Note index 的校验与错误
+  // 形状只有一处实现。本函数余下的部分是 planner 自己的派生层。
+  const scope = resolveMutationScope({
+    source: { kind: "snapshot", stored },
+    occurrence: input.occurrence,
+  });
+  const occurrence = scope.occurrence;
   const quarterBlick = stored.context.quarterBlick;
   if (!Number.isSafeInteger(quarterBlick) || quarterBlick <= 0) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
@@ -156,7 +121,7 @@ function resolvePlanSource(store, input) {
   // group-local 坐标：PitchControl 的 position 是相对 NoteGroup 的（不含 occurrence timeOffset）。
   const notes = [...occurrence.noteFingerprints]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
+      fingerprint,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       targetSemitone: fingerprint.pitch + (fingerprint.detuneCents ?? 0) / 100,
@@ -165,16 +130,19 @@ function resolvePlanSource(store, input) {
       durationBlick: fingerprint.durationBlick,
     }))
     .sort((left, right) => left.localOnsetBlick - right.localOnsetBlick);
-  const noteById = new Map(notes.map((note) => [note.noteId, note]));
+  // 派生视图按 fingerprint 引用索引：展开层返回的就是那个引用，因此是 O(1) 查表。
+  const noteByFingerprint = new Map(notes.map((note) => [note.fingerprint, note]));
   const semantics = analyzeVocalEventSequence(notes);
   const semanticEvents = semantics.events;
-  const eventByNoteId = new Map(semanticEvents.map((event) => [event.noteId, event]));
+  // 共享语义模块原样回传调用方给的 note 对象，因此这里用对象身份建索引。
+  const eventByNote = new Map(semanticEvents.map((event) => [event.note, event]));
   return {
     stored,
     occurrence,
     notes,
-    noteById,
-    eventByNoteId,
+    scope,
+    noteByFingerprint,
+    eventByNote,
     semanticIssues: semantics.issues,
     quarterBlick,
     tempoMarks: stored.context.tempoMarks ?? [],
@@ -182,28 +150,57 @@ function resolvePlanSource(store, input) {
   };
 }
 
-function requireNote(loaded, noteId, label) {
-  const note = loaded.noteById.get(noteId);
+function requireNote(loaded, fingerprint, label) {
+  const note = loaded.noteByFingerprint.get(fingerprint);
   if (!note) {
-    throw codedError("UNKNOWN_NOTE_ID", `${label} is not part of the resolved occurrence: ${noteId}`);
+    throw codedError(
+      "INTERNAL_ERROR",
+      `${label}: fingerprint is not in the planner's derived view; scope and derived notes disagree`
+    );
   }
   return note;
+}
+
+// 把 gesture 里的组内 index 解析成 fingerprint 引用。两种失败保持可区分
+// （越界 / 未捕获）由 resolveNoteIndex 负责。
+function resolveGestureNotes(gestures, loaded) {
+  return gestures.map((gesture, index) => {
+    const path = `/gestures/${index}`;
+    if (gesture.type === "transition") {
+      return {
+        ...gesture,
+        fromNote: resolveNoteIndex(loaded.scope, gesture.from, `${path}/from`),
+        toNote: resolveNoteIndex(loaded.scope, gesture.to, `${path}/to`),
+      };
+    }
+    return {
+      ...gesture,
+      note: resolveNoteIndex(loaded.scope, gesture.note, `${path}/note`),
+    };
+  });
 }
 
 function selectGesturesForPolicy(gestures, loaded, input, warnings) {
   const included = [];
   const excluded = [];
-  const referencedNoteIds = new Set(input.referencedNoteIds);
+  // 关联走对象身份，但两侧的"对象"不是同一个：gesture 持有 Context 里的 fingerprint，
+  // 而共享语义模块回传的是本 planner 传进去的派生视图对象。用 noteByFingerprint 把
+  // 前者映射成后者，比较才成立。
+  const referenced = new Set(
+    gestures
+      .flatMap((item) => gestureNotes(item))
+      .map((fingerprint) => loaded.noteByFingerprint.get(fingerprint))
+  );
   for (const issue of loaded.semanticIssues) {
-    if ((issue.noteIds ?? []).some((noteId) => referencedNoteIds.has(noteId))) {
+    if ((issue.notes ?? []).some((note) => referenced.has(note))) {
       warnings.push({ ...issue });
     }
   }
   for (let requestIndex = 0; requestIndex < gestures.length; requestIndex += 1) {
     const gesture = gestures[requestIndex];
     const gestureId = `g${requestIndex}-${gesture.type}`;
-    const targetedEvents = gestureNoteIds(gesture)
-      .map((noteId) => loaded.eventByNoteId.get(noteId))
+    const targetedEvents = gestureNotes(gesture)
+      .map((fingerprint) => loaded.eventByNote.get(loaded.noteByFingerprint.get(fingerprint)))
       .filter(Boolean);
     const nonMelodic = targetedEvents.filter((event) => !event.melodicEligible);
     if (nonMelodic.length === 0 || input.specialEventPolicy === "include") {
@@ -218,7 +215,7 @@ function selectGesturesForPolicy(gestures, loaded, input, warnings) {
       );
       error.details = {
         gestureId,
-        noteId: first.noteId,
+        noteIndex: first.note.indexInGroup,
         semanticRole: first.semanticRole,
         lyrics: first.classification.rawLyrics,
         evidence: first.semanticEvidence,
@@ -230,7 +227,7 @@ function selectGesturesForPolicy(gestures, loaded, input, warnings) {
       warnings.push({
         code: "NON_MELODIC_SPECIAL_EVENT_SKIPPED",
         gestureId,
-        noteId: event.noteId,
+        noteIndex: event.note.indexInGroup,
         semanticRole: event.semanticRole,
         lyrics: event.classification.rawLyrics,
         evidence: event.semanticEvidence,
@@ -241,7 +238,7 @@ function selectGesturesForPolicy(gestures, loaded, input, warnings) {
 
   const uniqueEvents = new Map();
   for (const item of excluded) {
-    for (const event of item.events) uniqueEvents.set(event.noteId, event);
+    for (const event of item.events) uniqueEvents.set(event.note, event);
   }
   const byRole = Object.create(null);
   for (const event of uniqueEvents.values()) {
@@ -257,10 +254,11 @@ function selectGesturesForPolicy(gestures, loaded, input, warnings) {
   };
 }
 
-function gestureNoteIds(gesture) {
-  return ["noteId", "fromNoteId", "toNoteId"]
+// gesture 携带的 Note 引用（fingerprint 对象），用于语义策略判断。
+function gestureNotes(gesture) {
+  return ["note", "fromNote", "toNote"]
     .map((key) => gesture[key])
-    .filter((noteId) => typeof noteId === "string");
+    .filter((value) => value !== undefined && value !== null);
 }
 
 // ---------- 时间量解析：秒 / 音符比例 / quarter，统一成整数 BLICK ----------
@@ -322,8 +320,8 @@ function instantiateGesture(gesture, loaded, input, warnings, index) {
 //   samplePositions()->[blick] }。evaluate 的值被保证落在 [-depth, depth]（有界不超调）。
 
 function instantiateTransition(gesture, loaded, input, meta) {
-  const fromNote = requireNote(loaded, gesture.fromNoteId, `${meta.gestureId}.fromNoteId`);
-  const toNote = requireNote(loaded, gesture.toNoteId, `${meta.gestureId}.toNoteId`);
+  const fromNote = requireNote(loaded, gesture.fromNote, `${meta.gestureId}.fromNote`);
+  const toNote = requireNote(loaded, gesture.toNote, `${meta.gestureId}.toNote`);
   if (toNote.localOnsetBlick !== fromNote.localEndBlick) {
     throw codedError(
       "TRANSITION_NOT_ADJACENT",
@@ -348,7 +346,7 @@ function instantiateTransition(gesture, loaded, input, meta) {
   return {
     ...meta,
     type: "transition",
-    noteIds: [fromNote.noteId, toNote.noteId],
+    notes: [fromNote.fingerprint, toNote.fingerprint],
     anchorLocalBlick: boundary,
     anchorSemitone: gesture.anchorSemitone ?? toNote.targetSemitone,
     spanFromBlick: from,
@@ -370,7 +368,7 @@ function instantiateTransition(gesture, loaded, input, meta) {
 }
 
 function instantiateAttack(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.noteId, `${meta.gestureId}.noteId`);
+  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
   const requestedDepth = gesture.depthSemitone ?? 0.3;
   const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
   const direction = gesture.direction ?? "up";
@@ -388,7 +386,7 @@ function instantiateAttack(gesture, loaded, input, meta) {
   return {
     ...meta,
     type: "attack",
-    noteIds: [note.noteId],
+    notes: [note.fingerprint],
     anchorLocalBlick: from,
     anchorSemitone: gesture.anchorSemitone ?? note.targetSemitone,
     spanFromBlick: from,
@@ -404,14 +402,14 @@ function instantiateAttack(gesture, loaded, input, meta) {
 }
 
 function instantiateRelease(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.noteId, `${meta.gestureId}.noteId`);
+  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
   const requestedDepth = gesture.depthSemitone ?? 0.4;
   const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
   let direction = gesture.direction ?? "down";
   if (direction === "auto") {
     // `br` 和无效 continuation 的名义 MIDI 不是旋律证据；遇到这类边界保持默认下坠。
-    const next = loaded.notes[loaded.notes.findIndex((candidate) => candidate.noteId === note.noteId) + 1];
-    const nextEvent = next ? loaded.eventByNoteId.get(next.noteId) : null;
+    const next = loaded.notes[loaded.notes.indexOf(note) + 1];
+    const nextEvent = next ? loaded.eventByNote.get(next) : null;
     direction =
       next && nextEvent?.melodicEligible && next.targetSemitone > note.targetSemitone
         ? "up"
@@ -428,7 +426,7 @@ function instantiateRelease(gesture, loaded, input, meta) {
   return {
     ...meta,
     type: "release",
-    noteIds: [note.noteId],
+    notes: [note.fingerprint],
     anchorLocalBlick: to,
     anchorSemitone: gesture.anchorSemitone ?? note.targetSemitone,
     spanFromBlick: from,
@@ -444,7 +442,7 @@ function instantiateRelease(gesture, loaded, input, meta) {
 }
 
 function instantiateVibrato(gesture, loaded, input, meta, warnings) {
-  const note = requireNote(loaded, gesture.noteId, `${meta.gestureId}.noteId`);
+  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
   if (note.durationBlick < quartersToBlick(input.constraints.minVibratoQuarter, loaded.quarterBlick)) {
     throw codedError(
       "CONSTRAINT_VIOLATION",
@@ -491,7 +489,7 @@ function instantiateVibrato(gesture, loaded, input, meta, warnings) {
   return {
     ...meta,
     type: "vibrato",
-    noteIds: [note.noteId],
+    notes: [note.fingerprint],
     anchorLocalBlick: from,
     anchorSemitone: gesture.anchorSemitone ?? note.targetSemitone,
     spanFromBlick: from,
@@ -592,7 +590,7 @@ function compileOperations(gestures, loaded, input, warnings) {
     operations.push({
       gestureId: gesture.gestureId,
       type: gesture.type,
-      noteIds: gesture.noteIds,
+      noteIndexes: gesture.notes.map((fingerprint) => fingerprint.indexInGroup),
       control: {
         kind: "curve",
         anchorPositionBlick: gesture.anchorLocalBlick,
@@ -652,15 +650,14 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   };
   // 音高变化锚点音符的原始指纹：随 apply 交给事务核，写入前逐条 verifyAnchoredNote。
   const fingerprintById = new Map(
-    (loaded.occurrence.noteFingerprints ?? []).map((fingerprint) => [fingerprint.noteId, fingerprint])
+    (loaded.occurrence.noteFingerprints ?? []).map((fingerprint) => [fingerprint, fingerprint])
   );
-  const anchorNoteIds = new Set();
-  for (const gesture of gestures) for (const noteId of gesture.noteIds) anchorNoteIds.add(noteId);
-  const expectedNotes = [...anchorNoteIds]
-    .map((noteId) => fingerprintById.get(noteId))
+  const anchorNotes = new Set();
+  for (const gesture of gestures) for (const fingerprint of gesture.notes) anchorNotes.add(fingerprint);
+  const expectedNotes = [...anchorNotes]
+    .map((fingerprint) => fingerprint)
     .filter(Boolean)
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       onsetBlick: fingerprint.onsetBlick,
       durationBlick: fingerprint.durationBlick,
@@ -704,7 +701,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   const publicGestures = gestures.map((gesture) => ({
     gestureId: gesture.gestureId,
     type: gesture.type,
-    noteIds: gesture.noteIds,
+    noteIndexes: gesture.notes.map((fingerprint) => fingerprint.indexInGroup),
     anchor: {
       groupLocalBlick: gesture.anchorLocalBlick,
       occurrenceAbsoluteBlick: gesture.anchorLocalBlick + loaded.timeOffsetBlick,
@@ -753,8 +750,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
           expectedTimeOffsetBlick: loaded.timeOffsetBlick,
           fingerprints: { expectedNotes: applyRequests[0].arguments.target?.expectedNotes ?? [] },
           contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
-            noteIds: (applyRequests[0].arguments.target?.expectedNotes ?? []).map(
-              (fingerprint) => fingerprint.noteId
+            noteIndexes: (applyRequests[0].arguments.target?.expectedNotes ?? []).map(
+              (fingerprint) => fingerprint.indexInGroup
             ),
           }),
       });
@@ -867,21 +864,15 @@ function normalizePlanRequest(request) {
     );
   }
   const gestures = request.gestures.map((gesture, index) => normalizeGesture(gesture, index));
-  const referencedNoteIds = [];
-  for (const gesture of gestures) {
-    for (const key of ["noteId", "fromNoteId", "toNoteId"]) {
-      if (typeof gesture[key] === "string") referencedNoteIds.push(gesture[key]);
-    }
-  }
   return {
     contextId: request.contextId,
+    occurrence: request.occurrence,
     occurrenceId: request.occurrenceId,
     gestures,
     specialEventPolicy,
     constraints: normalizeConstraints(request.constraints),
     sampling: normalizeSampling(request.sampling),
     responseMode,
-    referencedNoteIds,
     usePlanRef: request.usePlanRef !== false,
   };
 }
@@ -894,9 +885,9 @@ function normalizeGesture(value, index) {
   }
   switch (value.type) {
     case "transition":
-      assertKnownKeys(value, ["type", "fromNoteId", "toNoteId", "width", "depthSemitone", "shape", "anchorSemitone"], label);
-      requireNoteIdField(value, "fromNoteId", label);
-      requireNoteIdField(value, "toNoteId", label);
+      assertKnownKeys(value, ["type", "from", "to", "width", "depthSemitone", "shape", "anchorSemitone"], label);
+      requireNoteIndexField(value, "from", label);
+      requireNoteIndexField(value, "to", label);
       normalizeDurationField(value.width, `${label}.width`);
       checkNumber(value.depthSemitone, 0.01, 24, `${label}.depthSemitone`);
       checkEnum(value.shape, PITCH_GESTURE_SHAPES, `${label}.shape`);
@@ -904,8 +895,8 @@ function normalizeGesture(value, index) {
       return { ...value };
     case "attack":
     case "release":
-      assertKnownKeys(value, ["type", "noteId", "direction", "length", "depthSemitone", "shape", "anchorSemitone"], label);
-      requireNoteIdField(value, "noteId", label);
+      assertKnownKeys(value, ["type", "note", "direction", "length", "depthSemitone", "shape", "anchorSemitone"], label);
+      requireNoteIndexField(value, "note", label);
       checkEnum(value.direction, PITCH_GESTURE_DIRECTIONS, `${label}.direction`);
       normalizeDurationField(value.length, `${label}.length`);
       checkNumber(value.depthSemitone, 0.01, 24, `${label}.depthSemitone`);
@@ -915,10 +906,10 @@ function normalizeGesture(value, index) {
     case "vibrato":
       assertKnownKeys(
         value,
-        ["type", "noteId", "startSeconds", "fadeInSeconds", "fadeOutSeconds", "rateHz", "depthSemitone", "phase", "anchorSemitone"],
+        ["type", "note", "startSeconds", "fadeInSeconds", "fadeOutSeconds", "rateHz", "depthSemitone", "phase", "anchorSemitone"],
         label
       );
-      requireNoteIdField(value, "noteId", label);
+      requireNoteIndexField(value, "note", label);
       checkNumber(value.startSeconds, 0, 30, `${label}.startSeconds`);
       checkNumber(value.fadeInSeconds, 0, 30, `${label}.fadeInSeconds`);
       checkNumber(value.fadeOutSeconds, 0, 30, `${label}.fadeOutSeconds`);
@@ -997,9 +988,12 @@ function appendOnce(warnings, warning) {
   if (!warnings.some((item) => item.code === warning.code)) warnings.push(warning);
 }
 
-function requireNoteIdField(value, field, label) {
-  if (typeof value[field] !== "string" || value[field].length === 0) {
-    throw codedError("INVALID_ARGUMENTS", `${label}.${field} must be a non-empty noteId string`);
+function requireNoteIndexField(value, field, label) {
+  if (!Number.isSafeInteger(value[field]) || value[field] < 0) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `${label}.${field} must be a non-negative note index in the group`
+    );
   }
 }
 

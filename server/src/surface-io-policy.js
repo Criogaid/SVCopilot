@@ -291,9 +291,8 @@ export const BANNED_REQUEST_FIELDS = Object.freeze(["contextSnapshot", "detailRe
  * 与 root-envelope 的 LEGACY 表同理：登记让「还欠多少」可数，且门禁会拒绝过期条目。
  */
 export const LEGACY_REQUEST_FIELDS = Object.freeze({
+  // 仅 sv_edit_phrase 与 sv_restructure_notes 还在用（它们那一对尚未迁移）。
   noteId: "§3.2：改为 NoteGroup 内 0-based index（B2）",
-  fromNoteId: "§3.2：改为 from/to index（B2）",
-  toNoteId: "§3.2：改为 from/to index（B2）",
   occurrenceId: "§3.1：改为 Context 内 occurrence ordinal（B2）",
   dryRun: "§10.6：统一为 action: dry_run | commit（B2）",
   responseMode: "§3.6：响应形状由契约规定，不由调用方选择（B2）",

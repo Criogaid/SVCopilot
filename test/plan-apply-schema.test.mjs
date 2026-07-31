@@ -394,8 +394,8 @@ async function buildPlans() {
     plan: await new PitchGesturePlanService({ store: gestureStore, now: () => 2000 }).plan({
       contextId: gestureCtx.stored.contextId,
       gestures: [
-        { type: "attack", noteId: `${gestureCtx.occurrenceId}:n:0`, depthSemitone: 0.3 },
-        { type: "transition", fromNoteId: `${gestureCtx.occurrenceId}:n:0`, toNoteId: `${gestureCtx.occurrenceId}:n:1`, width: { quarters: 0.5 } },
+        { type: "attack", note: 0, depthSemitone: 0.3 },
+        { type: "transition", from: 0, to: 1, width: { quarters: 0.5 } },
       ],
     }),
     legacyField: "applyRequests",

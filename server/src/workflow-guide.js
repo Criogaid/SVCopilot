@@ -595,7 +595,7 @@ const RECIPES = [
         arguments: {
           contextId: EXAMPLE.contextId,
           gestures: [
-            { type: "attack", noteId: EXAMPLE.noteId, depthSemitone: 0.3, direction: "up" },
+            { type: "attack", note: EXAMPLE.noteIndex, depthSemitone: 0.3, direction: "up" },
           ],
         },
         acceptable: ["ok", "status planned"],

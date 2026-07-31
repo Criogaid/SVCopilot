@@ -461,7 +461,7 @@ async function verifyAnchoredNote(scope, group, expected) {
     inferredType: "Note",
   });
   if (!note?.__handle__) {
-    throw codedError("STALE_CONTEXT", `anchored note ${expected.noteId} no longer exists`);
+    throw codedError("STALE_CONTEXT", `anchored note ${expected.indexInGroup} no longer exists`);
   }
   const observed = {
     indexInGroup: (await scope.call(note, "getIndexInParent")) - 1,
@@ -486,7 +486,7 @@ async function verifyAnchoredNote(scope, group, expected) {
   if (JSON.stringify(observed) !== JSON.stringify(comparableExpected)) {
     const error = codedError(
       "STALE_CONTEXT",
-      `anchored note ${expected.noteId} changed after snapshot`
+      `anchored note ${expected.indexInGroup} changed after snapshot`
     );
     error.expectedFingerprint = comparableExpected;
     error.observedFingerprint = observed;
@@ -1238,7 +1238,6 @@ function normalizeExpectedNotes(value) {
       }
     }
     return {
-      noteId: typeof note.noteId === "string" ? note.noteId : `idx:${note.indexInGroup}`,
       indexInGroup: note.indexInGroup,
       onsetBlick: note.onsetBlick,
       durationBlick: note.durationBlick,
