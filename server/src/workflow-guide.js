@@ -5,7 +5,7 @@
 //   指南描述"怎么组合工具"，任何具体工程事实仍必须由 sv_snapshot_range 观测。
 // - 每个 step 的 arguments 模板必须逐字通过对应工具公布的 inputSchema
 //   （test/workflow-guide.test.mjs 用真实服务器 tools/list 的 schema 校验）。
-//   因此模板里的 contextId/noteId 等占位符使用形如 "ctx_EXAMPLE" 的合法字符串，
+//   因此模板里的 contextId 等占位符使用形如 "ctx_EXAMPLE" 的合法字符串，
 //   而不是 "<contextId>" 之类会破坏语义的伪值——它们必须是 schema 合法的示例值。
 // - 状态词沿用工具真实返回值：succeeded / no_change / rolled_back / rollback_failed /
 //   partial / outcome_unknown / failed，绝不发明新状态。
@@ -29,8 +29,6 @@ const EXAMPLE = {
   afterContextId: "c_EXAMPLE_AFTER",
   occurrenceId: "c_EXAMPLE:t:0:r:0",
   targetOccurrenceId: "c_EXAMPLE:t:1:r:0",
-  noteId: "c_EXAMPLE:t:0:r:0:n:0",
-  secondNoteId: "c_EXAMPLE:t:0:r:0:n:1",
   // 已迁移到 fingerprint 身份的 operation 用组内 index 引用音符（§3.1）。
   noteIndex: 0,
   secondNoteIndex: 1,
@@ -87,14 +85,14 @@ function projectNeed(entry) {
 const GLOBAL_RULES = {
   identity: [
     "All indices are 0-based. Bars and beats in sv_snapshot_range scope are 1-based.",
-    "noteId/occurrenceId are only valid inside the contextId that issued them. Never hand-build them and never carry them across contexts.",
+    "Note indexes and occurrenceId are only valid inside the contextId that issued them. Never carry them across contexts.",
     "snapshotToken is a content hash, not a host revision. sinceToken still reads the host before answering no_change.",
   ],
   contextLifecycle: [
     "A successful note, structure, lyric, or sv_edit_phrase write DELETES its contextId. Re-run sv_snapshot_range before any further edit or analysis.",
     "A successful sv_patch_parameter_curves write does NOT delete the contextId, but positions may have drifted if a human edited notes; re-snapshot before analysis that must reflect the new state.",
     "Contexts also expire on their own TTL (see limits.snapshotContextTtlMs in svcopilot://capabilities) and on host reconnection (epoch change).",
-    "On STALE_CONTEXT or UNKNOWN_CONTEXT: re-run sv_snapshot_range and re-run the planner with the same options. Never retry the old request and never reuse old noteIds.",
+    "On STALE_CONTEXT or UNKNOWN_CONTEXT: re-run sv_snapshot_range and re-run the planner with the same options. Never retry the old request and never reuse note indexes from the old context.",
   ],
   planHandoff: [
     "Every planner (sv_plan_expression, sv_align_lyrics, sv_quantize_notes, sv_generate_harmony) returns the SAME apply envelope. Read apply.tool, submit apply.arguments verbatim to that tool. You never need to parse planner-specific field names.",
@@ -326,7 +324,7 @@ const RECIPES = [
           "metricalRoles, chordCandidates, cadence, and tensionResolution are opt-in and all declare evidenceScope:\"melody_only\": only ONE melodic line was observed, so a chord candidate is a pitch set COMPATIBLE with the melody, never an observation of the real accompaniment. Never state a chord progression as fact from this alone.",
           "Windows and phrase endings flagged ambiguous carry several ranked candidates — report the alternatives, not just the top score. The runner-up gap is a ranking margin, not a probability.",
           "Without meter marks, metricalRoles and chordCandidates report not_captured rather than assuming 4/4.",
-          "tensionResolution names BOTH noteIds plus the actual semitone motion; a suspension-like descent is only a melodic contour, since the accompaniment that would make it a real suspension is unobservable.",
+          "tensionResolution names BOTH note indexes plus the actual semitone motion; a suspension-like descent is only a melodic contour, since the accompaniment that would make it a real suspension is unobservable.",
         ],
       },
       {

@@ -254,7 +254,6 @@ const CURVE_TARGET_SCHEMA = {
         type: "object",
         additionalProperties: false,
         properties: {
-          noteId: { type: "string", minLength: 1 },
           indexInGroup: { type: "integer", minimum: 0 },
           onsetBlick: { type: "integer", minimum: 0 },
           durationBlick: { type: "integer", minimum: 0 },
@@ -917,7 +916,7 @@ export const TOOLS = [
           type: "string",
           minLength: 1,
           description:
-            "Range contexts only: the occurrence to edit. May be omitted when the noteIds identify one occurrence or exactly one vocal occurrence exists.",
+            "Range contexts only: the occurrence to edit. May be omitted when exactly one vocal occurrence exists.",
         },
         allowSharedTargetMutation: {
           type: "boolean",
