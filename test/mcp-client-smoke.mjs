@@ -1234,12 +1234,12 @@ try {
             range: { fromBlick: 0, toBlick: 2 * Q },
             points: [
               {
-                anchor: { noteId: rangeSnapshot.data.notes[0].id, position: "onset" },
+                anchor: { note: 0, position: "onset" },
                 value: 1,
               },
               {
                 anchor: {
-                  noteId: rangeSnapshot.data.notes[0].id,
+                  note: 0,
                   position: "ratio",
                   ratio: 0.5,
                 },
@@ -1247,7 +1247,7 @@ try {
               },
               {
                 anchor: {
-                  noteId: rangeSnapshot.data.notes[1].id,
+                  note: 1,
                   position: { ratio: 0.5 },
                 },
                 value: 2,

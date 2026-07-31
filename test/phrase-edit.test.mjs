@@ -359,7 +359,7 @@ function fullRequest(contextId, occurrenceId, overrides = {}) {
         mode: "replace",
         range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
         points: [
-          { anchor: { noteId: `${occurrenceId}:n:0`, position: "onset" }, value: 2 },
+          { anchor: { note: 0, position: "onset" }, value: 2 },
         ],
       },
     ],

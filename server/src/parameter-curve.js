@@ -758,8 +758,8 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
       continue;
     }
     if (point.kind === "gap") {
-      const after = findAnchorFingerprint(target, point.gap.afterNoteId);
-      const before = findAnchorFingerprint(target, point.gap.beforeNoteId);
+      const after = findAnchorFingerprint(target, point.gap.afterNote);
+      const before = findAnchorFingerprint(target, point.gap.beforeNote);
       if (after.indexInGroup + 1 !== before.indexInGroup) {
         throw codedError("INVALID_NOTE_GAP", "gap anchors must identify adjacent notes in order");
       }
@@ -789,7 +789,7 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
       });
       continue;
     }
-    const fingerprint = findAnchorFingerprint(target, point.anchor.noteId);
+    const fingerprint = findAnchorFingerprint(target, point.anchor.note);
     await verifyAnchoredNote(capture, target, fingerprint);
     const localBase = resolveIntervalPosition(
       fingerprint.onsetBlick,
@@ -831,12 +831,24 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
   return resolved;
 }
 
-function findAnchorFingerprint(target, noteId) {
-  const fingerprint = target.contextOccurrence.noteFingerprints.find((item) => item.noteId === noteId);
+// 锚点解析按组内 index。两种失败必须分开（§3.2 规则 5）：越界靠重试永远不会成功，
+// 未捕获则需要重新捕获更宽的范围——合并成一个码会让模型分不清该怎么办。
+function findAnchorFingerprint(target, noteIndex) {
+  const fingerprints = target.contextOccurrence.noteFingerprints;
+  const fingerprint = fingerprints.find((item) => item.indexInGroup === noteIndex);
   if (!fingerprint) {
+    const groupNoteCount = target.contextOccurrence.groupNoteCount ?? fingerprints.length;
+    if (noteIndex >= groupNoteCount) {
+      throw codedError(
+        "NOTE_INDEX_OUT_OF_RANGE",
+        `note index ${noteIndex} is outside the note group`,
+        { got: noteIndex, max: groupNoteCount - 1 }
+      );
+    }
     throw codedError(
-      "UNKNOWN_NOTE_ANCHOR",
-      `noteId is not part of occurrence ${target.contextOccurrence.occurrenceId}`
+      "NOTE_NOT_IN_CONTEXT",
+      `note ${noteIndex} exists but was not captured in occurrence ${target.contextOccurrence.occurrenceId}`,
+      { got: noteIndex }
     );
   }
   return fingerprint;
@@ -867,7 +879,7 @@ async function ensureLiveMusicalContext(capture, target) {
 
 async function verifyAnchoredNote(capture, target, expected) {
   // 缓存只省略对同一音符的重复宿主读取（按 indexInGroup 键），指纹比对每次调用都必须执行：
-  // 若命中缓存即返回，同一 noteId 的第二份不同指纹会搭首份验证的车绕过比对（复审 R-P2）。
+  // 若命中缓存即返回，同一 index 的第二份不同指纹会搭首份验证的车绕过比对（复审 R-P2）。
   target.anchorObservedByIndex ??= new Map();
   let observed = target.anchorObservedByIndex.get(expected.indexInGroup);
   if (!observed) {
@@ -875,7 +887,7 @@ async function verifyAnchoredNote(capture, target, expected) {
       inferredType: "Note",
     });
     if (!note?.__handle__) {
-      throw codedError("STALE_CONTEXT", `anchored note ${expected.noteId} no longer exists`);
+      throw codedError("STALE_CONTEXT", `anchored note ${expected.indexInGroup} no longer exists`);
     }
     observed = {
       indexInGroup: (await capture.call(note, "getIndexInParent")) - 1,
@@ -900,7 +912,10 @@ async function verifyAnchoredNote(capture, target, expected) {
     detuneCents: expected.detuneCents,
   };
   if (JSON.stringify(observed) !== JSON.stringify(comparableExpected)) {
-    const error = codedError("STALE_CONTEXT", `anchored note ${expected.noteId} changed after snapshot`);
+    const error = codedError(
+      "STALE_CONTEXT",
+      `anchored note ${expected.indexInGroup} changed after snapshot`
+    );
     error.expectedFingerprint = comparableExpected;
     error.observedFingerprint = observed;
     throw error;
@@ -2034,10 +2049,15 @@ function normalizeCurvePoint(point, index) {
   return { kind: "anchor", anchor: normalizeNoteAnchor(point.anchor, index), value: point.value };
 }
 
+// Note/gap 语义位置的身份改为组内 index（§B2 步骤 7：只替换身份，不缩减坐标语义）。
+// position/offset/ratio 的含义完全不变——变的只是"指哪个音符"的写法。
 function normalizeNoteAnchor(anchor, index) {
   const label = `points[${index}].anchor`;
-  if (!isRecord(anchor) || typeof anchor.noteId !== "string" || !anchor.noteId) {
-    throw codedError("INVALID_ARGUMENTS", `${label}.noteId must be a non-empty string`);
+  if (!isRecord(anchor) || !Number.isSafeInteger(anchor.note) || anchor.note < 0) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `${label}.note must be a non-negative note index in the group`
+    );
   }
   const position = normalizeRelativePosition(
     anchor.position === "ratio" ? { ratio: anchor.ratio } : anchor.position,
@@ -2045,24 +2065,24 @@ function normalizeNoteAnchor(anchor, index) {
     ["onset", "center", "end"]
   );
   const offset = normalizeAnchorOffset(anchor.offset, label);
-  return { noteId: anchor.noteId, position, offset };
+  return { note: anchor.note, position, offset };
 }
 
 function normalizeNoteGap(gap, index) {
   const label = `points[${index}].gap`;
   if (
     !isRecord(gap) ||
-    typeof gap.afterNoteId !== "string" ||
-    !gap.afterNoteId ||
-    typeof gap.beforeNoteId !== "string" ||
-    !gap.beforeNoteId ||
-    gap.afterNoteId === gap.beforeNoteId
+    !Number.isSafeInteger(gap.afterNote) ||
+    gap.afterNote < 0 ||
+    !Number.isSafeInteger(gap.beforeNote) ||
+    gap.beforeNote < 0 ||
+    gap.afterNote === gap.beforeNote
   ) {
-    throw codedError("INVALID_ARGUMENTS", `${label} requires two distinct note IDs`);
+    throw codedError("INVALID_ARGUMENTS", `${label} requires two distinct note indexes`);
   }
   return {
-    afterNoteId: gap.afterNoteId,
-    beforeNoteId: gap.beforeNoteId,
+    afterNote: gap.afterNote,
+    beforeNote: gap.beforeNote,
     position: normalizeRelativePosition(
       gap.position === "ratio" ? { ratio: gap.ratio } : gap.position,
       label,
@@ -2152,7 +2172,6 @@ function normalizeExpectedNotes(value) {
       }
     }
     return {
-      noteId: typeof note.noteId === "string" ? note.noteId : `idx:${note.indexInGroup}`,
       indexInGroup: note.indexInGroup,
       onsetBlick: note.onsetBlick,
       durationBlick: note.durationBlick,
@@ -2163,15 +2182,9 @@ function normalizeExpectedNotes(value) {
       detuneCents: note.detuneCents,
     };
   }).map((note, index, all) => {
-    // 同一 noteId/indexInGroup 出现两份指纹是自相矛盾的请求：两份不可能同时为真，
+    // 同一 indexInGroup 出现两份指纹是自相矛盾的请求：两份不可能同时为真，
     // 且重复项会依赖"逐条验证互不影响"的实现细节——在归一化边界直接拒绝。
     for (let prior = 0; prior < index; prior += 1) {
-      if (all[prior].noteId === note.noteId) {
-        throw codedError(
-          "INVALID_ARGUMENTS",
-          `target.expectedNotes contains duplicate noteId ${note.noteId}; each anchored note may appear once`
-        );
-      }
       if (all[prior].indexInGroup === note.indexInGroup) {
         throw codedError(
           "INVALID_ARGUMENTS",

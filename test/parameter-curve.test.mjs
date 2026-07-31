@@ -1277,7 +1277,7 @@ test("range context resolves note anchors and musical positions in batch dry-run
         points: [
           {
             anchor: {
-              noteId: `${occurrenceId}:n:0`,
+              note: 0,
               position: "center",
               offset: { unit: "quarter", value: 0.25 },
             },
@@ -1312,7 +1312,7 @@ test("range context resolves semantic read bounds without exposing raw BLICK inp
     parameter: "loudness",
     range: {
       from: { musicalPosition: { bar: 2, beat: 1 } },
-      to: { anchor: { noteId, position: "end" } },
+      to: { anchor: { note: 0, position: "end" } },
     },
   });
   assert.equal(result.ok, true);
@@ -1332,10 +1332,10 @@ test("a one-curve dry-run reports semantic range and resolved point evidence", a
     parameter: "loudness",
     mode: "replace",
     range: {
-      from: { anchor: { noteId, position: "onset" } },
-      to: { anchor: { noteId, position: "end" } },
+      from: { anchor: { note: 0, position: "onset" } },
+      to: { anchor: { note: 0, position: "end" } },
     },
-    points: [{ anchor: { noteId, position: "center" }, value: 1 }],
+    points: [{ anchor: { note: 0, position: "center" }, value: 1 }],
     dryRun: true,
   }));
   assert.equal(result.ok, true);
@@ -1360,8 +1360,8 @@ test("semantic ranges support snapshot boundaries and adjacent-note gap anchors"
         points: [
           {
             gap: {
-              afterNoteId: `${occurrenceId}:n:0`,
-              beforeNoteId: `${occurrenceId}:n:1`,
+              afterNote: 0,
+              beforeNote: 1,
               position: "center",
             },
             value: 1,
@@ -1411,7 +1411,7 @@ test("semantic curve points reject duplicate resolved positions before writing",
         mode: "replace",
         range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
         points: [
-          { anchor: { noteId: `${occurrenceId}:n:0`, position: "onset" }, value: 1 },
+          { anchor: { note: 0, position: "onset" }, value: 1 },
           { musicalPosition: { bar: 2, beat: 1 }, value: 2 },
         ],
       },
@@ -1436,7 +1436,7 @@ test("note anchors reject stale fingerprints", async () => {
         mode: "replace",
         range: { coordinate: "local", fromBlick: 0, toBlick: 2 * Q },
         points: [
-          { anchor: { noteId: `${occurrenceId}:n:0`, position: "onset" }, value: 1 },
+          { anchor: { note: 0, position: "onset" }, value: 1 },
         ],
       },
     ],
@@ -1518,12 +1518,12 @@ test("partial expectedNotes fingerprints fail INVALID_ARGUMENTS, not a false STA
   assert.equal(model.undoCount, 0);
 });
 
-test("target.expectedNotes rejects duplicate noteId entries before the fingerprint cache can hide a conflict", async () => {
+test("target.expectedNotes rejects duplicate note indexes before the fingerprint cache can hide a conflict", async () => {
   const model = createCurveModel();
   const { service, contextId, occurrenceId, noteStates } = createRangeContextService(model);
   const duplicateIdentity = {
     ...noteStates[1],
-    noteId: `${occurrenceId}:n:0`,
+    indexInGroup: 0,
   };
   const result = await service.patchCurves({
     target: {
@@ -1546,7 +1546,7 @@ test("target.expectedNotes rejects duplicate noteId entries before the fingerpri
   });
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "INVALID_ARGUMENTS");
-  assert.match(result.error.message, /duplicate.*noteId/i);
+  assert.match(result.error.message, /duplicate.*indexInGroup/i);
   assert.equal(model.undoCount, 0);
 });
 

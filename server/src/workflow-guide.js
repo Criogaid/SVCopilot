@@ -31,6 +31,9 @@ const EXAMPLE = {
   targetOccurrenceId: "c_EXAMPLE:t:1:r:0",
   noteId: "c_EXAMPLE:t:0:r:0:n:0",
   secondNoteId: "c_EXAMPLE:t:0:r:0:n:1",
+  // 已迁移到 fingerprint 身份的 operation 用组内 index 引用音符（§3.1）。
+  noteIndex: 0,
+  secondNoteIndex: 1,
   auditionId: "aud_EXAMPLE",
 };
 
@@ -479,13 +482,12 @@ const RECIPES = [
         arguments: {
           contextId: EXAMPLE.contextId,
           gestures: [
-            { type: "scoop", noteId: EXAMPLE.noteId, depthCents: 40, lengthQuarter: 0.2 },
+            { type: "scoop", targets: [[EXAMPLE.noteIndex, 40]], lengthQuarter: 0.2 },
             {
               type: "hairpin",
-              fromNoteId: EXAMPLE.noteId,
-              toNoteId: EXAMPLE.secondNoteId,
-              parameter: "loudness",
-              amount: 3,
+              from: EXAMPLE.noteIndex,
+              to: EXAMPLE.secondNoteIndex,
+              amounts: { loudness: 3 },
             },
           ],
         },
@@ -508,10 +510,10 @@ const RECIPES = [
             {
               parameter: "pitchDelta",
               mode: "replace",
-              range: { from: { anchor: { noteId: EXAMPLE.noteId, position: "onset" } }, to: { anchor: { noteId: EXAMPLE.noteId, position: "center" } } },
+              range: { from: { anchor: { note: EXAMPLE.noteIndex, position: "onset" } }, to: { anchor: { note: EXAMPLE.noteIndex, position: "center" } } },
               points: [
-                { anchor: { noteId: EXAMPLE.noteId, position: "onset" }, value: -40 },
-                { anchor: { noteId: EXAMPLE.noteId, position: "center" }, value: 0 },
+                { anchor: { note: EXAMPLE.noteIndex, position: "onset" }, value: -40 },
+                { anchor: { note: EXAMPLE.noteIndex, position: "center" }, value: 0 },
               ],
             },
           ],

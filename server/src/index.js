@@ -360,11 +360,30 @@ const PITCH_CONTROL_SET_SCHEMA = {
     },
   },
 };
+// scoop 与 fall 的 targets 形状与语义都相同：[noteIndex, depthCents]。
+// 共享同一个对象而不是各写一份字面量——schema-defs 按对象身份提取 $defs，
+// 两份结构相同的独立字面量不会被合并（那是刻意的：结构相等不代表语义相同）。
+const GESTURE_DEPTH_TARGETS_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  maxItems: 512,
+  items: {
+    type: "array",
+    minItems: 2,
+    maxItems: 2,
+    items: { type: "number" },
+    description: "[noteIndex, depthCents]",
+  },
+};
 const NOTE_ANCHOR_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    noteId: { type: "string", minLength: 1 },
+    note: {
+      type: "integer",
+      minimum: 0,
+      description: "0-based note index within the NoteGroup (from the snapshot).",
+    },
     position: {
       enum: ["onset", "center", "end", "ratio"],
       description: 'Use "ratio" together with the sibling ratio field.',
@@ -380,14 +399,14 @@ const NOTE_ANCHOR_SCHEMA = {
       required: ["unit", "value"],
     },
   },
-  required: ["noteId", "position"],
+  required: ["note", "position"],
 };
 const NOTE_GAP_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    afterNoteId: { type: "string", minLength: 1 },
-    beforeNoteId: { type: "string", minLength: 1 },
+    afterNote: { type: "integer", minimum: 0 },
+    beforeNote: { type: "integer", minimum: 0 },
     position: {
       enum: ["start", "center", "end", "ratio"],
       description: 'Use "ratio" together with the sibling ratio field.',
@@ -403,7 +422,7 @@ const NOTE_GAP_SCHEMA = {
       required: ["unit", "value"],
     },
   },
-  required: ["afterNoteId", "beforeNoteId", "position"],
+  required: ["afterNote", "beforeNote", "position"],
 };
 const MUSICAL_POSITION_SCHEMA = {
   type: "object",
@@ -1223,15 +1242,61 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range captured with notes.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional when noteIds imply it or the context has one occurrence with notes.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal within the context. Optional when the context has exactly one occurrence.",
+        },
+        defaults: {
+          type: "object",
+          additionalProperties: false,
+          description:
+            "Per-gesture-type defaults, so repeated gestures need not restate shared parameters. A gesture own field always wins. Only fields the gesture type declares are accepted, so a misspelled key is rejected rather than silently ignored.",
+          properties: {
+            vibrato: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                surface: { enum: ["pitchDelta", "vibratoEnv"] },
+                rateHz: { type: "number", minimum: 0.5, maximum: 12 },
+                onsetDelayQuarter: { type: "number", minimum: 0, maximum: 16 },
+                rampQuarter: { type: "number", minimum: 0, maximum: 16 },
+                fadeOutQuarter: { type: "number", minimum: 0, maximum: 16 },
+                level: { type: "number", minimum: 0, maximum: 2 },
+              },
+            },
+            scoop: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                lengthQuarter: { type: "number", minimum: 0.01, maximum: 16 },
+                shapePower: { type: "number", minimum: 0.5, maximum: 8 },
+              },
+            },
+            fall: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                lengthQuarter: { type: "number", minimum: 0.01, maximum: 16 },
+                shapePower: { type: "number", minimum: 0.5, maximum: 8 },
+              },
+            },
+            portamento: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                lengthQuarter: { type: "number", minimum: 0.01, maximum: 4 },
+                maxCents: { type: "number", minimum: 10, maximum: 1200 },
+              },
+            },
+          },
         },
         gestures: {
           type: "array",
           maxItems: 32,
-          description: "Explicit gestures; deterministic assembly, user values win over intent.",
+          description:
+            "Explicit gestures; deterministic assembly, user values win over intent. Notes are referenced by 0-based index within the NoteGroup. Repetition is grouped: one hairpin covers several parameters, one vibrato covers several notes, scoop/fall/portamento take tuple lists.",
           items: {
             type: "object",
             oneOf: [
@@ -1239,41 +1304,55 @@ export const TOOLS = [
                 additionalProperties: false,
                 properties: {
                   type: { const: "scoop" },
-                  noteId: { type: "string", minLength: 1 },
-                  depthCents: { type: "number", minimum: 1, maximum: 600, default: 30 },
+                  targets: GESTURE_DEPTH_TARGETS_SCHEMA,
                   lengthQuarter: { type: "number", minimum: 0.01, maximum: 16, default: 0.2 },
                   shapePower: { type: "number", minimum: 0.5, maximum: 8, default: 2 },
                 },
-                required: ["type", "noteId"],
+                required: ["type", "targets"],
               },
               {
                 additionalProperties: false,
                 properties: {
                   type: { const: "fall" },
-                  noteId: { type: "string", minLength: 1 },
-                  depthCents: { type: "number", minimum: 1, maximum: 600, default: 40 },
+                  targets: GESTURE_DEPTH_TARGETS_SCHEMA,
                   lengthQuarter: { type: "number", minimum: 0.01, maximum: 16, default: 0.3 },
                   shapePower: { type: "number", minimum: 0.5, maximum: 8, default: 2 },
                 },
-                required: ["type", "noteId"],
+                required: ["type", "targets"],
               },
               {
                 additionalProperties: false,
                 properties: {
                   type: { const: "portamento" },
-                  fromNoteId: { type: "string", minLength: 1 },
-                  toNoteId: { type: "string", minLength: 1 },
+                  transitions: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 512,
+                    items: {
+                      type: "array",
+                      minItems: 2,
+                      maxItems: 2,
+                      items: { type: "integer", minimum: 0 },
+                      description: "[fromNoteIndex, toNoteIndex]",
+                    },
+                  },
                   lengthQuarter: { type: "number", minimum: 0.01, maximum: 4, default: 0.15 },
                   maxCents: { type: "number", minimum: 10, maximum: 1200 },
                 },
-                required: ["type", "fromNoteId", "toNoteId"],
+                required: ["type", "transitions"],
                 description: "Symmetric glide between adjacent notes (no rest between).",
               },
               {
                 additionalProperties: false,
                 properties: {
                   type: { const: "vibrato" },
-                  noteId: { type: "string", minLength: 1 },
+                  notes: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 512,
+                    items: { type: "integer", minimum: 0 },
+                    description: "Note indexes sharing this gesture parameters.",
+                  },
                   surface: {
                     enum: ["pitchDelta", "vibratoEnv"],
                     default: "pitchDelta",
@@ -1287,24 +1366,29 @@ export const TOOLS = [
                   fadeOutQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.2 },
                   level: { type: "number", minimum: 0, maximum: 2, default: 1 },
                 },
-                required: ["type", "noteId"],
+                required: ["type", "notes"],
               },
               {
                 additionalProperties: false,
                 properties: {
                   type: { const: "hairpin" },
-                  fromNoteId: { type: "string", minLength: 1 },
-                  toNoteId: { type: "string", minLength: 1 },
-                  parameter: { enum: ["loudness", "tension", "breathiness"], default: "loudness" },
-                  amount: {
-                    type: "number",
-                    minimum: -24,
-                    maximum: 24,
-                    description: "Peak delta in the parameter's own unit (dB for loudness, ±1 scale otherwise).",
+                  from: { type: "integer", minimum: 0 },
+                  to: { type: "integer", minimum: 0 },
+                  amounts: {
+                    type: "object",
+                    additionalProperties: false,
+                    minProperties: 1,
+                    description:
+                      "Peak delta per parameter in that parameter own unit. One hairpin can drive several parameters over the same span.",
+                    properties: {
+                      loudness: { type: "number", minimum: -24, maximum: 24 },
+                      tension: { type: "number", minimum: -1, maximum: 1 },
+                      breathiness: { type: "number", minimum: -1, maximum: 1 },
+                    },
                   },
-                  peakPosition: { type: "number", minimum: 0.05, maximum: 0.95, default: 0.6 },
+                  peak: { type: "number", minimum: 0.05, maximum: 0.95, default: 0.6 },
                 },
-                required: ["type", "fromNoteId", "toNoteId"],
+                required: ["type", "from", "to", "amounts"],
               },
             ],
           },
