@@ -167,7 +167,7 @@ export class PhraseEditService {
                 await timer.measure("hostWriteMs", () => applyCurvePlan(capture, chunk.plan));
               } else if (chunk.kind === "notes") {
                 mutationState.notesTouched = true;
-                // onset 写入可能立即重排组内 index；所有 noteId 必须先绑定到稳定 handle。
+                // onset 写入可能立即重排组内 index；所有引用必须先绑定到稳定 handle。
                 const liveNotes = await resolveOccurrenceNotes(
                   capture,
                   resolved.originalTarget,
@@ -559,7 +559,7 @@ async function prepareDetachedPhrase(capture, resolved, input, host) {
     }
   }
 
-  // clone 也遵循宿主的自动排序语义，因此预检同样先固定 noteId → handle。
+  // clone 也遵循宿主的自动排序语义，因此预检同样先固定 index → handle。
   const detachedNotes = await resolveOccurrenceNotes(capture, clone, resolved.occurrence);
   const notePlan = await applyNotePatches(capture, detachedNotes, input.notePatches);
   const structurePlan = await applyStructureOperations(
@@ -650,7 +650,7 @@ async function verifyContextFingerprints(capture, resolved, host) {
     const note = await capture.call(resolved.originalTarget, "getNote", [expected.indexInGroup + 1], {
       inferredType: "Note",
     });
-    if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${expected.noteId} no longer exists`);
+    if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${expected.indexInGroup} no longer exists`);
     notes.push(note);
   }
   const observedFingerprints = await readNoteFingerprints(capture, {
@@ -666,8 +666,8 @@ async function verifyContextFingerprints(capture, resolved, host) {
     const observed = observedFingerprints[position];
     const comparable = pickFingerprint(expected);
     if (!jsonEqual(observed, comparable)) {
-      const error = codedError("STALE_CONTEXT", `note ${expected.noteId} changed after snapshot`);
-      error.noteId = expected.noteId;
+      const error = codedError("STALE_CONTEXT", `note ${expected.indexInGroup} changed after snapshot`);
+      error.noteIndex = expected.indexInGroup;
       error.expectedFingerprint = comparable;
       error.observedFingerprint = observed;
       throw error;
@@ -705,24 +705,28 @@ async function resolveOccurrenceNotes(capture, group, occurrence) {
       inferredType: "Note",
     });
     if (!note?.__handle__) {
-      throw codedError("STALE_CONTEXT", `note ${fingerprint.noteId} no longer exists`);
+      throw codedError("STALE_CONTEXT", `note ${fingerprint.indexInGroup} no longer exists`);
     }
-    notes.set(fingerprint.noteId, note);
+    notes.set(fingerprint.indexInGroup, note);
   }
   return notes;
 }
 
-async function applyNotePatches(capture, notesById, patches) {
+async function applyNotePatches(capture, notesByIndex, patches) {
   const diff = [];
   for (const patch of patches) {
-    const note = notesById.get(patch.noteId);
+    const note = notesByIndex.get(patch.note);
     if (!note) {
-      throw codedError("UNKNOWN_NOTE_ID", `noteId is not part of occurrence: ${patch.noteId}`);
+      throw codedError(
+        "NOTE_NOT_IN_CONTEXT",
+        `note ${patch.note} is not part of this occurrence`,
+        { got: patch.note }
+      );
     }
     for (const [field, expected] of Object.entries(patch.expected ?? {})) {
       const observed = await readNoteField(capture, note, field);
       if (!noteFieldEqual(field, observed, expected)) {
-        const error = codedError("EXPECTED_MISMATCH", `${patch.noteId}.${field} changed`);
+        const error = codedError("EXPECTED_MISMATCH", `note ${patch.note}.${field} changed`);
         error.expected = expected;
         error.observed = observed;
         throw error;
@@ -737,14 +741,14 @@ async function applyNotePatches(capture, notesById, patches) {
       await writeNoteField(capture, note, field, field === "attributes" ? requested : planned);
       const observed = await readNoteField(capture, note, field);
       if (!noteFieldEqual(field, observed, planned)) {
-        throw codedError("DETACHED_PREPARATION_FAILED", `${patch.noteId}.${field} did not read back`);
+        throw codedError("DETACHED_PREPARATION_FAILED", `note ${patch.note}.${field} did not read back`);
       }
-      diff.push({ noteId: patch.noteId, field, before, after: observed });
+      diff.push({ note: patch.note, field, before, after: observed });
     }
   }
   return {
     requested: patches.length,
-    changedNotes: new Set(diff.map((item) => item.noteId)).size,
+    changedNotes: new Set(diff.map((item) => item.note)).size,
     diff,
   };
 }
@@ -769,14 +773,21 @@ async function applyStructureOperations(
   const results = [];
   const claimed = new Set();
   for (const operation of operations) {
-    for (const noteId of operationNoteIds(operation)) {
-      if (claimed.has(noteId)) {
-        throw codedError("DUPLICATE_NOTE_ID", `noteId is used by multiple structure operations: ${noteId}`);
+    for (const noteIndex of operationNoteIndexes(operation)) {
+      if (claimed.has(noteIndex)) {
+        throw codedError(
+          "DUPLICATE_NOTE_INDEX",
+          `note index is used by multiple structure operations: ${noteIndex}`
+        );
       }
-      if (!originalNotes.has(noteId)) {
-        throw codedError("UNKNOWN_NOTE_ID", `noteId is not part of occurrence: ${noteId}`);
+      if (!originalNotes.has(noteIndex)) {
+        throw codedError(
+          "NOTE_NOT_IN_CONTEXT",
+          `note ${noteIndex} is not part of this occurrence`,
+          { got: noteIndex }
+        );
       }
-      claimed.add(noteId);
+      claimed.add(noteIndex);
     }
     if (operation.op === "insert") {
       const note = await capture.call(roots.sv, "create", ["Note"], { inferredType: "Note" });
@@ -791,14 +802,14 @@ async function applyStructureOperations(
       continue;
     }
     if (operation.op === "delete") {
-      const note = originalNotes.get(operation.noteId);
+      const note = originalNotes.get(operation.noteIndex);
       const hostIndex = await capture.call(note, "getIndexInParent");
       await capture.call(clone, "removeNote", [hostIndex]);
-      results.push({ op: "delete", noteId: operation.noteId });
+      results.push({ op: "delete", noteIndex: operation.noteIndex });
       continue;
     }
     if (operation.op === "split") {
-      const note = originalNotes.get(operation.noteId);
+      const note = originalNotes.get(operation.noteIndex);
       const onset = await capture.call(note, "getOnset");
       const duration = await capture.call(note, "getDuration");
       const end = onset + duration;
@@ -810,23 +821,23 @@ async function applyStructureOperations(
       await capture.call(second, "setLyrics", [operation.secondLyrics]);
       await capture.call(note, "setDuration", [operation.atBlick - onset]);
       await capture.call(clone, "addNote", [second]);
-      results.push({ op: "split", noteId: operation.noteId, atBlick: operation.atBlick });
+      results.push({ op: "split", noteIndex: operation.noteIndex, atBlick: operation.atBlick });
       continue;
     }
     const ordered = [];
-    for (const noteId of operation.noteIds) {
-      const note = originalNotes.get(noteId);
+    for (const noteIndex of operation.notes) {
+      const note = originalNotes.get(noteIndex);
       const hostIndex = await capture.call(note, "getIndexInParent");
       if (!Number.isSafeInteger(hostIndex) || hostIndex < 1) {
-        throw codedError("STALE_CONTEXT", `merge note is no longer in the target group: ${noteId}`);
+        throw codedError("STALE_CONTEXT", `merge note is no longer in the target group: ${noteIndex}`);
       }
-      ordered.push({ noteId, note, hostIndex });
+      ordered.push({ noteIndex, note, hostIndex });
     }
     ordered.sort((left, right) => left.hostIndex - right.hostIndex);
     const indices = ordered.map((item) => item.hostIndex);
     for (let index = 1; index < indices.length; index += 1) {
       if (indices[index] !== indices[index - 1] + 1) {
-        throw codedError("INVALID_ARGUMENTS", "merge noteIds must be consecutive");
+        throw codedError("INVALID_ARGUMENTS", "merge notes must be consecutive");
       }
     }
     const first = ordered[0].note;
@@ -842,7 +853,7 @@ async function applyStructureOperations(
     }
     await capture.call(first, "setDuration", [lastEnd - firstOnset]);
     await capture.call(first, "setLyrics", [lyrics]);
-    results.push({ op: "merge", noteIds: operation.noteIds, lyricsJoin: operation.lyricsJoin });
+    results.push({ op: "merge", notes: operation.notes, lyricsJoin: operation.lyricsJoin });
   }
   const observedNoteCount = await capture.call(clone, "getNumNotes");
   const expectedNoteCount =
@@ -850,7 +861,7 @@ async function applyStructureOperations(
     operations.reduce((delta, operation) => {
       if (operation.op === "insert" || operation.op === "split") return delta + 1;
       if (operation.op === "delete") return delta - 1;
-      return delta - (operation.noteIds.length - 1);
+      return delta - (operation.notes.length - 1);
     }, 0);
   if (observedNoteCount !== expectedNoteCount) {
     throw codedError(
@@ -1302,12 +1313,12 @@ function normalizeRequest(request) {
   }
   const notePatches = normalizeNotePatches(request.notePatches ?? []);
   const structureOperations = normalizeStructureOperations(request.structureOperations ?? []);
-  const structurallyEditedNotes = new Set(structureOperations.flatMap(operationNoteIds));
-  const overlappingPatch = notePatches.find((patch) => structurallyEditedNotes.has(patch.noteId));
+  const structurallyEditedNotes = new Set(structureOperations.flatMap(operationNoteIndexes));
+  const overlappingPatch = notePatches.find((patch) => structurallyEditedNotes.has(patch.note));
   if (overlappingPatch) {
     throw codedError(
       "OVERLAPPING_NOTE_EDIT",
-      `note ${overlappingPatch.noteId} cannot be patched and structurally edited in one transaction`
+      `note ${overlappingPatch.note} cannot be patched and structurally edited in one transaction`
     );
   }
   const curves = normalizeCurves(request.curves ?? []);
@@ -1357,16 +1368,22 @@ function normalizeNotePatches(value) {
   }
   const seen = new Set();
   return value.map((patch, index) => {
-    if (!isRecord(patch) || typeof patch.noteId !== "string" || !patch.noteId) {
-      throw codedError("INVALID_ARGUMENTS", `notePatches[${index}] requires noteId`);
+    if (!isRecord(patch) || !Number.isSafeInteger(patch.note) || patch.note < 0) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `notePatches[${index}].note must be a non-negative note index in the group`
+      );
     }
     if (!isRecord(patch.set) || Object.keys(patch.set).length === 0) {
       throw codedError("INVALID_ARGUMENTS", `notePatches[${index}].set must be a non-empty object`);
     }
-    if (seen.has(patch.noteId)) {
-      throw codedError("DUPLICATE_NOTE_ID", `noteId appears in multiple notePatches: ${patch.noteId}`);
+    if (seen.has(patch.note)) {
+      throw codedError(
+        "DUPLICATE_NOTE_INDEX",
+        `note ${patch.note} appears in multiple notePatches`
+      );
     }
-    seen.add(patch.noteId);
+    seen.add(patch.note);
     validateNoteFields(patch.set, `notePatches[${index}].set`, true);
     if (patch.expected !== undefined) {
       if (!isRecord(patch.expected)) {
@@ -1374,7 +1391,7 @@ function normalizeNotePatches(value) {
       }
       validateNoteFields(patch.expected, `notePatches[${index}].expected`, false);
     }
-    return { noteId: patch.noteId, set: patch.set, expected: patch.expected };
+    return { note: patch.note, set: patch.set, expected: patch.expected };
   });
 }
 
@@ -1424,20 +1441,23 @@ function normalizeStructureOperations(value) {
     }
     if (operation.op === "merge") {
       if (
-        !Array.isArray(operation.noteIds) ||
-        operation.noteIds.length < 2 ||
-        !operation.noteIds.every((item) => typeof item === "string" && item)
+        !Array.isArray(operation.notes) ||
+        operation.notes.length < 2 ||
+        !operation.notes.every((item) => Number.isSafeInteger(item) && item >= 0)
       ) {
-        throw codedError("INVALID_ARGUMENTS", `structureOperations[${index}].noteIds is invalid`);
+        throw codedError("INVALID_ARGUMENTS", `structureOperations[${index}].notes is invalid`);
       }
       return {
         op: "merge",
-        noteIds: operation.noteIds,
+        notes: operation.notes,
         lyricsJoin: operation.lyricsJoin === "concat" ? "concat" : "first",
       };
     }
-    if (typeof operation.noteId !== "string" || !operation.noteId) {
-      throw codedError("INVALID_ARGUMENTS", `structureOperations[${index}].noteId is required`);
+    if (!Number.isSafeInteger(operation.noteIndex) || operation.noteIndex < 0) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `structureOperations[${index}].noteIndex must be a non-negative note index`
+      );
     }
     if (operation.op === "split") {
       if (!Number.isSafeInteger(operation.atBlick)) {
@@ -1445,12 +1465,12 @@ function normalizeStructureOperations(value) {
       }
       return {
         op: "split",
-        noteId: operation.noteId,
+        noteIndex: operation.noteIndex,
         atBlick: operation.atBlick,
         secondLyrics: typeof operation.secondLyrics === "string" ? operation.secondLyrics : "-",
       };
     }
-    return { op: "delete", noteId: operation.noteId };
+    return { op: "delete", noteIndex: operation.noteIndex };
   });
 }
 
@@ -1480,10 +1500,10 @@ function normalizeCurves(value) {
   return value.map((curve) => normalizeCurveInput(curve));
 }
 
-function operationNoteIds(operation) {
+function operationNoteIndexes(operation) {
   if (operation.op === "insert") return [];
-  if (operation.op === "merge") return operation.noteIds;
-  return [operation.noteId];
+  if (operation.op === "merge") return operation.notes;
+  return [operation.noteIndex];
 }
 
 function failureEvidence(error) {

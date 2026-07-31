@@ -345,13 +345,13 @@ function fullRequest(contextId, occurrenceId, overrides = {}) {
     target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
-        noteId: `${occurrenceId}:n:0`,
+        note: 0,
         expected: { lyrics: "when" },
         set: { lyrics: "where", pitch: 61, attributes: { rapAccent: 0.5 } },
       },
     ],
     structureOperations: [
-      { op: "split", noteId: `${occurrenceId}:n:1`, atBlick: Q + Q / 2, secondLyrics: "-" },
+      { op: "split", noteIndex: 1, atBlick: Q + Q / 2, secondLyrics: "-" },
     ],
     curves: [
       {
@@ -460,18 +460,18 @@ test("sv_edit_phrase commits note, structure, curve, and voice changes in one Un
   assert.deepEqual(snapshotService.deleted, [contextId]);
 });
 
-test("sv_edit_phrase keeps noteId bindings stable when an onset patch reorders notes", async () => {
+test("sv_edit_phrase keeps note bindings stable when an onset patch reorders notes", async () => {
   const { model, service, contextId, occurrenceId } = createPhraseModel();
   const result = await service.edit({
     target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
-        noteId: `${occurrenceId}:n:0`,
+        note: 0,
         expected: { lyrics: "when" },
         set: { onsetBlick: 2 * Q },
       },
     ],
-    structureOperations: [{ op: "delete", noteId: `${occurrenceId}:n:1` }],
+    structureOperations: [{ op: "delete", noteIndex: 1 }],
   });
 
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -493,7 +493,7 @@ test("sv_edit_phrase validates merge adjacency after earlier structure operation
       },
       {
         op: "merge",
-        noteIds: [`${occurrenceId}:n:0`, `${occurrenceId}:n:1`],
+        notes: [0, 1],
         lyricsJoin: "concat",
       },
     ],
@@ -574,7 +574,7 @@ test("sv_edit_phrase does not roll back a verified commit when processing observ
   const { model, service, contextId, occurrenceId } = createPhraseModel({ failProcessing: true });
   const result = await service.edit({
     target: { contextId, occurrenceId },
-    notePatches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "where" } }],
+    notePatches: [{ note: 0, set: { lyrics: "where" } }],
     waitFor: "phonemes",
   });
 
@@ -645,11 +645,11 @@ test("sv_edit_phrase rolls back when committed curve read-back differs from the 
 
 test("sv_edit_phrase rejects overlapping or duplicate note edits before host access", async () => {
   const { model, service, contextId, occurrenceId } = createPhraseModel();
-  const noteId = `${occurrenceId}:n:0`;
+  const note = 0;
   const overlapping = await service.edit({
     target: { contextId, occurrenceId },
-    notePatches: [{ noteId, set: { lyrics: "where" } }],
-    structureOperations: [{ op: "delete", noteId }],
+    notePatches: [{ note, set: { lyrics: "where" } }],
+    structureOperations: [{ op: "delete", noteIndex: note }],
   });
   assert.equal(overlapping.error.code, "OVERLAPPING_NOTE_EDIT");
   assert.equal(model.undoCount, 0);
@@ -657,11 +657,11 @@ test("sv_edit_phrase rejects overlapping or duplicate note edits before host acc
   const duplicate = await service.edit({
     target: { contextId, occurrenceId },
     notePatches: [
-      { noteId, set: { lyrics: "where" } },
-      { noteId, set: { pitch: 61 } },
+      { note, set: { lyrics: "where" } },
+      { note, set: { pitch: 61 } },
     ],
   });
-  assert.equal(duplicate.error.code, "DUPLICATE_NOTE_ID");
+  assert.equal(duplicate.error.code, "DUPLICATE_NOTE_INDEX");
   assert.equal(model.undoCount, 0);
 });
 
@@ -707,7 +707,7 @@ test("sv_edit_phrase sends only requested attributes when old values contain typ
     target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
-        noteId: `${occurrenceId}:n:0`,
+        note: 0,
         set: { attributes: { rapAccent: 0.5 } },
       },
     ],

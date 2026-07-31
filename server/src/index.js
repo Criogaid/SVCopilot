@@ -2308,7 +2308,7 @@ export const TOOLS = [
   {
     name: "sv_edit_phrase",
     description:
-      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. Note/structure edits use a detached NoteGroup plan; curve/voice-only edits use operation-specific live preflight without cloning the full group. Commit journals and applies the verified plan to the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared target mutations require allowSharedTargetMutation:true and are scanned at commit; dry-run defers the project-wide scan. Any commit failure restores notes, curves, voice, and target identity with read-back verification. noteId/occurrenceId must come from the same sv_snapshot_range context. If a client collapses nested note, structure, range, or point types to unknown, read svcopilot://schemas/sv_edit_phrase for the exact validated input schema.",
+      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. Note/structure edits use a detached NoteGroup plan; curve/voice-only edits use operation-specific live preflight without cloning the full group. Commit journals and applies the verified plan to the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared target mutations require allowSharedTargetMutation:true and are scanned at commit; dry-run defers the project-wide scan. Any commit failure restores notes, curves, voice, and target identity with read-back verification. Notes are referenced by 0-based group index from the same sv_snapshot_range context. If a client collapses nested note, structure, range, or point types to unknown, read svcopilot://schemas/sv_edit_phrase for the exact validated input schema.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2331,7 +2331,7 @@ export const TOOLS = [
             type: "object",
             additionalProperties: false,
             properties: {
-              noteId: { type: "string", minLength: 1 },
+              note: { type: "integer", minimum: 0 },
               expected: { type: "object" },
               set: {
                 type: "object",
@@ -2349,7 +2349,7 @@ export const TOOLS = [
                 },
               },
             },
-            required: ["noteId", "set"],
+            required: ["note", "set"],
           },
         },
         structureOperations: {
@@ -2379,34 +2379,37 @@ export const TOOLS = [
                     required: ["onsetBlick", "durationBlick", "pitch"],
                   },
                 },
-                required: ["op", "noteId"],
+                required: ["op", "noteIndex"],
               },
               {
                 type: "object",
                 additionalProperties: false,
-                properties: { op: { const: "delete" }, noteId: { type: "string", minLength: 1 } },
-                required: ["op", "noteId"],
+                properties: {
+                  op: { const: "delete" },
+                  noteIndex: { type: "integer", minimum: 0 },
+                },
+                required: ["op", "noteIndex"],
               },
               {
                 type: "object",
                 additionalProperties: false,
                 properties: {
                   op: { const: "split" },
-                  noteId: { type: "string", minLength: 1 },
+                  noteIndex: { type: "integer", minimum: 0 },
                   atBlick: { type: "integer" },
                   secondLyrics: { type: "string" },
                 },
-                required: ["op", "noteId", "atBlick"],
+                required: ["op", "noteIndex", "atBlick"],
               },
               {
                 type: "object",
                 additionalProperties: false,
                 properties: {
                   op: { const: "merge" },
-                  noteIds: { type: "array", minItems: 2, items: { type: "string", minLength: 1 } },
+                  notes: { type: "array", minItems: 2, items: { type: "integer", minimum: 0 } },
                   lyricsJoin: { enum: ["first", "concat"], default: "first" },
                 },
-                required: ["op", "noteIds"],
+                required: ["op", "notes"],
               },
             ],
           },
