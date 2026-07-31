@@ -184,7 +184,7 @@ async function measureMode({ host, fixture, indices, useBulk }) {
       contextId: captured.contextId,
       occurrenceId: occurrence.occurrenceId,
       patches: indices.map((index) => ({
-        noteIndexInGroup: index,
+        note: index,
         // dryRun 下不写入;set 里给一个必然与现值不同的值,以确保预检真的
         // 走完整的指纹比对路径,而不是走 no_change 短路。
         set: { detuneCents: 7 },
