@@ -1092,6 +1092,14 @@ try {
   assert.equal(rangeSnapshot.data.tracks[0].mixer.muted, false);
   assert.ok(rangeSnapshot.warnings.some((warning) => warning.code === "UNSUPPORTED_INCLUDE"));
   assert.match(rangeSnapshot.data.tracks[0].groups[0].occurrenceId, /^c_/);
+  // §3.1/§8.1 的稳定身份：ordinal 索引完整 occurrences 数组；groupNoteCount 是宿主里
+  // 该 NoteGroup 的真实总数，capturedNotes 是本次 range 捕获到的数量。两者分开，
+  // 因为「index 越界」与「index 未捕获」需要不同的补救动作。
+  const firstGroup = rangeSnapshot.data.tracks[0].groups[0];
+  assert.equal(firstGroup.occurrence, 0);
+  assert.equal(typeof firstGroup.groupNoteCount, "number");
+  assert.equal(typeof firstGroup.capturedNotes, "number");
+  assert.ok(firstGroup.capturedNotes <= firstGroup.groupNoteCount);
   assert.match(rangeSnapshot.data.notes[0].id, /:n:0$/);
   assert.ok(Number.isFinite(rangeSnapshot.timings.serviceTotalMs));
   assert.ok(rangeSnapshot.artifactRef);

@@ -597,6 +597,12 @@ test("range occurrence identity distinguishes references to one shared target", 
   const groups = result.data.tracks[0].groups;
   assert.equal(groups.length, 2);
   assert.notEqual(groups[0].occurrenceId, groups[1].occurrenceId);
+  // ordinal 由服务端按完整 occurrences 数组分配，消费方不必自己 indexOf——
+  // 各自推导会在数组被过滤后给出不同编号（§3.1 规则 1）。
+  assert.deepEqual(
+    groups.map((group) => group.occurrence),
+    [0, 1]
+  );
   assert.deepEqual(groups[0].sharedTargetOccurrences, [
     groups[0].occurrenceId,
     groups[1].occurrenceId,

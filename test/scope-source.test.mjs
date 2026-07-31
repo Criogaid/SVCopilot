@@ -88,6 +88,28 @@ test("both sources produce the identical scope shape", () => {
   assert.equal(fromCapsule.contextId, null);
 });
 
+test("a filtered or reordered occurrences array is refused", () => {
+  // Context 自己记录 ordinal（musical-range 在 prepareStoredRange 里写入）。若有人
+  // 过滤或重排过数组，同一个 ordinal 会在不同请求里指向不同 occurrence——那正是
+  // §3.1 规则 1/5 要防止的。静默接受会让写入落到错误的音符组上。
+  const stored = {
+    contextId: "c_x",
+    epoch: 1,
+    context: {
+      kind: "range",
+      // 只保留了原本 ordinal 为 1 的那一个（模拟"按 capturedNotes 过滤"）。
+      occurrences: [occurrenceWith([0, 1], { occurrence: 1 })],
+    },
+  };
+  assert.equal(
+    codeOf(() => resolveMutationScope({ source: { kind: "snapshot", stored }, occurrence: 0 })),
+    "INVALID_CONTEXT"
+  );
+  // 一致时正常通过。
+  const intact = storedWith([occurrenceWith([0], { occurrence: 0 })]);
+  assert.doesNotThrow(() => resolveMutationScope({ source: { kind: "snapshot", stored: intact } }));
+});
+
 test("the scope is frozen so downstream cannot mutate shared fingerprints", () => {
   const scope = resolveMutationScope({
     source: { kind: "snapshot", stored: storedWith([occurrenceWith([0, 1])]) },

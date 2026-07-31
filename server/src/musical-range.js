@@ -501,7 +501,7 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       occurrencesByTarget.set(occurrence.targetGroupUuid, list);
     }
   }
-  for (const occurrence of captured.occurrences) {
+  for (const [ordinal, occurrence] of captured.occurrences.entries()) {
     const sharedTargetOccurrences = occurrence.targetGroupUuid
       ? occurrencesByTarget.get(occurrence.targetGroupUuid)
       : [];
@@ -510,11 +510,24 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       const noteId = `${occurrence.occurrenceId}:n:${fingerprint.indexInGroup}`;
       return { ...fingerprint, noteId };
     });
+    // ordinal 是 §3.1 的稳定身份：它索引**完整** occurrences 数组，与"是否捕获到
+    // Note"无关。写在这里而不是让消费方 indexOf，是为了让它随 Context 一起冻结——
+    // 消费方各自推导会在数组被过滤后给出不同编号。
+    occurrence.group.occurrence = ordinal;
+    // groupNoteCount 是宿主里该 NoteGroup 的真实音符总数；capturedNotes 是本次
+    // range 实际捕获的数量。两者必须分开：range 可以只捕获乐句内的音符，而
+    // 「index 越界」与「index 合法但未捕获」是两种不同的失败（§3.2 规则 4/5），
+    // 需要不同的补救动作。用捕获数冒充总数会把前者误报成后者。
+    occurrence.group.groupNoteCount = occurrence.group.noteCount;
+    occurrence.group.capturedNotes = noteFingerprints.length;
     stored.context.occurrences.push({
+      occurrence: ordinal,
       occurrenceId: occurrence.occurrenceId,
       trackIndex: occurrence.trackIndex,
       groupIndex: occurrence.groupIndex,
       targetGroupUuid: occurrence.targetGroupUuid,
+      groupNoteCount: occurrence.group.noteCount,
+      capturedNotes: noteFingerprints.length,
       timeOffsetBlick: occurrence.timeOffsetBlick,
       // sv_compare_computed_pitch 的 compare_to_target 目标 = note.pitch + detune/100 + pitchOffset。
       pitchOffsetSemitone: occurrence.group?.pitchOffsetSemitone ?? 0,

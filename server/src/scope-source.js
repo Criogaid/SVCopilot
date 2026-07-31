@@ -241,6 +241,14 @@ function buildScope({
   sharedTargetOccurrences,
   groupNoteCount,
 }) {
+  // Context 自己记录的 ordinal 必须与数组位置一致。不一致意味着有人过滤或重排过
+  // occurrences 数组，而那会让同一个 ordinal 在不同请求里指向不同的 occurrence。
+  if (Number.isSafeInteger(occurrence.occurrence) && occurrence.occurrence !== ordinal) {
+    throw codedError(
+      "INVALID_CONTEXT",
+      `occurrence ordinal ${ordinal} does not match the stored ordinal ${occurrence.occurrence}; the occurrences array was filtered or reordered`
+    );
+  }
   const fingerprints = Array.isArray(occurrence.noteFingerprints)
     ? occurrence.noteFingerprints
     : [];
