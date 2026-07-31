@@ -28,7 +28,7 @@ const sessionId = "sess_plan";
   });
 
   const resolved = resolvePlanReference({
-    planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+    planRef: artifact.id,
     action: "commit",
     confirmations: { allowSharedTargetMutation: true },
     executionOptions: { atomic: true, waitFor: "none" },
@@ -84,7 +84,7 @@ const sessionId = "sess_plan";
   now += 101;
   assert.strictEqual(snapshotStore.get(stored.contextId), null);
   const resolved = resolvePlanReference({
-    planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+    planRef: artifact.id,
     action: "dry_run",
     expectedTargetTool: "sv_patch_notes",
     sessionId,
@@ -136,7 +136,7 @@ const sessionId = "sess_plan";
     payload,
   });
   const resolved = resolvePlanReference({
-    planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+    planRef: artifact.id,
     action: "dry_run",
     expectedTargetTool: "sv_patch_notes",
     sessionId,
@@ -157,7 +157,7 @@ const sessionId = "sess_plan";
   assert.throws(
     () =>
       resolvePlanReference({
-        planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+        planRef: artifact.id,
         action: "dry_run",
         expectedTargetTool: "sv_patch_parameter_curves",
         sessionId,
@@ -167,7 +167,11 @@ const sessionId = "sess_plan";
   );
 }
 
-// contentHash 不匹配报错。
+// planRef 形状：必须是裸 artifactId 字符串。
+//
+// contentHash 不匹配的用例随字段本身删除：调用方不再回传 hash，因此那种失败已经
+// 不可构造。真正会发生的错误是把整个 apply 信封（或旧的 {artifactId} 对象）塞进
+// planRef，所以守的是这一条。
 {
   const store = new ArtifactStore();
   const { payload } = buildPlanArtifact({
@@ -175,16 +179,41 @@ const sessionId = "sess_plan";
     mutationRequest: { patches: [] },
   });
   const artifact = store.seal({ kind: "plan", schemaVersion: "1", sessionId, payload });
+  for (const badRef of [
+    { artifactId: artifact.id },
+    { planRef: artifact.id },
+    "",
+    undefined,
+    42,
+  ]) {
+    assert.throws(
+      () =>
+        resolvePlanReference({
+          planRef: badRef,
+          action: "dry_run",
+          expectedTargetTool: "sv_patch_notes",
+          sessionId,
+          artifactStore: store,
+        }),
+      /INVALID_ARGUMENTS/,
+      JSON.stringify(badRef ?? null)
+    );
+  }
+}
+
+// 未知 artifactId 仍按 artifact 生命周期报错，而不是被当成形状问题。
+{
+  const store = new ArtifactStore();
   assert.throws(
     () =>
       resolvePlanReference({
-        planRef: { artifactId: artifact.id, contentHash: "sha256_wrong" },
+        planRef: "a_doesNotExist",
         action: "dry_run",
         expectedTargetTool: "sv_patch_notes",
         sessionId,
         artifactStore: store,
       }),
-    /ARTIFACT_HASH_MISMATCH/
+    (error) => error.code === "UNKNOWN_ARTIFACT" || /ARTIFACT/.test(error.message)
   );
 }
 
@@ -196,7 +225,7 @@ const sessionId = "sess_plan";
     mutationRequest: { target: { contextId: "ctx_1" }, curves: [] },
   });
   const artifact = store.seal({ kind: "plan", schemaVersion: "1", sessionId, payload });
-  const planRef = { artifactId: artifact.id, contentHash: artifact.contentHash };
+  const planRef = artifact.id;
   assert.throws(
     () =>
       resolvePlanReference({
@@ -249,7 +278,7 @@ const sessionId = "sess_plan";
     sessionId,
     payload: planPayload.payload,
   });
-  const planRef = { artifactId: artifact.id, contentHash: artifact.contentHash };
+  const planRef = artifact.id;
   const base = {
     planRef,
     expectedTargetTool: "sv_patch_notes",
@@ -308,7 +337,7 @@ const sessionId = "sess_plan";
     }).payload,
   });
   const base = {
-    planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+    planRef: artifact.id,
     expectedTargetTool: "sv_patch_notes",
     sessionId,
     artifactStore: store,

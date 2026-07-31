@@ -1,5 +1,5 @@
 import { canonicalHashHex } from "./canonical-json.js";
-import { artifactReference } from "./artifact-store.js";
+import { artifactReference, planReference } from "./artifact-store.js";
 import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { MAX_OPERATIONS } from "./note-structure.js";
@@ -638,6 +638,7 @@ function buildHarmonyResponse(
     );
   }
   let planRef = null;
+  let planExpiresAt = null;
   if (input.usePlanRef && artifactStore && sessionId && restructureRequest) {
     try {
       const { payload } = buildPlanArtifact({
@@ -650,15 +651,15 @@ function buildHarmonyResponse(
           noteIndexes: [],
         }),
       });
-      planRef = artifactReference(
-        artifactStore.seal({
-          kind: "plan",
-          schemaVersion: "1",
-          sessionId,
-          sourceEpoch: loaded.stored.epoch,
-          payload,
-        })
-      );
+      const planArtifact = artifactStore.seal({
+        kind: "plan",
+        schemaVersion: "1",
+        sessionId,
+        sourceEpoch: loaded.stored.epoch,
+        payload,
+      });
+      planRef = planReference(planArtifact);
+      planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
       warnings.push({
         code: "ARTIFACT_SEAL_FAILED",
@@ -671,6 +672,8 @@ function buildHarmonyResponse(
   });
   if (planRef && apply?.arguments) {
     apply.arguments = { planRef, action: "dry_run" };
+    // 租期是关于这次交接的事实，挂在信封上；planRef 只承载身份（§4.3）。
+    apply.expiresAt = planExpiresAt;
   }
 
   return {

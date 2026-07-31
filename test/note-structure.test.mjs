@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ArtifactStore, artifactReference } from "../server/src/artifact-store.js";
+import { ArtifactStore, planReference } from "../server/src/artifact-store.js";
 import { NoteStructureService } from "../server/src/note-structure.js";
 import { buildPlanArtifact, buildPlanContextSnapshot } from "../server/src/plan-reference.js";
 import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
@@ -463,7 +463,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
     occurrenceId,
     contextSnapshot: buildPlanContextSnapshot(entry, occurrence),
   });
-  const reference = artifactReference(
+  const reference = planReference(
     artifactStore.seal({
       kind: "plan",
       schemaVersion: "1",

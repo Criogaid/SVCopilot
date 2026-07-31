@@ -209,11 +209,8 @@ test("served mutation schemas accept only an explicit planRef execution action",
     "sv_patch_pitch_controls",
     "sv_restructure_notes",
   ]);
-  const reference = {
-    artifactId: "a_schema",
-    contentHash: `sha256_${"a".repeat(64)}`,
-    kind: "plan",
-  };
+  // planRef 是裸 artifactId 字符串（§4.3）。
+  const reference = "a_schemaExample";
 
   for (const [toolName, schema] of Object.entries(schemas)) {
     const validate = compile(schema);
@@ -236,6 +233,12 @@ test("served mutation schemas accept only an explicit planRef execution action",
       validate({ planRef: reference, action: "dry_run", bogus: true }),
       false,
       `${toolName} must reject unknown planRef wrapper fields`
+    );
+    // 旧的对象形状必须被拒绝，否则"裸字符串"只是文档说法。
+    assert.equal(
+      validate({ planRef: { artifactId: reference }, action: "dry_run" }),
+      false,
+      `${toolName} must reject the legacy planRef object`
     );
   }
 });
@@ -503,12 +506,11 @@ test("lyric and harmony planners default to complete plan references without inl
   ]) {
     const reference = plan.apply.arguments.planRef;
     assert.equal(plan.apply.arguments.action, "dry_run");
-    assert.equal(reference.kind, "plan");
-    assert.equal(reference.schemaVersion, "1");
-    assert.ok(reference.expiresAt);
-    assert.ok(reference.resourceUri);
-    assert.ok(reference.firstPageUri);
-    assert.ok(reference.totalBytes > 0);
+    // 裸 artifactId 字符串：没有 kind / contentHash / resourceUri / firstPageUri。
+    assert.equal(typeof reference, "string");
+    assert.match(reference, /^a_[A-Za-z0-9_-]+$/);
+    // 租期是调用方唯一需要知道的时间事实，因此由 apply 信封自己携带（§4.3）。
+    assert.ok(plan.apply.expiresAt);
     assert.equal(plan.patchRequest, undefined, `${label} must not duplicate an inline patch request`);
     assert.equal(
       plan.restructureRequest,
@@ -555,7 +557,7 @@ test("compact lyric plans externalize alignment detail and capsule only touched 
   assert.ok(JSON.stringify(plan).length < 6_000);
 
   const planArtifact = artifactStore.resolve({
-    artifactId: plan.apply.arguments.planRef.artifactId,
+    artifactId: plan.apply.arguments.planRef,
     expectedKind: "plan",
     sessionId,
   });

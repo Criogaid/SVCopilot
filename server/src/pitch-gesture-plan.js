@@ -1,5 +1,5 @@
 import { canonicalHashHex } from "./canonical-json.js";
-import { artifactReference } from "./artifact-store.js";
+import { planReference } from "./artifact-store.js";
 import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
@@ -740,6 +740,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   }
 
   let planArtifactRef = null;
+  let planExpiresAt = null;
   if (input.usePlanRef && artifactStore && sessionId && hasOperations) {
     try {
       const { payload } = buildPlanArtifact({
@@ -762,7 +763,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
         sourceEpoch: loaded.stored.epoch,
         payload,
       });
-      planArtifactRef = artifactReference(planArtifact);
+      planArtifactRef = planReference(planArtifact);
+      planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
       warnings.push({
         code: "ARTIFACT_SEAL_FAILED",
@@ -777,6 +779,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   // planArtifactRef 存在时，apply.arguments 使用 planRef 而不是内联完整请求。
   if (planArtifactRef && applyEnvelope?.arguments) {
     applyEnvelope.arguments = { planRef: planArtifactRef, action: "dry_run" };
+    // 租期是关于这次交接的事实，挂在信封上；planRef 只承载身份（§4.3）。
+    applyEnvelope.expiresAt = planExpiresAt;
   }
 
   return {

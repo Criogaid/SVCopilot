@@ -19,7 +19,7 @@ const EXECUTION_OPTIONS_BY_TOOL = Object.freeze({
  * 解析 planRef，返回目标 mutation 工具的规范请求。
  *
  * @param {object} options
- * @param {{ artifactId: string, contentHash: string }} options.planRef
+ * @param {string} options.planRef - 裸 artifactId 字符串（§4.3）
  * @param {string} options.expectedTargetTool - 调用方期望的目标工具名
  * @param {string} options.sessionId
  * @param {ArtifactStore} options.artifactStore
@@ -37,14 +37,16 @@ export function resolvePlanReference({
   snapshotStore,
   planLedger = null,
 }) {
-  if (!planRef || typeof planRef.artifactId !== "string" || typeof planRef.contentHash !== "string") {
-    throw codedError("INVALID_ARGUMENTS", "planRef must contain artifactId and contentHash");
+  if (typeof planRef !== "string" || planRef.length === 0) {
+    throw codedError("INVALID_ARGUMENTS", "planRef must be the artifactId string from apply.planRef");
   }
 
+  // 目标校验完全在服务端：kind、实例归属与 targetTool 都按 artifactId 查 sealed
+  // payload 得到。调用方回传 contentHash 从不构成校验——它与 artifactId 出自同一次
+  // 响应，不匹配只说明调用方改坏了自己刚收到的东西。
   const artifact = artifactStore.resolve({
-    artifactId: planRef.artifactId,
+    artifactId: planRef,
     expectedKind: "plan",
-    expectedContentHash: planRef.contentHash,
     sessionId,
   });
 
@@ -62,8 +64,8 @@ export function resolvePlanReference({
   // 因为 preflight 会通过——工程状态确实满足计划的前提，计划只是已经生效过了
   // （§4.3.1）。这一点 preflight 无法自己发现。
   if (planLedger) {
-    if (action === "commit") planLedger.beginCommit(planRef.artifactId);
-    else planLedger.noteDryRun(planRef.artifactId);
+    if (action === "commit") planLedger.beginCommit(planRef);
+    else planLedger.noteDryRun(planRef);
   }
   // capsule 不写回 store（§4.3.2）：只读证据一旦进了 store 就会被别人查到、
   // 被 LRU 淘汰、并与真实快照混淆。改为随返回值交给调用方，由它显式传给
@@ -82,7 +84,7 @@ export function resolvePlanReference({
     targetTool: plan.targetTool,
     mutationRequest,
     // commit 的结果必须回填 ledger；null 表示这次不是 commit 或未启用 ledger。
-    ledgerRef: planLedger && action === "commit" ? planRef.artifactId : null,
+    ledgerRef: planLedger && action === "commit" ? planRef : null,
     capsule,
   };
 }

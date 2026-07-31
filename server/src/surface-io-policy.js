@@ -294,9 +294,6 @@ export const LEGACY_REQUEST_FIELDS = Object.freeze({
   occurrenceId: "§3.1：改为 Context 内 occurrence ordinal（B2）",
   dryRun: "§10.6：统一为 action: dry_run | commit（B2）",
   responseMode: "§3.6：响应形状由契约规定，不由调用方选择（B2）",
-  contentHash: "§4.3：PlanRef 改裸 artifactId 后不再需要调用方回传（C1）",
   cursor: "§4.1：offset 分页降级为待数据评估（C2）",
-  resourceUri: "§4.3：PlanRef 里的 Resource URI，改裸 artifactId 后删除（C1）",
-  firstPageUri: "§4.3：同上（C1）",
   usePlanRef: "§4.3：inline apply 取消后该开关一并删除（C1）",
 });

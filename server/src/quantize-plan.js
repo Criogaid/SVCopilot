@@ -1,5 +1,5 @@
 import { canonicalHashHex } from "./canonical-json.js";
-import { artifactReference } from "./artifact-store.js";
+import { artifactReference, planReference } from "./artifact-store.js";
 import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { MAX_PATCHES } from "./note-patch.js";
@@ -449,6 +449,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
     );
   }
   let planArtifactRef = null;
+  let planExpiresAt = null;
   if (input.usePlanRef && artifactStore && sessionId && patchRequest) {
     try {
       const { payload } = buildPlanArtifact({
@@ -468,7 +469,8 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
         sourceEpoch: loaded.stored.epoch,
         payload,
       });
-      planArtifactRef = artifactReference(planArtifact);
+      planArtifactRef = planReference(planArtifact);
+      planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
       warnings.push({
         code: "ARTIFACT_SEAL_FAILED",
@@ -482,6 +484,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   });
   if (planArtifactRef && applyEnvelope?.arguments) {
     applyEnvelope.arguments = { planRef: planArtifactRef, action: "dry_run" };
+    applyEnvelope.expiresAt = planExpiresAt;
   }
 
   return {

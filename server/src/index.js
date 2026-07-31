@@ -519,21 +519,14 @@ const CURVE_POINTS_INPUT_SCHEMA = {
   description:
     "Object points or a schema-described dense-table-v1 envelope whose decoded rows match the point schema.",
 };
+// PlanRef 是裸 artifactId 字符串（§4.3）。目标校验完全在服务端按 artifactId 完成：
+// kind、实例归属与 sealed targetTool 都不依赖调用方回传任何东西，因此以前那些
+// contentHash / resourceUri / firstPageUri 字段既不构成校验，也只是让模型每次
+// 交接都多复制一遍。
 const PLAN_REF_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    artifactId: { type: "string", minLength: 1 },
-    contentHash: { type: "string", pattern: "^sha256_[0-9a-f]{64}$" },
-    kind: { const: "plan" },
-    schemaVersion: { type: "string", minLength: 1 },
-    resourceUri: { type: "string", minLength: 1 },
-    firstPageUri: { type: "string", minLength: 1 },
-    expiresAt: { type: "string", minLength: 1 },
-    totalBytes: { type: "integer", minimum: 0 },
-    pagingRequired: { type: "boolean" },
-  },
-  required: ["artifactId", "contentHash"],
+  type: "string",
+  minLength: 1,
+  description: "The artifactId string from a planner's apply.planRef.",
 };
 const PLAN_EXECUTION_PROPERTIES = {
   planRef: PLAN_REF_SCHEMA,
@@ -1446,7 +1439,7 @@ export const TOOLS = [
   {
     name: "sv_align_lyrics",
     description:
-      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects inferred "+" continuation notes); an explicit +/- chain is authoritative and is never expanded again. Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review. Exact ASCII "+", "-", and "br", plus an ASCII apostrophe prefix, use the official Synthesizer V Studio 2 special-lyric semantics; similar spellings such as "BR" remain lexical and emit a warning. Tokens and per-note units expose semanticRole/semanticEvidence, and orphan continuations or an uncalibrated standalone apostrophe require human review. Returns per-note planned lyrics/languageOverride plus a unified apply envelope. By default apply.arguments carries a sealed planRef with resourceUri, firstPageUri, and expiresAt; the executor restores its bounded context capsule if the original snapshot TTL has elapsed, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 200-patch per-call cap return the first 200 plus a continuation block. G2P parity with the host is not guaranteed.',
+      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects inferred "+" continuation notes); an explicit +/- chain is authoritative and is never expanded again. Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review. Exact ASCII "+", "-", and "br", plus an ASCII apostrophe prefix, use the official Synthesizer V Studio 2 special-lyric semantics; similar spellings such as "BR" remain lexical and emit a warning. Tokens and per-note units expose semanticRole/semanticEvidence, and orphan continuations or an uncalibrated standalone apostrophe require human review. Returns per-note planned lyrics/languageOverride plus a unified apply envelope. By default apply.arguments carries a sealed planRef (the bare artifactId) and apply.expiresAt reports its lease; if the original snapshot TTL has elapsed the executor reads the bounded context capsule sealed in the plan instead, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 200-patch per-call cap return the first 200 plus a continuation block. G2P parity with the host is not guaranteed.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1766,7 +1759,7 @@ export const TOOLS = [
   {
     name: "sv_generate_harmony",
     description:
-      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) using an explicit key or Krumhansl-Schmuckler detection. Existing exact target notes are skipped; overlapping different notes become TARGET_NOTE_CONFLICT and are never overwritten. Returns a unified apply envelope targeting sv_restructure_notes. By default apply.arguments carries a sealed planRef with resourceUri, firstPageUri, and expiresAt; the executor restores its bounded context capsule if the original snapshot TTL has elapsed, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 64-operation cap return the first 64 plus a continuation block. Whether the harmony sounds good is human-only.',
+      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) using an explicit key or Krumhansl-Schmuckler detection. Existing exact target notes are skipped; overlapping different notes become TARGET_NOTE_CONFLICT and are never overwritten. Returns a unified apply envelope targeting sv_restructure_notes. By default apply.arguments carries a sealed planRef (the bare artifactId) and apply.expiresAt reports its lease; if the original snapshot TTL has elapsed the executor reads the bounded context capsule sealed in the plan instead, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 64-operation cap return the first 64 plus a continuation block. Whether the harmony sounds good is human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,

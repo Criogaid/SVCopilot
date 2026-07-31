@@ -1,5 +1,5 @@
 // 不可变 Artifact 存储：服务端大结果/大计划的只读容器，与短期可编辑 Context 生命周期隔离。
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { canonicalClone, contentHash } from "./canonical-json.js";
 
 export const DEFAULT_ARTIFACT_PAGE_BYTES = 8 * 1024;
@@ -15,6 +15,29 @@ export const DEFAULT_ARTIFACT_QUOTAS = Object.freeze({
   maxArtifactBytes: 8 * 1024 * 1024,
   maxTotalBytes: 64 * 1024 * 1024,
 });
+
+// Artifact ID：`a_` + 96-bit Base64URL（16 字符）。UUID 的 36 字符里有 4 个连字符和
+// 版本/变体位，对一个进程内、有配额、有租期的句柄来说全是浪费——它每次 planRef 交接
+// 都要被模型复制一遍。
+function createArtifactId() {
+  return `a_${randomBytes(12).toString("base64url")}`;
+}
+
+/**
+ * PlanRef：裸 artifactId 字符串（§4.3）。
+ *
+ * 不带 contentHash / kind / resourceUri / firstPageUri，因为这些要么是服务端自己就能
+ * 查到的事实，要么根本不适用——一个待提交的计划不是给模型翻页读的。让调用方回传
+ * contentHash 也从不构成校验：它和 artifactId 一起来自同一次响应，不匹配只能说明
+ * 调用方改坏了自己刚收到的东西，而真正的目标校验（kind、实例归属、targetTool）
+ * 全部在服务端按 artifactId 完成。
+ *
+ * @param {object} artifact
+ * @returns {string}
+ */
+export function planReference(artifact) {
+  return artifact.id;
+}
 
 export function artifactReference(artifact) {
   const baseUri = `svcopilot://artifacts/${encodeURIComponent(artifact.id)}/${encodeURIComponent(
@@ -106,7 +129,7 @@ export class ArtifactStore {
     const clampedLeaseMs = Math.min(leaseMs, this.quotas.maxLeaseMs);
     const createdAt = this.now();
     const expiresAt = createdAt + clampedLeaseMs;
-    const id = `a_${randomUUID()}`;
+    const id = createArtifactId();
 
     const immutablePayload = deepFreeze(canonicalClone(payload));
     const payloadText = JSON.stringify(immutablePayload);

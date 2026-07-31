@@ -1,5 +1,5 @@
 import { canonicalHashHex } from "./canonical-json.js";
-import { artifactReference } from "./artifact-store.js";
+import { planReference } from "./artifact-store.js";
 import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
@@ -1269,6 +1269,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
   }
 
   const planArtifactRefs = [];
+  // 租期：K 次调用各自封存一个 artifact，最早到期的那个决定整份交接还能用多久。
+  let planExpiresAt = null;
   if (input.usePlanRef && artifactStore && sessionId && applyRequests.length > 0) {
     try {
       for (const request of applyRequests) {
@@ -1292,16 +1294,17 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
           sourceEpoch: loaded.stored.epoch,
           payload,
         });
-        planArtifactRefs.push(artifactReference(planArtifact));
+        planArtifactRefs.push(planReference(planArtifact));
+        if (planExpiresAt === null || planArtifact.expiresAt < planExpiresAt) {
+          planExpiresAt = planArtifact.expiresAt;
+        }
       }
     } catch (error) {
-      for (const reference of planArtifactRefs) {
-        artifactStore.release({
-          artifactId: reference.artifactId,
-          sessionId,
-        });
+      for (const artifactId of planArtifactRefs) {
+        artifactStore.release({ artifactId, sessionId });
       }
       planArtifactRefs.length = 0;
+      planExpiresAt = null;
       warnings.push({
         code: "ARTIFACT_SEAL_FAILED",
         message: `Failed to seal expression plan artifact: ${error.message}`,
@@ -1314,6 +1317,9 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
   });
   if (planArtifactRefs.length === applyRequests.length && applyEnvelope?.arguments) {
     applyEnvelope.arguments = { planRef: planArtifactRefs[0], action: "dry_run" };
+    // 租期挂在信封上而不是塞回 planRef：planRef 是身份，过期时间是关于这次交接的
+    // 事实，两者混在一个字符串里就没法表达了。
+    applyEnvelope.expiresAt = planExpiresAt;
     for (let index = 0; index < (applyEnvelope.additionalCalls?.length ?? 0); index += 1) {
       applyEnvelope.additionalCalls[index].arguments = {
         planRef: planArtifactRefs[index + 1],
