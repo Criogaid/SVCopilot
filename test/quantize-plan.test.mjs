@@ -391,7 +391,7 @@ test("a reanchored selector is rejected when the target group UUID changed", asy
   );
 });
 
-test("noteIds select a subset and responseMode governs perNote size", async () => {
+test("notes select a subset and responseMode governs perNote size", async () => {
   const store = createStore();
   const count = 130;
   const notes = Array.from({ length: count }, (_, index) => ({
@@ -402,7 +402,7 @@ test("noteIds select a subset and responseMode governs perNote size", async () =
   const service = createService(store);
   const subset = await service.plan({
     contextId: stored.contextId,
-    noteIds: [`${occurrenceId}:n:3`, `${occurrenceId}:n:7`],
+    notes: [3, 7],
     grid: { division: "1/4" },
   });
   assert.equal(subset.summary.noteCount, 2);
@@ -466,10 +466,10 @@ test("quantize resolves contexts honestly across error paths", async () => {
   await assert.rejects(
     service.plan({
       contextId: known.stored.contextId,
-      noteIds: [`${known.occurrenceId}:n:9`],
+      notes: [9],
       grid: { division: "1/8" },
     }),
-    (error) => error.code === "UNKNOWN_NOTE_ID"
+    (error) => error.code === "NOTE_INDEX_OUT_OF_RANGE"
   );
 });
 
@@ -485,8 +485,8 @@ test("quantize rejects malformed requests before touching the store", async () =
     { contextId: "ctx", grid: { division: "1/8" }, strength: 1.5 },
     { contextId: "ctx", grid: { division: "1/8" }, swing: -0.1 },
     { contextId: "ctx", grid: { division: "1/8" }, quantizeDurations: "yes" },
-    { contextId: "ctx", grid: { division: "1/8" }, noteIds: [] },
-    { contextId: "ctx", grid: { division: "1/8" }, noteIds: ["a", "a"] },
+    { contextId: "ctx", grid: { division: "1/8" }, notes: [] },
+    { contextId: "ctx", grid: { division: "1/8" }, notes: [0, 0] },
     { contextId: "ctx", grid: { division: "1/8" }, responseMode: "loud" },
     { contextId: "ctx", grid: { division: "1/8" }, bogus: true },
   ]) {

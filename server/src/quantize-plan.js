@@ -101,20 +101,10 @@ function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
   const candidates = occurrences.filter(
     (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
   );
-  // noteId 前缀（去掉 :n:Z）即 occurrenceId，与 sv_patch_notes 一致。
-  const derived = new Set();
-  for (const noteId of input.noteIds ?? []) {
-    const cut = noteId.lastIndexOf(":n:");
-    if (cut > 0) derived.add(noteId.slice(0, cut));
-  }
-  if (derived.size > 1) {
-    throw codedError("INVALID_NOTE_ID", "all noteIds must belong to the same range occurrence");
-  }
-  const derivedId = derived.size === 1 ? derived.values().next().value : undefined;
-  if (input.occurrenceId !== undefined && derivedId !== undefined && input.occurrenceId !== derivedId) {
-    throw codedError("INVALID_NOTE_ID", "noteIds belong to a different occurrence than occurrenceId");
-  }
-  const wantedId = input.occurrenceId ?? derivedId;
+  // notes 是组内 index（§3.1），不携带 occurrence 前缀，因此无法也无需从选择器推导
+  // occurrence——单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 覆盖了其余情况。
+  const derivedId = undefined;
+  const wantedId = input.occurrenceId;
   let occurrence = null;
   if (wantedId !== undefined) {
     occurrence = occurrences.find((item) => item.occurrenceId === wantedId) ?? null;
@@ -160,7 +150,7 @@ function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
   } else {
     const error = codedError(
       "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId or noteIds"
+      "range context has multiple occurrences with notes; provide occurrenceId"
     );
     error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
     error.details = { candidateOccurrences: error.candidateOccurrences };
@@ -180,7 +170,6 @@ function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
   const timeOffset = occurrence.timeOffsetBlick ?? 0;
   const allNotes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       localOnsetBlick: fingerprint.onsetBlick,
@@ -195,12 +184,25 @@ function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
     );
   }
   let notes = allNotes;
-  if (input.noteIds !== undefined) {
-    const wanted = new Set(input.noteIds);
-    notes = allNotes.filter((note) => wanted.has(note.noteId));
+  if (input.notes !== undefined) {
+    const wanted = new Set(input.notes);
+    notes = allNotes.filter((note) => wanted.has(note.indexInGroup));
     if (notes.length !== wanted.size) {
-      const missing = input.noteIds.find((noteId) => !allNotes.some((note) => note.noteId === noteId));
-      throw codedError("UNKNOWN_NOTE_ID", `noteId is not part of the resolved occurrence: ${missing}`);
+      const groupNoteCount = occurrence.groupNoteCount ?? allNotes.length;
+      const missing = input.notes.find(
+        (index) => !allNotes.some((note) => note.indexInGroup === index)
+      );
+      if (missing >= groupNoteCount) {
+        throw codedError("NOTE_INDEX_OUT_OF_RANGE", `note index ${missing} is outside the note group`, {
+          got: missing,
+          max: groupNoteCount - 1,
+        });
+      }
+      throw codedError(
+        "NOTE_NOT_IN_CONTEXT",
+        `note ${missing} exists but was not captured in this occurrence`,
+        { got: missing }
+      );
     }
   }
   return { stored, occurrence, notes, quarterBlick, meterMarks, timeOffsetBlick: timeOffset };
@@ -371,7 +373,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
       ...(item.changedDuration ? { durationBlick: item.plannedDurationBlick } : {}),
     },
   }));
-  // 与 sv_align_lyrics 相同的 continuation 契约：提交成功使 contextId 失效且 noteId 内嵌
+  // 与 sv_align_lyrics 相同的 continuation 契约：提交成功使 contextId 失效，因此后续批次
   // contextId，后续批次无法预生成——只交出第一批，其余通过"commit → 重拍快照 → 同参重跑"
   // 收敛（已量化音符自动 no-change）。
   const submittable = patches.slice(0, MAX_PATCHES);
@@ -514,7 +516,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
       ? {}
       : {
           perNote: planned.slice(0, cap).map((item) => ({
-            noteId: item.note.noteId,
+            note: item.note.indexInGroup,
             lyrics: item.note.lyrics,
             originalOnsetBlick: item.note.absOnsetBlick,
             plannedOnsetBlick: item.plannedAbsOnsetBlick,
@@ -547,7 +549,7 @@ function normalizeQuantizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "noteIds", "grid", "strength", "swing", "quantizeDurations", "responseMode", "usePlanRef"],
+    ["contextId", "occurrenceId", "notes", "grid", "strength", "swing", "quantizeDurations", "responseMode", "usePlanRef"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -559,17 +561,17 @@ function normalizeQuantizeRequest(request) {
   ) {
     throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
   }
-  if (request.noteIds !== undefined) {
+  if (request.notes !== undefined) {
     if (
-      !Array.isArray(request.noteIds) ||
-      request.noteIds.length === 0 ||
-      request.noteIds.length > MAX_PATCHES ||
-      !request.noteIds.every((noteId) => typeof noteId === "string" && noteId.length > 0) ||
-      new Set(request.noteIds).size !== request.noteIds.length
+      !Array.isArray(request.notes) ||
+      request.notes.length === 0 ||
+      request.notes.length > MAX_PATCHES ||
+      !request.notes.every((index) => Number.isSafeInteger(index) && index >= 0) ||
+      new Set(request.notes).size !== request.notes.length
     ) {
       throw codedError(
         "INVALID_ARGUMENTS",
-        `noteIds must be 1-${MAX_PATCHES} unique non-empty strings (a subset within the patch cap never needs continuation)`
+        `notes must be 1-${MAX_PATCHES} unique non-negative indexes (a subset within the patch cap never needs continuation)`
       );
     }
   }
@@ -602,7 +604,7 @@ function normalizeQuantizeRequest(request) {
   return {
     contextId: request.contextId,
     occurrenceId: request.occurrenceId,
-    noteIds: request.noteIds,
+    notes: request.notes,
     grid: { division: request.grid.division },
     strength,
     swing,

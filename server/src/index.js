@@ -1714,15 +1714,16 @@ export const TOOLS = [
         occurrenceId: {
           type: "string",
           minLength: 1,
-          description: "Optional when noteIds imply it or the context has one occurrence with notes.",
+          description: "Optional when the context has exactly one occurrence with notes.",
         },
-        noteIds: {
+        notes: {
           type: "array",
           minItems: 1,
           maxItems: 200,
           uniqueItems: true,
-          items: { type: "string", minLength: 1 },
-          description: "Optional subset; all noteIds must belong to one occurrence.",
+          items: { type: "integer", minimum: 0 },
+          description:
+            "Optional subset, as 0-based note indexes within the resolved NoteGroup.",
         },
         grid: {
           type: "object",
