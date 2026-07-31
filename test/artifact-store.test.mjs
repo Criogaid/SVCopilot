@@ -176,14 +176,24 @@ const sessionId = "sess_001";
     sessionId,
     byteBudget: 7,
   }).page;
-  const tampered = `${firstPage.cursor.slice(0, -1)}${firstPage.cursor.endsWith("A") ? "B" : "A"}`;
+  // 篡改必须发生在**首字符**上。base64url 的末字符只承载有效位的高 2 位（32 字节
+  // 签名编码成 43 字符），因此 A<->B 这种末字符互换在约 1/16 的签名上解码出完全相同
+  // 的字节——曾让这条断言以那个概率随机通过。先证明字节真的变了，再断言被拒绝，
+  // 否则"没抛错"到底是校验漏了还是根本没改动就无从分辨。
+  const [body, signature] = firstPage.cursor.split(".");
+  const tamperedSignature = `${signature[0] === "A" ? "B" : "A"}${signature.slice(1)}`;
+  assert.notDeepStrictEqual(
+    Buffer.from(tamperedSignature, "base64url"),
+    Buffer.from(signature, "base64url"),
+    "the tampered signature must actually decode to different bytes"
+  );
   assert.throws(
     () =>
       store.readPage({
         artifactId: artifact.id,
         expectedContentHash: artifact.contentHash,
         sessionId,
-        cursor: tampered,
+        cursor: `${body}.${tamperedSignature}`,
         byteBudget: 7,
       }),
     /ARTIFACT_CURSOR_INVALID/

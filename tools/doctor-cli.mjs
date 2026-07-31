@@ -61,7 +61,7 @@ if (asJson) {
 }
 
 // 只有 error 级 finding 才影响退出码：宿主未连接是 info，不该让 CI 或用户脚本失败。
-process.exit(report.ok ? 0 : 1);
+process.exit(report.installationHealthy ? 0 : 1);
 
 function printHuman(value) {
   const { versions, bridge, transport, manifest, surface, findings } = value;

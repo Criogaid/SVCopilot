@@ -66,7 +66,11 @@ test("the doctor operation is reachable through sv_status and stays read-only", 
 test("sv_doctor returns a structurally valid report", async () => {
   const d = await callDoctor();
   assert.equal(d.kind, "svcopilot-doctor");
-  assert.equal(typeof d.ok, "boolean");
+  // 诊断跑完了就是 succeeded；「安装是否健康」是另一个结论，不挤进 status。
+  assert.equal(d.status, "succeeded");
+  assert.equal(typeof d.installationHealthy, "boolean");
+  // 与 status 并存的 ok 布尔已从 MCP surface 移除。
+  assert.equal("ok" in d, false);
   assert.ok(d.generatedAt);
   assert.ok(d.versions?.interfaceVersion);
   assert.ok(d.versions?.node);
@@ -91,7 +95,7 @@ test("sv_doctor reports host as not attached when no SynthV is running", async (
   assert.ok(hostFinding, "HOST_NOT_ATTACHED finding must be present");
   assert.equal(hostFinding.severity, "info");
   // 未连接不是错误，不应让 ok 变 false。
-  assert.equal(d.ok, !d.findings.some((f) => f.severity === "error"));
+  assert.equal(d.installationHealthy, !d.findings.some((f) => f.severity === "error"));
 });
 
 test("sv_doctor reports staging bridge as found", async () => {
@@ -193,7 +197,7 @@ test("collectDoctorReport unit: proto mismatch produces a finding per found scri
     loadedFound,
     "a found loaded script with a different proto must be reported"
   );
-  assert.equal(report.ok, !loadedFound);
+  assert.equal(report.installationHealthy, !loadedFound);
 });
 
 test("collectDoctorReport unit: attached host with no ops produces warning", () => {

@@ -193,7 +193,14 @@ export function collectDoctorReport({
   }
 
   return {
-    ok: !findings.some((finding) => finding.severity === "error"),
+    // 诊断本身完成了，因此 status 是 succeeded——即使报告里有 error 级 finding。
+    // 「安装是否健康」是另一个问题（§4.5：status 只回答「调用方要求的操作是否完成」），
+    // 把它混进 status 会让模型以为诊断调用失败了，而实际上诊断成功地发现了问题。
+    status: "succeeded",
+    // 刻意不叫 `ok`：与 status 并存的 `ok` 会被编码器当成同义冗余剥掉（那条规则是
+    // 对的——绝大多数 `ok` 确实只是 status 的第二份副本）。这个字段承载的是别的
+    // 结论，因此用能说清它是什么的名字。
+    installationHealthy: !findings.some((finding) => finding.severity === "error"),
     kind: "svcopilot-doctor",
     generatedAt: new Date().toISOString(),
     versions: {
