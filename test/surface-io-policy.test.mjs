@@ -227,6 +227,31 @@ test("allowedEchoes is a documented whitelist, not an escape hatch", () => {
   assert.equal(allowedEchoReason("nonsense"), null);
 });
 
+test("no tool declares a vacuous outputSchema", async () => {
+  // 计划 §13.4：outputSchema 要么不声明，要么严格。
+  // `{type:"object", additionalProperties:true}` 是最坏的一种——MCP 客户端 SDK 会据此
+  // 校验 structuredContent 并在缺失时报错，因此它把"必须符合"变成了空承诺。
+  //
+  // 现在选择"不声明"：根信封仍有 57 个迁移期字段在根级（root-envelope.js），一份如实
+  // 覆盖当前形状的 schema 得允许 72 个字段，那是把现状抄一遍而不是契约。B2 收完
+  // legacy 字段后再为已包信封的 facade 声明严格 schema。
+  for (const tool of TOOLS) {
+    assert.equal(
+      tool.outputSchema,
+      undefined,
+      `${tool.name} declares an outputSchema; it must be strict or absent, never a bare object`
+    );
+  }
+  const served = await withClient(async (client) => (await client.listTools()).tools);
+  for (const tool of served) {
+    assert.equal(
+      tool.outputSchema,
+      undefined,
+      `${tool.name} is served with an outputSchema; see plan §13.4`
+    );
+  }
+});
+
 test("the registry is audit-only and never imported by a handler", async () => {
   // §2.3 规则 9：业务 handler 不得读它来决定语义。两份真相会立刻开始漂移，
   // 而且 policy 表本来只是给门禁看的。

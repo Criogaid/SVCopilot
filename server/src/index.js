@@ -548,6 +548,18 @@ const USE_PLAN_REF_SCHEMA = {
     "Seal mutation payloads as immutable artifacts and return short planRef apply arguments. Set false only when inline payloads are required.",
 };
 
+// 内部 handler 目录。这些名字不出现在 tools/list 里（facade 是唯一 surface），
+// 它们的 inputSchema 通过 sv_describe 按需提供。
+//
+// 刻意不声明 outputSchema（计划 §13.4 的决策）：
+//   - MCP 规范把 outputSchema 当成承诺——客户端 SDK 会据此校验 structuredContent，
+//     缺失或不符即报错。因此声明一个 `{type:"object", additionalProperties:true}`
+//     等于承诺"是个对象"，既无验证价值，又让「服务器 MUST 符合该 schema」变成空约束。
+//   - 声明**严格**的信封 schema 现在也不成立：根信封字段全集（root-envelope.js）里
+//     15 个是契约字段，另有 57 个迁移期字段仍在根级。一份如实覆盖当前形状的 schema
+//     必须允许 72 个字段，那不是契约，而是把现状抄一遍。
+// 因此在 B2 把 legacy 根字段收进 data 之前不声明；届时再为已包信封的 facade 声明
+// 严格 schema，并由门禁校验它与 root-envelope/result-status 同源。
 export const TOOLS = [
   {
     name: "sv_root",
@@ -692,7 +704,6 @@ export const TOOLS = [
         },
       },
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -779,7 +790,6 @@ export const TOOLS = [
       },
       required: ["mode", "steps"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
   },
   {
     name: "sv_wait_for_processing",
@@ -846,7 +856,6 @@ export const TOOLS = [
         stablePolls: { type: "integer", minimum: 1, maximum: 10 },
       },
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -873,7 +882,6 @@ export const TOOLS = [
       },
       required: ["lyrics"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -979,7 +987,6 @@ export const TOOLS = [
       },
       oneOf: [{ required: ["contextId", "patches"] }, { required: ["planRef", "action"] }],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -1109,7 +1116,6 @@ export const TOOLS = [
         },
       },
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1202,7 +1208,6 @@ export const TOOLS = [
       },
       required: ["mode"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1354,7 +1359,6 @@ export const TOOLS = [
       },
       required: ["contextId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1402,7 +1406,6 @@ export const TOOLS = [
       },
       required: ["contextId", "lyrics"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1495,7 +1498,6 @@ export const TOOLS = [
       },
       required: ["contextId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1569,7 +1571,6 @@ export const TOOLS = [
       },
       required: ["targets"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1616,7 +1617,6 @@ export const TOOLS = [
       },
       required: ["contextId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1677,7 +1677,6 @@ export const TOOLS = [
       },
       required: ["contextId", "grid"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1783,7 +1782,6 @@ export const TOOLS = [
       },
       required: ["contextId", "targetOccurrenceId", "harmony"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1840,7 +1838,6 @@ export const TOOLS = [
       },
       required: ["contextId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1864,7 +1861,6 @@ export const TOOLS = [
       },
       required: ["target", "parameter", "range"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -1916,7 +1912,6 @@ export const TOOLS = [
       },
       oneOf: [{ required: ["target", "curves"] }, { required: ["planRef", "action"] }],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2049,7 +2044,6 @@ export const TOOLS = [
         { required: ["planRef", "action"] },
       ],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2172,7 +2166,6 @@ export const TOOLS = [
         },
       },
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -2228,7 +2221,6 @@ export const TOOLS = [
       },
       required: ["contextId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2390,7 +2382,6 @@ export const TOOLS = [
       },
       required: ["target"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2468,7 +2459,6 @@ export const TOOLS = [
       },
       oneOf: [{ required: ["contextId", "operations"] }, { required: ["planRef", "action"] }],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2507,7 +2497,6 @@ export const TOOLS = [
       },
       required: ["fromBlick", "toBlick"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2519,7 +2508,6 @@ export const TOOLS = [
       properties: { auditionId: { type: "string", minLength: 1 } },
       required: ["auditionId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -2532,7 +2520,6 @@ export const TOOLS = [
       properties: { auditionId: { type: "string", minLength: 1 } },
       required: ["auditionId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2571,7 +2558,6 @@ export const TOOLS = [
       },
       required: ["recovery"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2616,7 +2602,6 @@ export const TOOLS = [
       },
       required: ["operation"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
@@ -2696,7 +2681,6 @@ export const TOOLS = [
       },
       required: ["fromBlick", "toBlick", "variants"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
@@ -2709,7 +2693,6 @@ export const TOOLS = [
       properties: { comparisonId: { type: "string", minLength: 1 } },
       required: ["comparisonId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -2722,7 +2705,6 @@ export const TOOLS = [
       properties: { comparisonId: { type: "string", minLength: 1 } },
       required: ["comparisonId"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   },
   {
@@ -2742,7 +2724,6 @@ export const TOOLS = [
       },
       required: ["trackIndex"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -2758,7 +2739,6 @@ export const TOOLS = [
       },
       required: ["templateTrackIndex"],
     },
-    outputSchema: { type: "object", additionalProperties: true },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
 ];
