@@ -29,27 +29,33 @@ import {
 }
 
 // 失败类 status 必须置 isError，判据是"操作有没有完成"。
-for (const status of [
-  "failed",
-  "conflict",
-  "rolled_back",
-  "rollback_failed",
-  "partial",
-  "outcome_unknown",
+// effects 按矩阵给出：rollback_failed 允许 may_remain/unknown 两种，因此不可省略——
+// 服务端替它挑一个就是在编造"宿主里还剩什么"的证据。
+for (const [status, effects] of [
+  ["failed", "none"],
+  ["conflict", "none"],
+  ["rolled_back", "reverted"],
+  ["rollback_failed", "may_remain"],
+  ["partial", "may_remain"],
+  ["outcome_unknown", "unknown"],
 ]) {
-  const result = encodeToolResult({ ok: false, status, error: { code: "X" } });
+  const result = encodeToolResult({ ok: false, status, effects, error: { code: "X" } });
   assert.strictEqual(result.isError, true, `${status} 必须是 isError`);
   assert.strictEqual(isErrorStatus(status), true);
 }
 
-// 写入已验证、只是 processing 观察失败：不得标成 isError，否则模型会重试 mutation。
+// 写入已验证、只是 processing 观察失败：投影成 succeeded/verified，绝不置 isError，
+// 否则模型会重放一个已经成功的 mutation。状态机取值移入 data.state 不丢失。
 {
   const result = encodeToolResult({
     ok: true,
     status: "processing_observation_failed",
     effects: "verified",
+    data: { changed: 1 },
   });
   assert.strictEqual(result.isError, undefined);
+  assert.strictEqual(result.structuredContent.status, "succeeded");
+  assert.strictEqual(result.structuredContent.data.state, "processing_observation_failed");
   assert.strictEqual(isErrorStatus("processing_observation_failed"), false);
 }
 

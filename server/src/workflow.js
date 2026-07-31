@@ -236,11 +236,13 @@ export class WorkflowExecutor {
     return {
       ok: true,
       status: "succeeded",
-      effects: writeAttempted
-        ? pendingWriteVerifications.size === 0
-          ? "verified"
-          : "verified_or_warned"
-        : "none",
+      // effects 只有矩阵（§4.5）里的取值，且它回答的是「宿主里还剩什么」。
+      // 纯读取根本没有写入语义，因此按 §10.2.1 省略 effects，而不是谎报 "none"
+      // （那会读成"曾尝试写入但什么都没留下"）。
+      // 写入路径确实完成了，所以是 verified；缺少读回断言由 UNVERIFIED_WRITE
+      // warning 单独表达，不篡改 effects——以前这里的 "verified_or_warned" 既不在
+      // 矩阵内，又把一条 warning 的存在混进了 effects 的判断。
+      ...(writeAttempted ? { effects: "verified" } : {}),
       exports,
       steps: stepReports,
       undo: undoEvidence(undoBoundaryCalls),

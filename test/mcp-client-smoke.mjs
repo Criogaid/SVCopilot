@@ -1542,7 +1542,9 @@ try {
       arguments: { auditionId: autoAudition.data.auditionId },
     })
   );
-  assert.ok(["restored", "stopped_by_user"].includes(autoAuditionDone.status));
+  // 根 status 走冻结矩阵；audition 的状态机取值留在 data.state（计划 §4.5/§10.7）。
+  assert.equal(autoAuditionDone.status, "succeeded");
+  assert.ok(["restored", "stopped_by_user"].includes(autoAuditionDone.data.state));
   assert.ok(Number.isFinite(autoAuditionDone.data.autoStop.timerDelayMs));
 
   // 试听闭环：start（solo + loop）→ get → stop（恢复 solo 与 playhead）。

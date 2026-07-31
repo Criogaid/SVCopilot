@@ -3,28 +3,16 @@
 // structuredContent 是唯一完整的机器结果；content[0].text 只是一行状态摘要。
 // 早期实现把完整 JSON.stringify 同时写进两处，wire bytes 精确是 payload 的两倍，
 // 而两路承载的信息完全相同——这是全链路最便宜的一处浪费。
+import {
+  assertStatusEnvelope,
+  fillCanonicalEffects,
+  isErrorStatus,
+  projectStatusEnvelope,
+} from "./result-status.js";
+
 const TEXT_SUMMARY_MAX_BYTES = 512;
 
-// 「操作有没有完成」决定 isError，而不是「要不要人工介入」。
-// isError 不影响 structuredContent 的传输，两种取值下客户端拿到的数据一样，
-// 因此该字段应当如实反映失败。
-// 注意 processing_observation_failed 不在此列：写入已通过读回验证，只是 phoneme
-// 观察没看到结果。把它标成 isError 会让模型以为写入失败并重试同一 mutation。
-const ERROR_STATUSES = new Set([
-  "failed",
-  "conflict",
-  "rolled_back",
-  "rollback_failed",
-  "rollback_unverified",
-  "partial",
-  "outcome_unknown",
-  "verification_failed",
-  "restore_failed",
-]);
-
-export function isErrorStatus(status) {
-  return typeof status === "string" && ERROR_STATUSES.has(status);
-}
+export { isErrorStatus };
 
 /**
  * 测量一个 MCP 结果对象的字节成本。
@@ -125,16 +113,28 @@ export function encodeToolResult(value) {
   const normalizedValue = value ?? null;
   const isPlainObject =
     normalizedValue !== null && typeof normalizedValue === "object" && !Array.isArray(normalizedValue);
-  const structuredContent = isPlainObject
-    ? stripRedundantOk(normalizedValue)
-    : { result: normalizedValue };
+  if (!isPlainObject) {
+    const structuredContent = { result: normalizedValue };
+    return {
+      content: [{ type: "text", text: summarizeLine(structuredContent) }],
+      structuredContent,
+    };
+  }
+
+  // 三步规范化，顺序不可换：先把服务内部 status（audition 状态机、processing 观测
+  // 结论）投影进冻结矩阵，再补齐可由 status 唯一推导的 effects，最后校验三者相容。
+  // 校验放在最后，才是在检查「模型真正看到的那一份」。
+  const projected = fillCanonicalEffects(
+    projectStatusEnvelope(stripRedundantOk(normalizedValue))
+  );
+  if (typeof projected.status === "string") assertStatusEnvelope(projected);
 
   const result = {
-    content: [{ type: "text", text: summarizeLine(structuredContent) }],
-    structuredContent,
+    content: [{ type: "text", text: summarizeLine(projected) }],
+    structuredContent: projected,
   };
 
-  if (isErrorStatus(structuredContent.status)) {
+  if (isErrorStatus(projected.status)) {
     result.isError = true;
   }
 
