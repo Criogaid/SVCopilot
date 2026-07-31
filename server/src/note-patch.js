@@ -49,6 +49,7 @@ export class NotePatchService {
     });
     let resolvedRequest = request;
     let ledgerRef = null;
+    let planCapsule = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const { resolvePlanReference } = await import("./plan-reference.js");
@@ -65,6 +66,7 @@ export class NotePatchService {
       });
       resolvedRequest = resolved.mutationRequest;
       ledgerRef = resolved.ledgerRef;
+      planCapsule = resolved.capsule;
     }
     if (diagnostics && resolvedRequest !== request) {
       resolvedRequest = { ...resolvedRequest, diagnostics: true };
@@ -85,9 +87,13 @@ export class NotePatchService {
       try {
         const stored = diagnostics
           ? diagnostics.measureSync("contextRestoreMs", () =>
-              this.snapshotService.getContext(input.contextId, host.epoch())
+              this.snapshotService.getContext(input.contextId, host.epoch(), {
+                capsule: planCapsule,
+              })
             )
-          : this.snapshotService.getContext(input.contextId, host.epoch());
+          : this.snapshotService.getContext(input.contextId, host.epoch(), {
+              capsule: planCapsule,
+            });
         resolved = await resolveContextTarget(host, stored, {
           verify: true,
           acceptRange: true,

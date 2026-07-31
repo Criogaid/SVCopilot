@@ -141,6 +141,7 @@ export class ParameterCurveService {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
     let ledgerRef = null;
+    let planCapsule = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const { resolvePlanReference } = await import("./plan-reference.js");
@@ -157,6 +158,7 @@ export class ParameterCurveService {
       });
       resolvedRequest = resolved.mutationRequest;
       ledgerRef = resolved.ledgerRef;
+      planCapsule = resolved.capsule;
     }
     let input;
     try {
@@ -171,6 +173,7 @@ export class ParameterCurveService {
     const transaction = await this._runTransaction(input, {
       serviceStartedAt,
       coordinatorRequestedAt,
+      planCapsule,
     });
     return settlePlanLedger(
       this.artifactStore?.planLedger ?? null,
@@ -182,6 +185,7 @@ export class ParameterCurveService {
   async _runTransaction(input, timingOrigin = {}) {
     const serviceStartedAt = timingOrigin.serviceStartedAt ?? this.now();
     const coordinatorRequestedAt = timingOrigin.coordinatorRequestedAt ?? serviceStartedAt;
+    const planCapsule = timingOrigin.planCapsule ?? null;
     return this.session.withExclusive(async (host) => {
       const acquiredAt = this.now();
       const capture = createHostScope(host);
@@ -193,6 +197,7 @@ export class ParameterCurveService {
           acquiredAt,
           snapshotService: this.snapshotService,
           epoch: host.epoch(),
+          planCapsule,
         });
       } finally {
         await capture.releaseAll();
@@ -1109,7 +1114,9 @@ async function resolveCurveTarget(capture, target, context = {}) {
     if (!context.snapshotService) {
       throw codedError("CONTEXT_UNAVAILABLE", "range context resolution is not configured");
     }
-    storedContext = context.snapshotService.getContext(target.contextId, context.epoch);
+    storedContext = context.snapshotService.getContext(target.contextId, context.epoch, {
+      capsule: context.planCapsule ?? null,
+    });
     if (storedContext.context?.kind !== "range") {
       throw codedError("INVALID_CONTEXT", "contextId does not identify a range snapshot");
     }

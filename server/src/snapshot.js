@@ -108,22 +108,6 @@ export class SnapshotStore {
     };
   }
 
-  restore(contextId, snapshot) {
-    this._prune();
-    if (this.entries.has(contextId)) return this.entries.get(contextId);
-    if (typeof contextId !== "string" || !contextId || !snapshot || typeof snapshot !== "object") {
-      throw codedError("INVALID_ARGUMENTS", "restored snapshot requires contextId and snapshot");
-    }
-    const restored = {
-      ...canonicalClone(snapshot),
-      contextId,
-      createdAt: this.now(),
-      expiresAt: this.now() + this.ttlMs,
-    };
-    restored.accountedBytes = estimateRetainedBytes(restored);
-    this._admit(restored);
-    return this.entries.get(contextId);
-  }
 
   delete(contextId, reason = "invalidated_by_mutation") {
     const entry = this.entries.get(contextId);
@@ -399,8 +383,20 @@ export class SnapshotService {
     });
   }
 
-  getContext(contextId, epoch) {
-    const entry = this.store.get(contextId);
+  /**
+   * 取上下文。`capsule` 是 PlanRef 展开出的**只读**范围快照：它不进 store，
+   * 因此不可被别人查到、不参与 LRU、也不会与真实快照混淆（§4.3.2）。
+   *
+   * 这正是 restore() 写回路径被删除的原因——写回让一份只读证据变成了看起来
+   * 像真实快照的 store 条目，而它既没有真实快照的来源，也不该有它的生命周期。
+   *
+   * @param {string} contextId
+   * @param {number} epoch
+   * @param {object} [options]
+   * @param {object} [options.capsule] - 计划封存的最小完整范围快照
+   */
+  getContext(contextId, epoch, { capsule = null } = {}) {
+    const entry = this.store.get(contextId) ?? capsule ?? null;
     if (!entry) throw codedError("UNKNOWN_CONTEXT", `snapshot context not found: ${contextId}`);
     if (entry.epoch !== epoch) {
       throw codedError(

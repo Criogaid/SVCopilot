@@ -27,6 +27,7 @@ export class NoteStructureService {
   async restructureNotes(request) {
     let resolvedRequest = request;
     let ledgerRef = null;
+    let planCapsule = null;
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const resolvedPlan = resolvePlanReference({
         planRef: request.planRef,
@@ -41,6 +42,7 @@ export class NoteStructureService {
       });
       resolvedRequest = resolvedPlan.mutationRequest;
       ledgerRef = resolvedPlan.ledgerRef;
+      planCapsule = resolvedPlan.capsule;
     }
     const input = normalizeRequest(resolvedRequest);
     const result = await this.session.withExclusive(async (host) => {
@@ -53,7 +55,9 @@ export class NoteStructureService {
       const startedAt = this.now();
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
-        const stored = this.snapshotService.getContext(input.contextId, host.epoch());
+        const stored = this.snapshotService.getContext(input.contextId, host.epoch(), {
+          capsule: planCapsule,
+        });
         resolved = await resolveContextTarget(host, stored, {
           verify: true,
           acceptRange: true,

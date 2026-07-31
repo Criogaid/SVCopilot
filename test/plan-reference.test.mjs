@@ -83,7 +83,7 @@ const sessionId = "sess_plan";
 
   now += 101;
   assert.strictEqual(snapshotStore.get(stored.contextId), null);
-  resolvePlanReference({
+  const resolved = resolvePlanReference({
     planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
     action: "dry_run",
     expectedTargetTool: "sv_patch_notes",
@@ -91,9 +91,59 @@ const sessionId = "sess_plan";
     artifactStore,
     snapshotStore,
   });
-  const restored = snapshotStore.get(stored.contextId);
-  assert.strictEqual(restored.epoch, 7);
-  assert.strictEqual(restored.context.occurrences[0].occurrenceId, occurrence.occurrenceId);
+  // capsule 交给调用方，**不**写回 store：只读证据一旦进 store 就会被别人查到、
+  // 被 LRU 淘汰、并与真实快照混淆（§4.3.2）。
+  assert.strictEqual(snapshotStore.get(stored.contextId), null);
+  assert.strictEqual(resolved.capsule.epoch, 7);
+  assert.strictEqual(resolved.capsule.contextId, stored.contextId);
+  assert.strictEqual(
+    resolved.capsule.context.occurrences[0].occurrenceId,
+    occurrence.occurrenceId
+  );
+}
+
+// context 仍在 store 里时不产出 capsule：真实快照优先，capsule 只是它过期后的替身。
+{
+  let now = 1000;
+  const snapshotStore = new SnapshotStore({ now: () => now, ttlMs: 100 });
+  const stored = snapshotStore.create({
+    epoch: 7,
+    scope: { kind: "range" },
+    observedAt: new Date(now).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrence = {
+    occurrenceId: `${stored.contextId}:t:0:r:0`,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "grp_live",
+    timeOffsetBlick: 0,
+    sharedTargetOccurrences: [],
+    noteFingerprints: [],
+  };
+  stored.context.occurrences.push(occurrence);
+
+  const artifactStore = new ArtifactStore({ now: () => now });
+  const { payload } = buildPlanArtifact({
+    targetTool: "sv_patch_notes",
+    mutationRequest: { contextId: stored.contextId, patches: [] },
+    contextSnapshot: buildPlanContextSnapshot(stored, occurrence),
+  });
+  const artifact = artifactStore.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload,
+  });
+  const resolved = resolvePlanReference({
+    planRef: { artifactId: artifact.id, contentHash: artifact.contentHash },
+    action: "dry_run",
+    expectedTargetTool: "sv_patch_notes",
+    sessionId,
+    artifactStore,
+    snapshotStore,
+  });
+  assert.strictEqual(resolved.capsule, null);
 }
 
 // 目标工具不匹配报错。

@@ -65,13 +65,13 @@ export function resolvePlanReference({
     if (action === "commit") planLedger.beginCommit(planRef.artifactId);
     else planLedger.noteDryRun(planRef.artifactId);
   }
-  if (
-    plan.contextSnapshot &&
-    snapshotStore &&
-    !snapshotStore.get(plan.contextSnapshot.contextId)
-  ) {
-    snapshotStore.restore(plan.contextSnapshot.contextId, plan.contextSnapshot.snapshot);
-  }
+  // capsule 不写回 store（§4.3.2）：只读证据一旦进了 store 就会被别人查到、
+  // 被 LRU 淘汰、并与真实快照混淆。改为随返回值交给调用方，由它显式传给
+  // getContext——用途因此在调用点可见，而不是藏在一次副作用里。
+  const capsule =
+    plan.contextSnapshot && !snapshotStore?.get(plan.contextSnapshot.contextId)
+      ? { ...canonicalClone(plan.contextSnapshot.snapshot), contextId: plan.contextSnapshot.contextId }
+      : null;
 
   const mutationRequest = canonicalClone(plan.mutationRequest);
   mutationRequest.dryRun = action === "dry_run";
@@ -83,6 +83,7 @@ export function resolvePlanReference({
     mutationRequest,
     // commit 的结果必须回填 ledger；null 表示这次不是 commit 或未启用 ledger。
     ledgerRef: planLedger && action === "commit" ? planRef.artifactId : null,
+    capsule,
   };
 }
 

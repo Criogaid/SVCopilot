@@ -437,7 +437,7 @@ function createRangeFixture({
   return { model, snapshots, service, entry, contextId: entry.contextId, occurrenceId };
 }
 
-test("sv_restructure_notes expands a planRef and restores its bounded context capsule", async () => {
+test("sv_restructure_notes expands a planRef through its capsule without touching the store", async () => {
   const sessionId = "sess_structure_plan";
   const artifactStore = new ArtifactStore({ now: () => 1000 });
   const { model, snapshots, service, entry, contextId, occurrenceId } = createRangeFixture({
@@ -481,7 +481,9 @@ test("sv_restructure_notes expands a planRef and restores its bounded context ca
   assert.equal(result.status, "dry_run");
   assert.equal(result.data.expectedNoteCount, 4);
   assert.equal(model.groupNotes.length, 3);
-  assert.ok(snapshots.store.get(contextId));
+  // capsule 是只读证据，绝不写回 store：写回会让它被别人查到、被 LRU 淘汰，
+  // 并与真实快照混淆（§4.3.2）。
+  assert.equal(snapshots.store.get(contextId), null);
 });
 
 test("sv_restructure_notes accepts a range context and resolves notes by group index", async () => {

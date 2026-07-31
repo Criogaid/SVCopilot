@@ -61,6 +61,7 @@ export class PitchControlPatchService {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
     let ledgerRef = null;
+    let planCapsule = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const resolved = resolvePlanReference({
@@ -76,6 +77,7 @@ export class PitchControlPatchService {
       });
       resolvedRequest = resolved.mutationRequest;
       ledgerRef = resolved.ledgerRef;
+      planCapsule = resolved.capsule;
     }
     let input;
     try {
@@ -95,6 +97,7 @@ export class PitchControlPatchService {
           serviceStartedAt,
           coordinatorRequestedAt,
           acquiredAt,
+          planCapsule,
         });
         return transaction;
       } finally {
@@ -133,7 +136,9 @@ export class PitchControlPatchService {
     let failedOpIndex = null;
     const inverses = [];
     try {
-      const stored = this.snapshotService.getContext(input.contextId, host.epoch());
+      const stored = this.snapshotService.getContext(input.contextId, host.epoch(), {
+        capsule: clock.planCapsule ?? null,
+      });
       const target = await timer.measure("preflightReadMs", () =>
         resolvePitchTarget(scope, stored, input)
       );

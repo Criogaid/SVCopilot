@@ -1,14 +1,13 @@
 // ScopeSource：Context 与 Plan capsule 的共同解析入口（计划 §4.3.2）。
 //
-// 现状是两条路径：mutation handler 从 SnapshotStore 读 Context；PlanRef 靠
-// `snapshotStore.restore()` 把 capsule 写回 store，再让 handler 当普通 Context 处理。
-// 写回是污染——它把只读的 capsule 变成 store 里一条可被别人查到、可被 LRU 淘汰、
-// 还会与真实快照混淆的条目。
+// 两种来源产出同一个值：mutation handler 从 SnapshotStore 读 Context；PlanRef 展开出
+// 一个只读 capsule。capsule **不写回 store**——写回会让只读证据变成一条可被别人查到、
+// 可被 LRU 淘汰、还会与真实快照混淆的条目（§4.3.2），所以它随 resolvePlanReference
+// 的返回值交给调用方，由调用方显式传给 getContext。
 //
-// 但仅仅给 handler 加一个 `capsule` 参数并不足以删掉写回：target resolution、
-// fingerprint lookup、shared-target 检查全都直接读 `stored.context.occurrences`。
-// 所以先在这里把「范围作用域」定义成一个与来源无关的值（ResolvedRangeScope），
-// 两条来源各自产出它，下游只消费它。
+// 光有 `capsule` 参数还不够：target resolution、fingerprint lookup、shared-target
+// 检查全都直接读 `stored.context.occurrences`。因此这里把「范围作用域」定义成一个与
+// 来源无关的值（ResolvedRangeScope），两条来源各自产出它，下游只消费它。
 //
 // 这个模块**不访问宿主**：它只做纯数据解析（§3.5 规则 4）。live preflight 仍然
 // 完整执行——scope 只是告诉执行器"计划基于什么"，从不代替对活宿主的校验。
