@@ -17,9 +17,12 @@ import { FACADE_ORDER, buildOperationCatalog, operationNameForTool } from "./ope
 
 export const DESCRIBE_OPERATION_TOOL = "sv_describe";
 
-// 一次最多描述 2 个 operation。实测最大 4 个 schema 合计 37,378 bytes，是 16 KiB
-// 门禁的 2.3 倍；在 $defs 去重落地并实测通过之前，上限必须是 2 而不是 4。
+// 一次最多请求 2 个 operation。这只是上界，真正的约束是下面的字节预算。
 export const MAX_DESCRIBE_OPERATIONS = 2;
+
+// 单次 describe 响应的字节预算，与 artifact 直读上限一致。条数上限拦不住体积：
+// 最大的两份 schema 即使 $defs 去重后仍有约 18 KiB，所以预算必须按字节判定。
+export const MAX_DESCRIBE_BYTES = 16 * 1024;
 
 const FACADE_DESCRIPTIONS = {
   status: "Health check and official Synthesizer V API documentation lookup.",
@@ -122,7 +125,7 @@ export function createCompactFacade(tools) {
 
   function describe(requested) {
     const seen = new Set();
-    const described = [];
+    const resolved = [];
     for (const name of requested) {
       if (seen.has(name)) continue;
       seen.add(name);
@@ -133,7 +136,7 @@ export function createCompactFacade(tools) {
         error.details = { availableOperations: [...operations.keys()].sort() };
         throw error;
       }
-      described.push({
+      resolved.push({
         operation: entry.operation,
         // `facade` 不再返回：`tool` 已完整表达同一信息。
         tool: entry.facade,
@@ -144,7 +147,38 @@ export function createCompactFacade(tools) {
         inputSchema: entry.inputSchema,
       });
     }
-    return { status: "succeeded", operations: described };
+
+    // 字节预算按整个 operation 取舍，绝不截断 schema：一份被截断的 schema 看起来
+    // 仍然可用，模型照它构造的请求却必然被 Ajv 拒绝——那比"这次没给你"更糟。
+    // 第一个 operation 无论多大都要返回，否则请求会毫无进展。
+    const described = [];
+    const deferred = [];
+    let budget = MAX_DESCRIBE_BYTES;
+    for (const item of resolved) {
+      const size = Buffer.byteLength(JSON.stringify(item), "utf8");
+      if (described.length > 0 && size > budget) {
+        deferred.push({ operation: item.operation, bytes: size });
+        continue;
+      }
+      described.push(item);
+      budget -= size;
+    }
+
+    return {
+      status: "succeeded",
+      operations: described,
+      ...(deferred.length > 0
+        ? {
+            // 如实报告被推迟的部分及其体积，并给出可执行的下一步，而不是静默丢弃。
+            deferred: {
+              operations: deferred,
+              reason: "response_byte_budget_exhausted",
+              budgetBytes: MAX_DESCRIBE_BYTES,
+              remedy: "call sv_describe again with these operations alone",
+            },
+          }
+        : {}),
+    };
   }
 
   function catalog(interfaceVersion) {

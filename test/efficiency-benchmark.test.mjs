@@ -32,7 +32,9 @@ assert.ok(report.fixtures, "report.fixtures 必须存在");
 // ListTools 指标：minified 应小于 pretty，且与 PRD 基线接近。
 assert.ok(report.listTools.minifiedBytes > 0, "ListTools minified bytes 必须大于 0");
 assert.ok(report.listTools.prettyBytes > report.listTools.minifiedBytes, "pretty 必须大于 minified");
-assert.strictEqual(report.listTools.toolCount, 42, "当前工具数应保持 42");
+// 工具总数不写死常量：它是 OperationCatalog 的派生值，任何增删都必须只改一处。
+const { TOOLS } = await import("../server/src/index.js");
+assert.strictEqual(report.listTools.toolCount, TOOLS.length);
 assert.ok(
   report.listTools.descriptionBytes > 0,
   "description bytes 必须大于 0"

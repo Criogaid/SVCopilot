@@ -74,6 +74,7 @@ import {
   artifactResourceView,
 } from "./artifact-store.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
+import { dedupeSchema } from "./schema-defs.js";
 import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
@@ -1867,39 +1868,6 @@ export const TOOLS = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
-    name: "sv_patch_parameter_curve",
-    description:
-      "Edit one validated Automation parameter curve inside a blick range. Accepted built-ins are pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, and gender; vocalMode_<Name> must exist in the target group's observable vocalModeParams. Unknown names are rejected before NoteGroup.getParameter, and the returned Automation typeName is checked again to prevent host fallback. replace removes the range and writes explicit points; add/scale transform existing CONTROL POINTS. Writes use Undo boundaries, read-back verification, and optional verified compensation (not ACID).",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        target: CURVE_TARGET_SCHEMA,
-        parameter: {
-          type: "string",
-          minLength: 1,
-          maxLength: 200,
-          description:
-            "One official built-in Automation typeName or a vocalMode_<Name> exposed by the target group's voice.",
-        },
-        mode: { enum: ["replace", "add", "scale"] },
-        range: CURVE_RANGE_SCHEMA,
-        points: {
-          ...CURVE_POINTS_INPUT_SCHEMA,
-          description:
-            "replace mode only; use blick, a musicalPosition, or a note anchor from the target range context.",
-        },
-        amount: { type: "number", description: "add/scale mode only." },
-        simplifyThreshold: { type: "number", minimum: 0 },
-        dryRun: { type: "boolean", default: false },
-        atomic: { type: "boolean", default: true },
-      },
-      required: ["target", "parameter", "mode", "range"],
-    },
-    outputSchema: { type: "object", additionalProperties: true },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-  },
-  {
     name: "sv_patch_parameter_curves",
     description:
       "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). target.expectedNotes and target.expectedTimeOffsetBlick (emitted by sv_plan_expression) are verified against the live host in preflight so curves are never written at positions the notes or the whole reference have drifted away from. compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable. If a client collapses nested range/point types to unknown, read svcopilot://schemas/sv_patch_parameter_curves for the exact validated input schema.",
@@ -2795,6 +2763,13 @@ export const TOOLS = [
   },
 ];
 
+// schema 内部重复的共享片段在启动时一次性提到各自的 $defs。就地替换 inputSchema，
+// 使「sv_describe 送出的 schema」与「Ajv 校验用的 schema」始终是同一个对象——若分成
+// 两份，模型看到的契约就可能与实际执行的校验不同。
+for (const tool of TOOLS) {
+  tool.inputSchema = dedupeSchema(tool.inputSchema);
+}
+
 // facade 是唯一 MCP surface：direct tool 只作为内部组织单位，不进入 tools/list。
 // 没有 profile 选择层——多套 profile 需要维护 N 份「哪些工具可达」的真相，而收益
 // 只是元数据体积，facade 已经解决了后者。
@@ -3163,9 +3138,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "sv_get_parameter_curve":
         result = await parameterCurveService.getCurve(args);
         break;
-      case "sv_patch_parameter_curve":
-        result = await parameterCurveService.patchCurve(args);
-        break;
       case "sv_patch_parameter_curves":
         result = await parameterCurveService.patchCurves(args);
         break;
@@ -3217,7 +3189,6 @@ function normalizeToolArguments(name, args) {
   if (
     ![
       "sv_get_parameter_curve",
-      "sv_patch_parameter_curve",
       "sv_patch_parameter_curves",
       "sv_edit_phrase",
     ].includes(name)
@@ -3448,7 +3419,6 @@ function capabilities() {
         "sv_patch_notes",
         "sv_restructure_notes",
         "sv_get_parameter_curve",
-        "sv_patch_parameter_curve",
         "sv_patch_parameter_curves",
         "sv_patch_pitch_controls",
         "sv_plan_pitch_gesture",
@@ -3518,7 +3488,6 @@ function capabilities() {
         sv_restructure_notes: ["selection", "group", "range"],
         sv_wait_for_processing: ["selection", "group", "range"],
         sv_get_parameter_curve: ["range", "direct_target"],
-        sv_patch_parameter_curve: ["range", "direct_target"],
         sv_patch_parameter_curves: ["range", "direct_target"],
         sv_patch_pitch_controls: ["range"],
         sv_edit_phrase: ["range"],
@@ -3537,7 +3506,6 @@ function capabilities() {
       rangeSharedTargetConfirmation: [
         "sv_patch_notes",
         "sv_restructure_notes",
-        "sv_patch_parameter_curve",
         "sv_patch_parameter_curves",
         "sv_patch_pitch_controls",
         "sv_bake_computed_pitch",

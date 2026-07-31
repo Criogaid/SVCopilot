@@ -10,6 +10,7 @@ import { StdioClientTransport } from "../server/node_modules/@modelcontextprotoc
 import { TOOLS } from "../server/src/index.js";
 import {
   DESCRIBE_OPERATION_TOOL,
+  MAX_DESCRIBE_BYTES,
   MAX_DESCRIBE_OPERATIONS,
   createCompactFacade,
 } from "../server/src/compact-facade.js";
@@ -207,6 +208,49 @@ test("sv_describe returns the operation's real schema and its facade tool", asyn
   // 与内部 handler 校验的是同一份 schema。
   const direct = TOOLS.find((tool) => tool.name === "sv_patch_notes");
   assert.deepEqual(patch.inputSchema, direct.inputSchema);
+});
+
+test("sv_describe never exceeds its byte budget and defers honestly", async () => {
+  // 条数上限拦不住体积：最大的两份 schema 即使去重后仍约 18 KiB。预算按整个
+  // operation 取舍，绝不截断 schema——被截断的 schema 看起来可用，照它构造的请求
+  // 却必然被 Ajv 拒绝，那比"这次没给你"更糟。
+  const response = await withClient((client) =>
+    client.callTool({
+      name: DESCRIBE_OPERATION_TOOL,
+      arguments: { operations: ["patch_parameter_curves", "edit_phrase"] },
+    })
+  );
+  const payload = response.structuredContent;
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(payload), "utf8") <= MAX_DESCRIBE_BYTES,
+    "describe response must stay within its byte budget"
+  );
+  // 第一个无论多大都要返回，否则请求毫无进展。
+  assert.equal(payload.operations.length, 1);
+  assert.equal(payload.operations[0].operation, "patch_parameter_curves");
+  // 放不下的必须如实上报，并给出可执行的下一步。
+  assert.deepEqual(
+    payload.deferred.operations.map((item) => item.operation),
+    ["edit_phrase"]
+  );
+  assert.equal(payload.deferred.reason, "response_byte_budget_exhausted");
+  assert.match(payload.deferred.remedy, /sv_describe/);
+  assert.ok(payload.deferred.operations[0].bytes > 0);
+  // 返回的 schema 是完整的，不是被裁过的。
+  const direct = TOOLS.find((tool) => tool.name === "sv_patch_parameter_curves");
+  assert.deepEqual(payload.operations[0].inputSchema, direct.inputSchema);
+});
+
+test("a two-operation describe that fits returns both with no deferral", async () => {
+  const payload = await withClient(async (client) => {
+    const response = await client.callTool({
+      name: DESCRIBE_OPERATION_TOOL,
+      arguments: { operations: ["ping", "doctor"] },
+    });
+    return response.structuredContent;
+  });
+  assert.equal(payload.operations.length, 2);
+  assert.equal("deferred" in payload, false);
 });
 
 test("sv_describe bounds its request and rejects unknown operations", async () => {

@@ -51,7 +51,6 @@ const FACADE_BY_TOOL = new Map([
   ["sv_set_lyrics", "edit"],
   ["sv_patch_notes", "edit"],
   ["sv_restructure_notes", "edit"],
-  ["sv_patch_parameter_curve", "edit"],
   ["sv_patch_parameter_curves", "edit"],
   ["sv_patch_pitch_controls", "edit"],
   ["sv_bake_computed_pitch", "edit"],

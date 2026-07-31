@@ -82,19 +82,28 @@ async function fetchServedSchemas(toolNames) {
   try {
     await client.connect(transport);
     const schemas = {};
-    // 每次最多描述 MAX_DESCRIBE_OPERATIONS 个，按批取完。
-    for (let i = 0; i < toolNames.length; i += MAX_DESCRIBE_OPERATIONS) {
-      const batch = toolNames.slice(i, i + MAX_DESCRIBE_OPERATIONS);
+    // 每次最多请求 MAX_DESCRIBE_OPERATIONS 个，按批取完。响应还有字节预算：两份大
+    // schema 会让第二个被 deferred，此时按它给出的 remedy 单独再取一次。
+    const pending = [...toolNames];
+    while (pending.length > 0) {
+      const batch = pending.splice(0, MAX_DESCRIBE_OPERATIONS);
       const response = await client.callTool({
         name: DESCRIBE_OPERATION_TOOL,
         arguments: { operations: batch.map(operationNameForTool) },
       });
       assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
+      const { operations, deferred } = response.structuredContent;
       for (const name of batch) {
-        const entry = response.structuredContent.operations.find(
-          (item) => item.operation === operationNameForTool(name)
-        );
-        assert.ok(entry, `server must expose ${name}`);
+        const entry = operations.find((item) => item.operation === operationNameForTool(name));
+        if (!entry) {
+          // 被推迟的必须如实出现在 deferred 里，而不是静默消失。
+          assert.ok(
+            deferred?.operations.some((item) => item.operation === operationNameForTool(name)),
+            `server must expose ${name} or report it as deferred`
+          );
+          pending.push(name);
+          continue;
+        }
         schemas[name] = entry.inputSchema;
       }
     }
@@ -229,12 +238,8 @@ test("served mutation schemas accept only an explicit planRef execution action",
   }
 });
 
-test("served curve schemas accept dense-table-v1 points on single, batch, and phrase writes", async () => {
-  const schemas = await fetchServedSchemas([
-    "sv_patch_parameter_curve",
-    "sv_patch_parameter_curves",
-    "sv_edit_phrase",
-  ]);
+test("served curve schemas accept dense-table-v1 points on batch and phrase writes", async () => {
+  const schemas = await fetchServedSchemas(["sv_patch_parameter_curves", "sv_edit_phrase"]);
   const points = encodeDense(
     [
       { blick: 0, value: 0.2 },
@@ -255,11 +260,6 @@ test("served curve schemas accept dense-table-v1 points on single, batch, and ph
     range: { fromBlick: 0, toBlick: Q },
     points,
   };
-  assertValid(
-    compile(schemas.sv_patch_parameter_curve),
-    { target, ...curve },
-    "single curve dense points"
-  );
   assertValid(
     compile(schemas.sv_patch_parameter_curves),
     { target, curves: [curve] },

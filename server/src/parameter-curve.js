@@ -136,19 +136,6 @@ export class ParameterCurveService {
     });
   }
 
-  async patchCurve(request) {
-    const input = normalizePatchRequest(request);
-    const transaction = await this._runTransaction({
-      target: input.target,
-      curves: [curveInput(input)],
-      dryRun: input.dryRun,
-      atomic: input.atomic,
-      responseMode: "legacy",
-      undoLabel: null,
-    });
-    return formatSingleTransaction(transaction);
-  }
-
   async patchCurves(request) {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
@@ -1626,96 +1613,6 @@ function pointStats(points) {
   };
 }
 
-function formatSingleTransaction(transaction) {
-  const plan = transaction.plans[0] ?? null;
-  const timing = { elapsedMs: transaction.timings.serviceTotalMs };
-  if (transaction.ok && transaction.status === "dry_run") {
-    return {
-      ok: true,
-      status: "dry_run",
-      effects: "none",
-      atomicity: transaction.atomicity,
-      data: {
-        parameter: plan.typeName,
-        requestedParameter: plan.requestedParameter,
-        resolvedParameter: plan.resolvedParameter,
-        mode: plan.mode,
-        range: formatRange(plan),
-        before: { pointCount: plan.journal.length, stats: pointStats(plan.journal) },
-        planned: {
-          pointCount: plan.planned.length,
-          stats: pointStats(plan.planned),
-          points: inlinePoints(plan.planned, transaction.target.groupTimeOffsetBlick),
-        },
-        clampedCount: plan.clampedCount,
-        ...formatResolvedInputPositions(plan),
-      },
-      rollback: { attempted: false, verified: null },
-      undo: undoEvidence(0),
-      verification: { attempted: false, passed: null },
-      warnings: transaction.warnings,
-      timing,
-    };
-  }
-  if (transaction.ok) {
-    const noChange = transaction.status === "no_change";
-    return {
-      ok: true,
-      status: transaction.status,
-      effects: transaction.effects,
-      atomicity: transaction.atomicity,
-      data: {
-        parameter: plan.typeName,
-        requestedParameter: plan.requestedParameter,
-        resolvedParameter: plan.resolvedParameter,
-        mode: plan.mode,
-        range: formatRange(plan),
-        before: { pointCount: plan.journal.length, stats: pointStats(plan.journal) },
-        after: {
-          pointCount: plan.observed.length,
-          stats: pointStats(plan.observed),
-          points: inlinePoints(plan.observed, transaction.target.groupTimeOffsetBlick),
-        },
-        clampedCount: plan.clampedCount,
-        simplified: plan.simplifyThreshold !== undefined,
-        ...formatResolvedInputPositions(plan),
-      },
-      rollback: { attempted: false, verified: null },
-      undo: noChange
-        ? { boundaryCallsCompleted: 0, expectedUserUndoSteps: 0, automaticRollback: false }
-        : undoEvidence(transaction.boundaryCalls, {
-            automaticRollback: transaction.rollback.attempted,
-          }),
-      verification: plan.verification,
-      warnings: transaction.warnings,
-      timing,
-    };
-  }
-
-  const failure = transaction.failure ?? {
-    code: "HOST_CALL_FAILED",
-    message: "curve transaction failed",
-  };
-  const base = failedResult(failure.code, failure.message, transaction.effects);
-  const firstRollbackError = transaction.rollback.curves.find((curve) => curve.error)?.error;
-  return {
-    ...base,
-    status: transaction.status,
-    atomicity: transaction.atomicity,
-    rollback: {
-      attempted: transaction.rollback.attempted,
-      verified: transaction.rollback.verified,
-      ...(firstRollbackError ? { error: firstRollbackError } : {}),
-    },
-    undo: undoEvidence(transaction.boundaryCalls, {
-      automaticRollback: transaction.rollback.attempted,
-    }),
-    ...(plan?.verification ? { verification: plan.verification } : {}),
-    warnings: transaction.warnings,
-    timing,
-  };
-}
-
 function formatBatchValidationFailure(request, error, { elapsedMs }) {
   const rawCurves = Array.isArray(request?.curves) ? request.curves : [];
   const failure = failureEvidence(error, "validate", null);
@@ -1927,17 +1824,6 @@ function pointStatsCompact(points) {
   return { min: stats.min, max: stats.max, mean: stats.mean };
 }
 
-function curveInput(input) {
-  return {
-    parameter: input.parameter,
-    mode: input.mode,
-    range: input.range,
-    points: input.points,
-    amount: input.amount,
-    simplifyThreshold: input.simplifyThreshold,
-  };
-}
-
 async function timed(timings, key, now, task) {
   const startedAt = now();
   try {
@@ -2000,24 +1886,6 @@ function normalizeGetRequest(request) {
   const range = normalizeRange(request.range);
   const maxPoints = clampInteger(request.maxPoints, 1, 2000, MAX_INLINE_POINTS);
   return { target, parameter, range, maxPoints };
-}
-
-function normalizePatchRequest(request) {
-  if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  const target = normalizeTarget(request.target);
-  const curve = normalizeCurveInput(request);
-  if (request.dryRun !== undefined && typeof request.dryRun !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "dryRun must be a boolean");
-  }
-  if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
-  }
-  return {
-    target,
-    ...curve,
-    dryRun: request.dryRun === true,
-    atomic: request.atomic !== false,
-  };
 }
 
 function normalizeBatchPatchRequest(request) {
@@ -2454,27 +2322,6 @@ function stripSyntheticValue(point) {
   return position;
 }
 
-function failedResult(code, message, effects) {
-  return {
-    ok: false,
-    status: "failed",
-    effects,
-    error: {
-      code,
-      message,
-      outcome:
-        effects === "none" || effects === "reverted"
-          ? "unchanged"
-          : effects === "unknown"
-            ? "unknown"
-            : "partial",
-      retryable: false,
-    },
-    undo: undoEvidence(0),
-    verification: { attempted: false, passed: null },
-    warnings: [],
-  };
-}
 
 function undoEvidence(boundaryCallsCompleted, { automaticRollback = false } = {}) {
   return {

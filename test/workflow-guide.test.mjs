@@ -84,8 +84,10 @@ test("every guide example validates against the schemas the real server serves",
   ];
   const schemas = await withServer(async (client) => {
     const collected = new Map();
-    for (let i = 0; i < operations.length; i += MAX_DESCRIBE_OPERATIONS) {
-      const batch = operations.slice(i, i + MAX_DESCRIBE_OPERATIONS);
+    // 响应有字节预算：被 deferred 的 operation 按它给出的 remedy 再单独取一次。
+    const pending = [...operations];
+    while (pending.length > 0) {
+      const batch = pending.splice(0, MAX_DESCRIBE_OPERATIONS);
       const response = await client.callTool({
         name: DESCRIBE_OPERATION_TOOL,
         arguments: { operations: batch },
@@ -93,6 +95,9 @@ test("every guide example validates against the schemas the real server serves",
       assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
       for (const entry of response.structuredContent.operations) {
         collected.set(entry.operation, entry.inputSchema);
+      }
+      for (const item of response.structuredContent.deferred?.operations ?? []) {
+        pending.push(item.operation);
       }
     }
     return collected;

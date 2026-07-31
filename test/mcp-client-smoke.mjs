@@ -118,22 +118,42 @@ function facadeCall(request) {
 // 那条路：一次最多 MAX_DESCRIBE_OPERATIONS 个，分批取完。
 async function describeTools(names) {
   const served = new Map();
-  for (let i = 0; i < names.length; i += MAX_DESCRIBE_OPERATIONS) {
-    const batch = names.slice(i, i + MAX_DESCRIBE_OPERATIONS);
+  // 条数上限之外还有字节预算：被 deferred 的 operation 按 remedy 单独再取一次。
+  const pending = [...names];
+  while (pending.length > 0) {
+    const batch = pending.splice(0, MAX_DESCRIBE_OPERATIONS);
     const response = await client.callTool({
       name: DESCRIBE_OPERATION_TOOL,
       arguments: { operations: batch.map(operationNameForTool) },
     });
     assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
+    const { operations, deferred } = response.structuredContent;
     for (const name of batch) {
-      const entry = response.structuredContent.operations.find(
-        (item) => item.operation === operationNameForTool(name)
-      );
-      assert.ok(entry, `sv_describe must return ${name}`);
+      const entry = operations.find((item) => item.operation === operationNameForTool(name));
+      if (!entry) {
+        assert.ok(
+          deferred?.operations.some((item) => item.operation === operationNameForTool(name)),
+          `sv_describe must return ${name} or report it as deferred`
+        );
+        pending.push(name);
+        continue;
+      }
       served.set(name, entry);
     }
   }
   return served;
+}
+
+// 送出的 schema 把重复片段提到了自己的 $defs，因此结构性穿透必须先解 $ref。
+// schema 仍然自包含（`#/$defs/x` 在这份 schema 内即可解析），这里就是按调用方
+// 该有的方式解析它。
+function deref(node, schema) {
+  if (!node || typeof node.$ref !== "string") return node;
+  const path = node.$ref.replace(/^#\//, "").split("/");
+  let current = schema;
+  for (const segment of path) current = current[segment];
+  assert.ok(current, `unresolved $ref ${node.$ref}`);
+  return deref(current, schema);
 }
 
 try {
@@ -285,13 +305,20 @@ try {
   assert.equal(rangeTool.inputSchema.anyOf, undefined);
   assert.equal(batchCurveTool.inputSchema.properties.target.type, "object");
   assert.equal(batchCurveTool.inputSchema.properties.target.anyOf, undefined);
-  const curvePointsInput =
-    batchCurveTool.inputSchema.properties.curves.items.properties.points;
-  assert.equal(curvePointsInput.anyOf[0].items.oneOf, undefined);
-  assert.equal(curvePointsInput.anyOf[1].properties.encoding.const, "dense-table-v1");
+  const curveSchema = batchCurveTool.inputSchema;
+  const curvePointsInput = deref(
+    deref(curveSchema.properties.curves, curveSchema).items,
+    curveSchema
+  ).properties.points;
+  const explicitPoint = deref(deref(curvePointsInput, curveSchema).anyOf[0], curveSchema);
+  assert.equal(deref(explicitPoint.items, curveSchema).oneOf, undefined);
+  assert.equal(
+    deref(deref(curvePointsInput, curveSchema).anyOf[1], curveSchema).properties.encoding.const,
+    "dense-table-v1"
+  );
   assert.deepEqual(
-    curvePointsInput.anyOf[0].items.properties.anchor
-      .properties.position.enum,
+    deref(deref(explicitPoint.items, curveSchema).properties.anchor, curveSchema).properties
+      .position.enum,
     ["onset", "center", "end", "ratio"]
   );
   assert.equal(auditionTool.inputSchema.properties.autoStop.default, false);
@@ -698,10 +725,16 @@ try {
     })
   );
   assert.equal(harmonyInvalidArguments.error.code, "INVALID_ARGUMENTS");
-  assert.equal(
-    batchSchema.properties.curves.items.properties.range.properties.from.properties.anchor.type,
-    "object"
+  // 同样先解 $ref 再穿透：range/from/anchor 都是被提到 $defs 的共享片段。
+  const batchCurveItem = deref(
+    deref(batchSchema.properties.curves, batchSchema).items,
+    batchSchema
   );
+  const batchRangeFrom = deref(
+    deref(batchCurveItem.properties.range, batchSchema).properties.from,
+    batchSchema
+  );
+  assert.equal(deref(batchRangeFrom.properties.anchor, batchSchema).type, "object");
   const resourceTemplates = await client.listResourceTemplates();
   assert.ok(
     resourceTemplates.resourceTemplates.some(
@@ -1267,17 +1300,22 @@ try {
   assert.equal(curve.data.stats.count, 2);
   assert.equal(curve.data.points[1].localBlick, Q);
 
+  // 单数 sv_patch_parameter_curve 已删除；一条曲线就是 curves 长度为 1。
   const curvePatch = parseToolResult(
     await facadeCall({
-      name: "sv_patch_parameter_curve",
+      name: "sv_patch_parameter_curves",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
-        parameter: "loudness",
-        mode: "replace",
-        range: { fromBlick: 0, toBlick: 2 * Q },
-        points: [
-          { blick: 0, value: 2 },
-          { blick: Q, value: -3 },
+        curves: [
+          {
+            parameter: "loudness",
+            mode: "replace",
+            range: { fromBlick: 0, toBlick: 2 * Q },
+            points: [
+              { blick: 0, value: 2 },
+              { blick: Q, value: -3 },
+            ],
+          },
         ],
       },
     })
@@ -1285,9 +1323,9 @@ try {
   assert.equal(okOf(curvePatch), true);
   assert.equal(curvePatch.status, "succeeded");
   assert.equal(curvePatch.effects, "verified");
-  assert.equal(curvePatch.verification.mode, "exact");
-  assert.equal(curvePatch.data.after.pointCount, 2);
-  assert.equal(curvePatch.data.after.stats.min, -3);
+  assert.equal(curvePatch.curves[0].verification.mode, "exact");
+  assert.equal(curvePatch.curves[0].after.pointCount, 2);
+  assert.equal(curvePatch.curves[0].after.stats.min, -3);
 
   // 批量工具必须经过真实 MCP + IO PIPE 路径完成预检、写入和内建回读验证。
   const batchCurvePatch = parseToolResult(
@@ -1376,13 +1414,17 @@ try {
 
   const curveOutOfRange = parseToolError(
     await facadeCall({
-      name: "sv_patch_parameter_curve",
+      name: "sv_patch_parameter_curves",
       arguments: {
         target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
-        parameter: "loudness",
-        mode: "replace",
-        range: { fromBlick: 0, toBlick: Q },
-        points: [{ blick: 0, value: 999 }],
+        curves: [
+          {
+            parameter: "loudness",
+            mode: "replace",
+            range: { fromBlick: 0, toBlick: Q },
+            points: [{ blick: 0, value: 999 }],
+          },
+        ],
       },
     })
   );

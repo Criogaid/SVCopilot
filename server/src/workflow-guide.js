@@ -89,7 +89,7 @@ const GLOBAL_RULES = {
   ],
   contextLifecycle: [
     "A successful note, structure, lyric, or sv_edit_phrase write DELETES its contextId. Re-run sv_snapshot_range before any further edit or analysis.",
-    "A successful sv_patch_parameter_curve(s) write does NOT delete the contextId, but positions may have drifted if a human edited notes; re-snapshot before analysis that must reflect the new state.",
+    "A successful sv_patch_parameter_curves write does NOT delete the contextId, but positions may have drifted if a human edited notes; re-snapshot before analysis that must reflect the new state.",
     "Contexts also expire on their own TTL (see limits.snapshotContextTtlMs in svcopilot://capabilities) and on host reconnection (epoch change).",
     "On STALE_CONTEXT or UNKNOWN_CONTEXT: re-run sv_snapshot_range and re-run the planner with the same options. Never retry the old request and never reuse old noteIds.",
   ],

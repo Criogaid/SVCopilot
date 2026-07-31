@@ -406,6 +406,21 @@ function fourCurveRequest(overrides = {}) {
 
 const TARGET = { trackIndex: 0, groupIndex: 0 };
 
+// 单数 sv_patch_parameter_curve 已删除：它是复数的严格子集（curves 长度为 1 即等价），
+// 却占全部 schema 的 10%，还让模型每次都要判断"该调哪个"。这些用例仍然描述"一条
+// 曲线"的行为，因此统一走复数端点并读 curves[0]，而不是保留一份并行契约。
+function oneCurve(request) {
+  const { target, dryRun, atomic, responseMode, undoLabel, ...curve } = request;
+  return {
+    target,
+    curves: [curve],
+    ...(dryRun === undefined ? {} : { dryRun }),
+    ...(atomic === undefined ? {} : { atomic }),
+    ...(undoLabel === undefined ? {} : { undoLabel }),
+    responseMode: responseMode ?? "standard",
+  };
+}
+
 test("sv_get_parameter_curve reports definition, dual coordinates, and stats", async () => {
   const model = createCurveModel();
   const service = createService(model);
@@ -442,7 +457,7 @@ test("sv_get_parameter_curve supports absolute-coordinate ranges", async () => {
   assert.equal(result.data.range.localFromBlick, Q);
 });
 
-test("sv_patch_parameter_curve replace: dryRun has no side effects, real write verifies exactly", async () => {
+test("sv_patch_parameter_curves replace: dryRun has no side effects, real write verifies exactly", async () => {
   const model = createCurveModel();
   const service = createService(model);
   const request = {
@@ -456,32 +471,32 @@ test("sv_patch_parameter_curve replace: dryRun has no side effects, real write v
     ],
   };
 
-  const plan = await service.patchCurve({ ...request, dryRun: true });
+  const plan = await service.patchCurves(oneCurve({ ...request, dryRun: true }));
   assert.equal(plan.status, "dry_run");
-  assert.equal(plan.data.before.pointCount, 3);
-  assert.equal(plan.data.planned.pointCount, 2);
+  assert.equal(plan.curves[0].before.pointCount, 3);
+  assert.equal(plan.curves[0].planned.pointCount, 2);
   assert.equal(model.undoCount, 0);
   assert.equal(model.points.length, 3);
 
-  const result = await service.patchCurve(request);
+  const result = await service.patchCurves(oneCurve(request));
   assert.equal(result.ok, true);
   assert.equal(result.status, "succeeded");
   assert.equal(result.effects, "verified");
-  assert.equal(result.verification.mode, "exact");
+  assert.equal(result.curves[0].verification.mode, "exact");
   assert.equal(result.verification.passed, true);
   assert.deepEqual(model.points, [
     [0, 1],
     [Q, 2],
   ]);
   assert.equal(model.undoCount, 2);
-  assert.equal(result.data.after.pointCount, 2);
-  assert.equal(result.data.after.stats.max, 2);
+  assert.equal(result.curves[0].after.pointCount, 2);
+  assert.equal(result.curves[0].after.stats.max, 2);
 });
 
-test("sv_patch_parameter_curve accepts host float32 value quantization", async () => {
+test("sv_patch_parameter_curves accepts host float32 value quantization", async () => {
   const model = createCurveModel();
   model.coerceValuesToFloat32 = true;
-  const result = await createService(model).patchCurve({
+  const result = await createService(model).patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
@@ -491,62 +506,62 @@ test("sv_patch_parameter_curve accepts host float32 value quantization", async (
       { blick: Q, value: 0.8 },
       { blick: 2 * Q, value: 0.3 },
     ],
-  });
+  }));
 
   assert.equal(result.ok, true);
   assert.equal(result.verification.passed, true);
-  assert.equal(result.verification.evidence.valueTolerance, 48e-6);
-  assert.ok(result.verification.evidence.maxValueDelta > 0);
+  assert.equal(result.curves[0].verification.evidence.valueTolerance, 48e-6);
+  assert.ok(result.curves[0].verification.evidence.maxValueDelta > 0);
   assert.ok(
-    result.verification.evidence.maxValueDelta <= result.verification.evidence.valueTolerance
+    result.curves[0].verification.evidence.maxValueDelta <= result.curves[0].verification.evidence.valueTolerance
   );
-  assert.equal(result.verification.evidence.firstMismatch, undefined);
+  assert.equal(result.curves[0].verification.evidence.firstMismatch, undefined);
 });
 
-test("sv_patch_parameter_curve reports the first value mismatch with delta evidence", async () => {
+test("sv_patch_parameter_curves reports the first value mismatch with delta evidence", async () => {
   const model = createCurveModel();
   model.writeValueOffset = 0.001;
-  const result = await createService(model).patchCurve({
+  const result = await createService(model).patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
     atomic: false,
     range: { fromBlick: 0, toBlick: Q },
     points: [{ blick: 0, value: 0.2 }],
-  });
+  }));
 
   assert.equal(result.ok, false);
   assert.equal(result.status, "partial");
   assert.equal(result.verification.passed, false);
-  assert.deepEqual(result.verification.evidence.firstMismatch.requested, {
+  assert.deepEqual(result.curves[0].verification.evidence.firstMismatch.requested, {
     blick: 0,
     value: 0.2,
   });
-  assert.equal(result.verification.evidence.firstMismatch.observed.blick, 0);
-  assert.ok(Math.abs(result.verification.evidence.firstMismatch.delta.value - 0.001) < 1e-12);
+  assert.equal(result.curves[0].verification.evidence.firstMismatch.observed.blick, 0);
+  assert.ok(Math.abs(result.curves[0].verification.evidence.firstMismatch.delta.value - 0.001) < 1e-12);
   assert.ok(
-    result.verification.evidence.firstMismatch.absoluteValueDelta >
-      result.verification.evidence.valueTolerance
+    result.curves[0].verification.evidence.firstMismatch.absoluteValueDelta >
+      result.curves[0].verification.evidence.valueTolerance
   );
 });
 
-test("sv_patch_parameter_curve add mode shifts existing control points and clamps to range", async () => {
+test("sv_patch_parameter_curves add mode shifts existing control points and clamps to range", async () => {
   const model = createCurveModel();
   model.points = [
     [0, 23],
     [Q, 0],
   ];
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "add",
     amount: 5,
     range: { fromBlick: 0, toBlick: 2 * Q },
-  });
+  }));
 
   assert.equal(result.ok, true);
-  assert.equal(result.data.clampedCount, 1);
+  assert.equal(result.curves[0].clampedCount, 1);
   assert.ok(result.warnings.some((warning) => warning.code === "CLAMPED_TO_RANGE"));
   assert.deepEqual(model.points, [
     [0, 24],
@@ -554,16 +569,16 @@ test("sv_patch_parameter_curve add mode shifts existing control points and clamp
   ]);
 });
 
-test("sv_patch_parameter_curve scale mode multiplies control points", async () => {
+test("sv_patch_parameter_curves scale mode multiplies control points", async () => {
   const model = createCurveModel();
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "scale",
     amount: 2,
     range: { fromBlick: Q, toBlick: 2 * Q },
-  });
+  }));
   assert.equal(result.ok, true);
   // 范围外的 [0,0] 不受影响。
   assert.deepEqual(model.points, [
@@ -573,16 +588,16 @@ test("sv_patch_parameter_curve scale mode multiplies control points", async () =
   ]);
 });
 
-test("sv_patch_parameter_curve rejects explicit out-of-range values before writing", async () => {
+test("sv_patch_parameter_curves rejects explicit out-of-range values before writing", async () => {
   const model = createCurveModel();
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
     range: { fromBlick: 0, toBlick: Q },
     points: [{ blick: 0, value: 99 }],
-  });
+  }));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "VALUE_OUT_OF_RANGE");
   assert.equal(result.effects, "none");
@@ -590,11 +605,11 @@ test("sv_patch_parameter_curve rejects explicit out-of-range values before writi
   assert.equal(model.points.length, 3);
 });
 
-test("sv_patch_parameter_curve atomic mode restores journaled points on mid-apply failure", async () => {
+test("sv_patch_parameter_curves atomic mode restores journaled points on mid-apply failure", async () => {
   const model = createCurveModel();
   model.failures.push({ method: "add", remainingSkips: 1, code: "ARGUMENT_MISMATCH" });
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
@@ -603,7 +618,7 @@ test("sv_patch_parameter_curve atomic mode restores journaled points on mid-appl
       { blick: 0, value: 1 },
       { blick: Q, value: 2 },
     ],
-  });
+  }));
 
   assert.equal(result.ok, false);
   assert.equal(result.status, "rolled_back");
@@ -616,10 +631,10 @@ test("sv_patch_parameter_curve atomic mode restores journaled points on mid-appl
   ]);
 });
 
-test("sv_patch_parameter_curve simplify uses tolerance-sampled verification", async () => {
+test("sv_patch_parameter_curves simplify uses tolerance-sampled verification", async () => {
   const model = createCurveModel();
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
@@ -632,58 +647,60 @@ test("sv_patch_parameter_curve simplify uses tolerance-sampled verification", as
       { blick: 3 * Q, value: 3 },
     ],
     simplifyThreshold: 0.01,
-  });
+  }));
 
   assert.equal(result.ok, true);
-  assert.equal(result.verification.mode, "tolerance_sampled");
+  assert.equal(result.curves[0].verification.mode, "tolerance_sampled");
   assert.equal(result.verification.passed, true);
-  assert.equal(result.data.after.pointCount, 2);
-  assert.ok(result.verification.evidence.maxDeviation <= 0.01);
+  assert.equal(result.curves[0].after.pointCount, 2);
+  assert.ok(result.curves[0].verification.evidence.maxDeviation <= 0.01);
 });
 
-test("sv_patch_parameter_curve validates target and parameter", async () => {
+test("sv_patch_parameter_curves validates target and parameter", async () => {
   const model = createCurveModel();
   const service = createService(model);
-  const instrumental = await service.patchCurve({
+  const instrumental = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 1 },
     parameter: "loudness",
     mode: "add",
     amount: 1,
     range: { fromBlick: 0, toBlick: Q },
-  });
+  }));
   assert.equal(instrumental.error.code, "INVALID_TARGET");
 
-  const unknown = await service.patchCurve({
+  const unknown = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "nonexistent",
     mode: "add",
     amount: 1,
     range: { fromBlick: 0, toBlick: Q },
-  });
+  }));
   assert.equal(unknown.error.code, "UNKNOWN_PARAMETER");
 
-  await assert.rejects(
-    service.patchCurve({
-      target: TARGET,
-      parameter: "loudness",
-      mode: "replace",
-      range: { fromBlick: 0, toBlick: Q },
-    }),
-    (error) => error.code === "INVALID_ARGUMENTS"
-  );
+  // replace 缺 points：批量端点把输入校验失败包进信封并指出出错的曲线索引，
+  // 而不是抛异常——调用方总能知道是哪一条曲线的问题。
+  const missingPoints = await service.patchCurves(oneCurve({
+    target: TARGET,
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: Q },
+  }));
+  assert.equal(missingPoints.status, "failed");
+  assert.equal(missingPoints.error.code, "INVALID_ARGUMENTS");
+  assert.equal(missingPoints.curves[0].status, "failed");
 });
 
-test("single-curve read and patch reject typos before host parameter lookup", async () => {
+test("curve read and patch reject typos before host parameter lookup", async () => {
   const model = addBatchCurves(createCurveModel());
   model.unknownParameterFallsBack = true;
   const service = createService(model);
-  const patch = await service.patchCurve({
+  const patch = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudnes",
     mode: "replace",
     range: { fromBlick: 0, toBlick: Q },
     points: [{ blick: 0, value: 1 }],
-  });
+  }));
   assert.equal(patch.ok, false);
   assert.equal(patch.error.code, "UNKNOWN_PARAMETER");
   await assert.rejects(
@@ -730,35 +747,35 @@ test("sv_get_parameter_curve filters a wide range from one getAllPoints call", a
   assert.equal(result.data.points.length + rest.data.points.length, 300);
 });
 
-test("sv_patch_parameter_curve refuses ranges denser than the journal cap", async () => {
+test("sv_patch_parameter_curves refuses ranges denser than the journal cap", async () => {
   const model = createCurveModel();
   model.points = Array.from({ length: 4001 }, (_, index) => [index, 0]);
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "add",
     amount: 1,
     range: { fromBlick: 0, toBlick: 8 * Q },
-  });
+  }));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "CURVE_TOO_DENSE");
   assert.equal(result.effects, "none");
   assert.equal(model.undoCount, 0);
 });
 
-test("sv_patch_parameter_curve rolls back when the read-back getAllPoints throws", async () => {
+test("sv_patch_parameter_curves rolls back when the read-back getAllPoints throws", async () => {
   const model = createCurveModel();
   const service = createService(model);
   // journal 读是第 1 次 getAllPoints；写后读回是第 2 次。
   model.failures.push({ method: "getAllPoints", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
     range: { fromBlick: 0, toBlick: 2 * Q },
     points: [{ blick: 0, value: 1 }],
-  });
+  }));
 
   assert.equal(result.ok, false);
   assert.equal(result.status, "rolled_back");
@@ -772,7 +789,7 @@ test("sv_patch_parameter_curve rolls back when the read-back getAllPoints throws
   assert.equal(model.undoCount, 2);
 });
 
-test("sv_patch_parameter_curve simplify verification flags residual out-of-tolerance points", async () => {
+test("sv_patch_parameter_curves simplify verification flags residual out-of-tolerance points", async () => {
   const model = createCurveModel();
   // simplify 一个点都不移除，并偷偷加一个偏离计划曲线的点。
   const service = createService(model);
@@ -785,7 +802,7 @@ test("sv_patch_parameter_curve simplify verification flags residual out-of-toler
     }
     return original(request);
   };
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
@@ -795,14 +812,14 @@ test("sv_patch_parameter_curve simplify verification flags residual out-of-toler
       { blick: Q, value: 1 },
     ],
     simplifyThreshold: 0.01,
-  });
+  }));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "POSTCONDITION_FAILED");
-  assert.equal(result.verification.evidence.unexpectedObservedPointCount, 1);
+  assert.equal(result.curves[0].verification.evidence.unexpectedObservedPointCount, 1);
   assert.equal(result.status, "rolled_back");
 });
 
-test("sv_patch_parameter_curve rejects leftover points for non-linear interpolation", async () => {
+test("sv_patch_parameter_curves rejects leftover points for non-linear interpolation", async () => {
   const model = createCurveModel();
   model.interpolationMethod = "Cosine";
   model.points = [
@@ -813,7 +830,7 @@ test("sv_patch_parameter_curve rejects leftover points for non-linear interpolat
   // 模拟 remove/simplify 都静默未生效；旧实现按 Linear 计算会误把中间点视为合法。
   model.ignoreRemove = true;
   model.ignoreSimplify = true;
-  const result = await createService(model).patchCurve({
+  const result = await createService(model).patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
@@ -823,12 +840,12 @@ test("sv_patch_parameter_curve rejects leftover points for non-linear interpolat
       { blick: 2 * Q, value: 1 },
     ],
     simplifyThreshold: 0.01,
-  });
+  }));
 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "POSTCONDITION_FAILED");
-  assert.equal(result.verification.evidence.unexpectedObservedPointCount, 1);
-  assert.equal(result.verification.evidence.maxObservedPointDeviation, 0);
+  assert.equal(result.curves[0].verification.evidence.unexpectedObservedPointCount, 1);
+  assert.equal(result.curves[0].verification.evidence.maxObservedPointDeviation, 0);
 });
 
 test("sv_get_parameter_curve bisects windows on FRAME_TOO_LARGE and completes", async () => {
@@ -871,28 +888,28 @@ test("sv_get_parameter_curve reports CURVE_TOO_DENSE when even the minimum windo
   );
 });
 
-test("sv_patch_parameter_curve fails an empty replace when the host silently ignores remove", async () => {
+test("sv_patch_parameter_curves fails an empty replace when the host silently ignores remove", async () => {
   const model = createCurveModel();
   model.ignoreRemove = true;
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: TARGET,
     parameter: "loudness",
     mode: "replace",
     range: { fromBlick: 0, toBlick: 2 * Q },
     points: [],
     simplifyThreshold: 0.01,
-  });
+  }));
 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "POSTCONDITION_FAILED");
   // planned 为空时残留点必须判为失败，而不是因插值无定义被跳过。
   // （模型 simplify 合法移除了共线中点，范围内仍剩 2 个残留点。）
   assert.equal(result.verification.passed, false);
-  assert.equal(result.verification.evidence.observedPointCount, 2);
-  assert.equal(result.verification.evidence.unexpectedObservedPointCount, 2);
+  assert.equal(result.curves[0].verification.evidence.observedPointCount, 2);
+  assert.equal(result.curves[0].verification.evidence.unexpectedObservedPointCount, 2);
   assert.ok(
-    Object.values(result.verification.evidence).every(
+    Object.values(result.curves[0].verification.evidence).every(
       (value) => typeof value !== "number" || Number.isFinite(value)
     )
   );
@@ -1306,11 +1323,11 @@ test("range context resolves semantic read bounds without exposing raw BLICK inp
   assert.equal(result.data.range.to.source, "noteAnchor");
 });
 
-test("single-curve dry-run reports semantic range and resolved point evidence", async () => {
+test("a one-curve dry-run reports semantic range and resolved point evidence", async () => {
   const model = createCurveModel();
   const { service, contextId, occurrenceId } = createRangeContextService(model);
   const noteId = `${occurrenceId}:n:0`;
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: { contextId, occurrenceId },
     parameter: "loudness",
     mode: "replace",
@@ -1320,11 +1337,11 @@ test("single-curve dry-run reports semantic range and resolved point evidence", 
     },
     points: [{ anchor: { noteId, position: "center" }, value: 1 }],
     dryRun: true,
-  });
+  }));
   assert.equal(result.ok, true);
-  assert.equal(result.data.range.coordinate, "semantic");
-  assert.equal(result.data.resolvedPositions[0].source, "noteAnchor");
-  assert.equal(result.data.resolvedPositions[0].localBlick, Q);
+  assert.equal(result.curves[0].range.coordinate, "semantic");
+  assert.equal(result.curves[0].resolvedPositions[0].source, "noteAnchor");
+  assert.equal(result.curves[0].resolvedPositions[0].localBlick, Q);
   assert.equal(model.undoCount, 0);
 });
 
@@ -1677,13 +1694,13 @@ test("sv_get_parameter_curve enforces expectedGroupUuid on direct targets like t
   assert.equal(ok.data.points.length, 3);
 
   // 写端行为不变：同样的错误 UUID → conflict。
-  const write = await service.patchCurve({
+  const write = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 0, expectedGroupUuid: "wrong-uuid" },
     parameter: "loudness",
     mode: "add",
     amount: 1,
     range: { fromBlick: 0, toBlick: 2 * Q },
-  });
+  }));
   assert.equal(write.ok, false);
   assert.equal(write.status, "conflict");
   assert.equal(write.error.code, "TARGET_CONFLICT");
@@ -1695,13 +1712,13 @@ test("mathematical no-op curve writes return no_change without undo records", as
   const service = createService(model);
 
   // add 0：范围内有点但值不变。
-  const addZero = await service.patchCurve({
+  const addZero = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 0 },
     parameter: "loudness",
     mode: "add",
     amount: 0,
     range: { fromBlick: 0, toBlick: 2 * Q },
-  });
+  }));
   assert.equal(addZero.ok, true);
   assert.equal(addZero.status, "no_change");
   assert.equal(addZero.effects, "none");
@@ -1711,18 +1728,18 @@ test("mathematical no-op curve writes return no_change without undo records", as
   assert.deepEqual(model.points, [[0, 0], [Q, 0.5], [2 * Q, 1]]);
 
   // scale 1 在空范围（affected point set 为空）同样 no_change。
-  const scaleEmpty = await service.patchCurve({
+  const scaleEmpty = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 0 },
     parameter: "loudness",
     mode: "scale",
     amount: 1,
     range: { fromBlick: 10 * Q, toBlick: 11 * Q },
-  });
+  }));
   assert.equal(scaleEmpty.status, "no_change");
   assert.equal(model.undoCount, 0);
 
   // replace 相同点集也是 no_change。
-  const replaceSame = await service.patchCurve({
+  const replaceSame = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 0 },
     parameter: "loudness",
     mode: "replace",
@@ -1732,7 +1749,7 @@ test("mathematical no-op curve writes return no_change without undo records", as
       { blick: 2 * Q, value: 1 },
     ],
     range: { fromBlick: 0, toBlick: 2 * Q },
-  });
+  }));
   assert.equal(replaceSame.status, "no_change");
   assert.equal(model.undoCount, 0);
 
@@ -1749,13 +1766,13 @@ test("mathematical no-op curve writes return no_change without undo records", as
   assert.equal(model.undoCount, 0);
 
   // 真实修改仍然开一步 Undo。
-  const real = await service.patchCurve({
+  const real = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 0 },
     parameter: "loudness",
     mode: "add",
     amount: 0.5,
     range: { fromBlick: 0, toBlick: 2 * Q },
-  });
+  }));
   assert.equal(real.status, "succeeded");
   assert.equal(model.undoCount, 2);
 });
@@ -1764,14 +1781,14 @@ test("a no-op plan with simplifyThreshold still writes because simplify may remo
   const model = createCurveModel();
   // 中间点 [Q, 0.5] 恰好线性可省略：simplify 会移除它，因此不能按 no_change 跳过。
   const service = createService(model);
-  const result = await service.patchCurve({
+  const result = await service.patchCurves(oneCurve({
     target: { trackIndex: 0, groupIndex: 0 },
     parameter: "loudness",
     mode: "add",
     amount: 0,
     simplifyThreshold: 0.01,
     range: { fromBlick: 0, toBlick: 2 * Q },
-  });
+  }));
   assert.equal(result.ok, true);
   assert.equal(result.status, "succeeded");
   assert.equal(model.points.length, 2);
