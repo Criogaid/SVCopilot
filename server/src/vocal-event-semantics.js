@@ -106,6 +106,7 @@ export function analyzeVocalEventSequence(notes = []) {
       classification,
       melodicEligible: classification.melodicEligibleByDefault,
       continuationValid: null,
+      chainHeadNote: activeLexicalHead?.note ?? null,
       chainHeadNoteId: activeLexicalHead?.noteId ?? null,
       syllableOrdinal: null,
     };
@@ -127,6 +128,7 @@ export function analyzeVocalEventSequence(notes = []) {
       activePronunciation = true;
       activeSyllableOrdinal = 1;
       previousChainEvent = event;
+      event.chainHeadNote = event.note ?? null;
       event.chainHeadNoteId = event.noteId ?? null;
       event.syllableOrdinal = 1;
     } else if (classification.role === "syllable_continuation") {
@@ -143,6 +145,7 @@ export function analyzeVocalEventSequence(notes = []) {
         );
       } else {
         event.continuationValid = true;
+        event.chainHeadNote = activeLexicalHead.note ?? null;
         event.chainHeadNoteId = activeLexicalHead.noteId ?? null;
         activeSyllableOrdinal += 1;
         event.syllableOrdinal = activeSyllableOrdinal;
@@ -164,6 +167,7 @@ export function analyzeVocalEventSequence(notes = []) {
         );
       } else {
         event.continuationValid = true;
+        event.chainHeadNote = activeLexicalHead?.note ?? null;
         event.chainHeadNoteId = activeLexicalHead?.noteId ?? null;
         event.syllableOrdinal = activeSyllableOrdinal;
         previousChainEvent = event;

@@ -255,7 +255,7 @@ test("continuation rounds converge: commit, re-snapshot, re-align until no_chang
   assert.equal(round3.continuation, undefined);
 });
 
-test("PATCH_CAP continuation can replay explicit occurrenceId/startNoteId against a fresh context", async () => {
+test("PATCH_CAP continuation can replay explicit occurrenceId/startNote against a fresh context", async () => {
   const store = createStore();
   const lyrics = mandarinLyrics(201);
   let notes = uniformNotes(new Array(202).fill(""));
@@ -266,7 +266,7 @@ test("PATCH_CAP continuation can replay explicit occurrenceId/startNoteId agains
   });
   const originalOptions = {
     occurrenceId: round1Context.occurrenceId,
-    startNoteId: noteId(round1Context.occurrenceId, 1),
+    startNote: 1,
     lyrics,
     language: "mandarin",
   };
@@ -313,7 +313,7 @@ test("PATCH_CAP continuation refuses positional re-anchor when target or start-n
   });
   const originalOptions = {
     occurrenceId: round1Context.occurrenceId,
-    startNoteId: noteId(round1Context.occurrenceId, 1),
+    startNote: 1,
     lyrics,
     language: "mandarin",
   };
@@ -443,7 +443,7 @@ test("explicit continuation chains override inferred English syllable expansion"
       result.perNote.map((item) => item.unit.semanticRole),
       fixture.semanticRoles
     );
-    assert.equal(result.perNote[0].unit.chainHeadNoteId, noteId(occurrenceId, 0));
+    assert.equal(result.perNote[0].unit.chainHeadNote, 0);
     assert.ok(
       result.perNote
         .slice(1)
@@ -610,16 +610,18 @@ test("kanji and ambiguous CJK are flagged instead of guessed", async () => {
   assert.equal(mandarin.perNote[0].languageOverride.planned, "mandarin");
 });
 
-test("startNoteId fills from the middle and implies the occurrence", async () => {
+test("startNote fills from the middle; it no longer implies an occurrence", async () => {
   const store = createStore();
   const { stored, occurrenceId } = createStoredContext(store, {
     notes: uniformNotes(["a", "b", "c", "d"]),
     extraOccurrenceWithNotes: true,
   });
+  // index 不携带 occurrence 前缀，因此多 occurrence 时必须显式点名。
   const result = await createService(store).align({
     contextId: stored.contextId,
+    occurrenceId,
     lyrics: "あさ",
-    startNoteId: noteId(occurrenceId, 2),
+    startNote: 2,
   });
   assert.equal(result.occurrence.occurrenceId, occurrenceId);
   assert.equal(result.summary.startIndex, 2);
@@ -662,9 +664,9 @@ test("align resolves contexts honestly across error paths", async () => {
     service.align({
       contextId: single.stored.contextId,
       lyrics: "あ",
-      startNoteId: `${single.occurrenceId}:n:9`,
+      startNote: 9,
     }),
-    (error) => error.code === "UNKNOWN_NOTE_ID"
+    (error) => error.code === "NOTE_INDEX_OUT_OF_RANGE"
   );
   await assert.rejects(
     service.align({ contextId: single.stored.contextId, lyrics: "、。！" }),

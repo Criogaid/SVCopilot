@@ -1456,7 +1456,7 @@ export const TOOLS = [
         occurrenceId: {
           type: "string",
           minLength: 1,
-          description: "Optional when startNoteId implies it or the context has one occurrence with notes.",
+          description: "Optional when the context has exactly one occurrence with notes.",
         },
         lyrics: {
           type: "string",
@@ -1470,10 +1470,11 @@ export const TOOLS = [
           description:
             "auto classifies per segment; CJK ideographs without surrounding kana then need an explicit language.",
         },
-        startNoteId: {
-          type: "string",
-          minLength: 1,
-          description: "First note to fill; defaults to the occurrence's first captured note.",
+        startNote: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "First note to fill, as a 0-based index within the NoteGroup; defaults to the occurrence's first captured note.",
         },
         setLanguageOverride: {
           type: "boolean",

@@ -92,7 +92,7 @@ export class LyricAlignService {
 
 // ---------- 上下文解析（纯数据，与 plan/compare 同模式） ----------
 
-// occurrenceId = `${contextId}:t:${track}:r:${ref}`，noteId 再接 `:n:${index}`。
+// occurrenceId = `${contextId}:t:${track}:r:${ref}`；Note 身份是组内 index（§3.1）。
 // 位置后缀只负责寻找候选；必须再通过服务签发的短期记录校验 target UUID 与音符结构。
 const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
 
@@ -118,7 +118,7 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
     occurrence = occurrences.find((item) => item.occurrenceId === wantedId) ?? null;
     if (!occurrence) {
       const identity = continuationIdentities.get(
-        continuationIdentityKey(wantedId, input.startNoteId)
+        continuationIdentityKey(wantedId, input.startNote)
       );
       const position = identity ? OCCURRENCE_POSITION_PATTERN.exec(wantedId) : null;
       if (position) {
@@ -154,7 +154,7 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
           reanchoredIdentity = identity;
           warnings.push({
             code: "STALE_SELECTOR_REANCHORED",
-            message: `occurrenceId/startNoteId reference a consumed context; verified target identity and note structure, then re-anchored by position (track ${position[1]}, reference ${position[2]}) onto ${occurrence.occurrenceId}.`,
+            message: `occurrenceId/startNote reference a consumed context; verified target identity and note structure, then re-anchored by position (track ${position[1]}, reference ${position[2]}) onto ${occurrence.occurrenceId}.`,
           });
         }
       }
@@ -172,7 +172,7 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
   } else {
     const error = codedError(
       "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId or startNoteId"
+      "range context has multiple occurrences with notes; provide occurrenceId"
     );
     error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
     error.details = { candidateOccurrences: error.candidateOccurrences };
@@ -180,7 +180,6 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
   }
   const notes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       onsetBlick: fingerprint.onsetBlick,
       durationBlick: fingerprint.durationBlick,
@@ -195,17 +194,26 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
     );
   }
   let startIndex = 0;
-  if (input.startNoteId !== undefined) {
-    startIndex = notes.findIndex((note) => note.noteId === input.startNoteId);
+  if (input.startNote !== undefined) {
+    startIndex = notes.findIndex((note) => note.indexInGroup === input.startNote);
     if (startIndex < 0 && reanchoredIdentity) {
       startIndex = notes.findIndex(
         (note) => note.indexInGroup === reanchoredIdentity.startNoteIndexInGroup
       );
     }
     if (startIndex < 0) {
+      const groupNoteCount = occurrence.groupNoteCount ?? notes.length;
+      if (input.startNote >= groupNoteCount) {
+        throw codedError(
+          "NOTE_INDEX_OUT_OF_RANGE",
+          `startNote ${input.startNote} is outside the note group`,
+          { got: input.startNote, max: groupNoteCount - 1 }
+        );
+      }
       throw codedError(
-        "UNKNOWN_NOTE_ID",
-        `startNoteId is not part of the resolved occurrence: ${input.startNoteId}`
+        "NOTE_NOT_IN_CONTEXT",
+        `startNote ${input.startNote} exists but was not captured in this occurrence`,
+        { got: input.startNote }
       );
     }
   } else if (reanchoredIdentity) {
@@ -221,13 +229,13 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
 
 function selectorOccurrenceId(input) {
   if (typeof input.occurrenceId === "string") return input.occurrenceId;
-  if (typeof input.startNoteId !== "string") return undefined;
-  const cut = input.startNoteId.lastIndexOf(":n:");
-  return cut > 0 ? input.startNoteId.slice(0, cut) : undefined;
+  // startNote 是组内 index（§3.1），不携带 occurrence 前缀，因此无从推导。
+  // 单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 覆盖其余情况。
+  return undefined;
 }
 
-function continuationIdentityKey(occurrenceId, startNoteId) {
-  return JSON.stringify([occurrenceId, startNoteId ?? null]);
+function continuationIdentityKey(occurrenceId, startNote) {
+  return JSON.stringify([occurrenceId, startNote ?? null]);
 }
 
 function pruneContinuationIdentities(identities, now) {
@@ -242,7 +250,7 @@ function rememberContinuationIdentity(identities, loaded, input, now) {
   const startNote = loaded.notes[loaded.startIndex];
   const expiresAt = loaded.stored.expiresAt;
   if (!startNote || !Number.isFinite(expiresAt) || expiresAt <= now) return;
-  const key = continuationIdentityKey(occurrenceId, input.startNoteId);
+  const key = continuationIdentityKey(occurrenceId, input.startNote);
   identities.delete(key);
   identities.set(key, {
     targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -495,7 +503,6 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
         ? unit.token.language
         : null;
     perNote.push({
-      noteId: note.noteId,
       indexInGroup: note.indexInGroup,
       currentLyrics: note.lyrics,
       plannedLyrics,
@@ -521,7 +528,6 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
     perNote.map((item, index) => {
       const note = loaded.notes[loaded.startIndex + index];
       return {
-        noteId: item.noteId,
         indexInGroup: item.indexInGroup,
         onsetBlick: note.onsetBlick,
         durationBlick: note.durationBlick,
@@ -529,17 +535,23 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
       };
     })
   );
-  const eventsByNoteId = new Map(sequence.events.map((event) => [event.noteId, event]));
-  const reviewNoteIds = new Set(sequence.issues.flatMap((issue) => issue.noteIds ?? []));
+  // 关联走对象身份：共享语义模块原样回传本模块传入的 note 对象。
+  const eventsByIndex = new Map(
+    sequence.events.map((event) => [event.note.indexInGroup, event])
+  );
+  const reviewNoteIndexes = new Set(
+    sequence.issues.flatMap((issue) => (issue.notes ?? []).map((note) => note.indexInGroup))
+  );
   for (const item of perNote) {
-    const event = eventsByNoteId.get(item.noteId);
+    const event = eventsByIndex.get(item.indexInGroup);
     if (!event) continue;
     item.unit.semanticRole = event.semanticRole;
     item.unit.semanticEvidence = event.semanticEvidence;
-    item.unit.chainHeadNoteId = event.chainHeadNoteId;
+    // 对外身份是组内 index（§3.1）。
+    item.unit.chainHeadNote = event.chainHeadNote?.indexInGroup ?? null;
     item.unit.syllableOrdinal = event.syllableOrdinal;
     item.unit.continuationValid = event.continuationValid;
-    if (reviewNoteIds.has(item.noteId)) item.needsReview = true;
+    if (reviewNoteIndexes.has(item.indexInGroup)) item.needsReview = true;
   }
   for (const issue of sequence.issues) appendOnce(warnings, issue);
   const unassignedUnits = units.slice(assignedCount).map((unit) => ({
@@ -552,11 +564,11 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
   if (unassignedUnits.length > 0) {
     warnings.push({
       code: "NOT_ENOUGH_NOTES",
-      message: `${unassignedUnits.length} lyric unit(s) have no note to land on; extend the range, pick an earlier startNoteId, or add notes with sv_restructure_notes first.`,
+      message: `${unassignedUnits.length} lyric unit(s) have no note to land on; extend the range, pick an earlier startNote, or add notes with sv_restructure_notes first.`,
     });
   }
   const unfilledNotes = loaded.notes.slice(loaded.startIndex + assignedCount).map((note) => ({
-    noteId: note.noteId,
+    note: note.indexInGroup,
     currentLyrics: note.lyrics,
   }));
   if (unfilledNotes.length > 0) {
@@ -604,7 +616,7 @@ function buildAlignResponse(
     },
   }));
   // note-patch 硬上限 MAX_PATCHES。超限时不能预生成后续批次：sv_patch_notes 提交成功即删除
-  // contextId（成功写入使快照上下文失效），而 noteId 内嵌 contextId——预烤的第二批必然
+  // contextId（成功写入使快照上下文失效）——预烤的第二批必然
   // UNKNOWN_CONTEXT，还会留下"前 200 项已改、其余未改"的中间态。诚实契约是：只交出当前
   // context 下可提交的第一批，其余通过 continuation 工作流收敛——提交后重拍快照、用完全相同
   // 的参数重跑本工具，已应用的音符自动变为 no-change，下一轮恰好规划剩余部分。
@@ -631,7 +643,7 @@ function buildAlignResponse(
           workflow: [
             "Submit apply.arguments with action dry_run, then commit.",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
-            "Re-run sv_align_lyrics with the same lyrics and options against the fresh contextId: already-applied notes come back unchanged, so the next round plans exactly the remaining patches. Explicit occurrenceId/startNoteId are re-anchored only when their short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); otherwise the replay is rejected.",
+            "Re-run sv_align_lyrics with the same lyrics and options against the fresh contextId: already-applied notes come back unchanged, so the next round plans exactly the remaining patches. Explicit occurrenceId/startNote are re-anchored only when their short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); otherwise the replay is rejected.",
             "Repeat until the response carries no continuation (or reports status no_change).",
           ],
         }
@@ -639,13 +651,13 @@ function buildAlignResponse(
   if (continuation) {
     warnings.push({
       code: "PLAN_EXCEEDS_PATCH_CAP",
-      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; apply carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow-up batches cannot be pre-generated (a successful sv_patch_notes invalidates the contextId and noteIds embed it) — follow continuation.workflow: commit, re-snapshot, re-align, repeat. Each round is its own transaction and Undo record.`,
+      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; apply carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow-up batches cannot be pre-generated (a successful sv_patch_notes invalidates the contextId) — follow continuation.workflow: commit, re-snapshot, re-align, repeat. Each round is its own transaction and Undo record.`,
     });
   }
   const planId = `lyr_${canonicalHashHex({
     occurrenceId: loaded.occurrence.occurrenceId,
     patches,
-    perNote: mapped.perNote.map((item) => [item.noteId, item.plannedLyrics]),
+    perNote: mapped.perNote.map((item) => [item.indexInGroup, item.plannedLyrics]),
   }).slice(0, 16)}`;
   const needsReviewCount = mapped.perNote.filter((item) => item.needsReview).length;
   const semanticRoles = { total: mapped.units.length, byRole: {} };
@@ -807,7 +819,7 @@ function normalizeAlignRequest(request) {
       "occurrenceId",
       "lyrics",
       "language",
-      "startNoteId",
+      "startNote",
       "setLanguageOverride",
       "responseMode",
       "usePlanRef",
@@ -834,10 +846,13 @@ function normalizeAlignRequest(request) {
     throw codedError("INVALID_ARGUMENTS", `language must be one of ${ALIGN_LANGUAGES.join(", ")}`);
   }
   if (
-    request.startNoteId !== undefined &&
-    (typeof request.startNoteId !== "string" || request.startNoteId.length === 0)
+    request.startNote !== undefined &&
+    (!Number.isSafeInteger(request.startNote) || request.startNote < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "startNoteId must be a non-empty string when provided");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "startNote must be a non-negative note index when provided"
+    );
   }
   if (
     request.setLanguageOverride !== undefined &&
@@ -854,7 +869,7 @@ function normalizeAlignRequest(request) {
     occurrenceId: request.occurrenceId,
     lyrics: request.lyrics,
     language,
-    startNoteId: request.startNoteId,
+    startNote: request.startNote,
     setLanguageOverride: request.setLanguageOverride ?? true,
     responseMode,
     usePlanRef: request.usePlanRef !== false,

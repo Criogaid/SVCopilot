@@ -549,8 +549,8 @@ test("compact lyric plans externalize alignment detail and capsule only touched 
 
   assert.equal(plan.alignment.unfilledCount, 366);
   assert.equal(plan.alignment.unfilledNotes, undefined);
-  assert.equal(plan.alignment.firstUnfilledNote.noteId, `${context.occurrenceId}:n:7`);
-  assert.equal(plan.alignment.lastUnfilledNote.noteId, `${context.occurrenceId}:n:372`);
+  assert.equal(plan.alignment.firstUnfilledNote.note, 7);
+  assert.equal(plan.alignment.lastUnfilledNote.note, 372);
   assert.ok(plan.alignment.detailRef);
   assert.ok(JSON.stringify(plan).length < 6_000);
 
