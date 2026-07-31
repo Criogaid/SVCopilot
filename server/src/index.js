@@ -1850,13 +1850,14 @@ export const TOOLS = [
           description: "Optional harmony register; out-of-range pitches octave-shift once, then skip.",
         },
         lyricsMode: { enum: ["copy", "sustain"], default: "copy" },
-        noteIds: {
+        notes: {
           type: "array",
           minItems: 1,
           maxItems: 2000,
           uniqueItems: true,
-          items: { type: "string", minLength: 1 },
-          description: "Optional source-note subset; all noteIds must belong to the source occurrence.",
+          items: { type: "integer", minimum: 0 },
+          description:
+            "Optional source-note subset, as 0-based indexes within the source NoteGroup.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         usePlanRef: USE_PLAN_REF_SCHEMA,
@@ -2468,7 +2469,7 @@ export const TOOLS = [
   {
     name: "sv_restructure_notes",
     description:
-      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Accepts group/selection contexts from sv_snapshot and range contexts from sv_snapshot_range (range noteIds identify the occurrence; insert-only requests on a multi-occurrence range need occurrenceId, and a shared target NoteGroup requires allowSharedTargetMutation:true after a commit-time project scan). Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
+      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Accepts group/selection contexts from sv_snapshot and range contexts from sv_snapshot_range (notes are referenced by 0-based group index, so a multi-occurrence range needs occurrenceId, and a shared target NoteGroup requires allowSharedTargetMutation:true after a commit-time project scan). Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2479,7 +2480,7 @@ export const TOOLS = [
           type: "string",
           minLength: 1,
           description:
-            "Range contexts only: the occurrence to edit. May be omitted when operation noteIds identify one occurrence or exactly one vocal occurrence exists.",
+            "Range contexts only: the occurrence to edit. May be omitted when exactly one vocal occurrence exists.",
         },
         allowSharedTargetMutation: {
           type: "boolean",
@@ -2510,7 +2511,11 @@ export const TOOLS = [
                 required: ["onsetBlick", "durationBlick", "pitch"],
                 description: "insert only. onsetBlick is group-local.",
               },
-              noteId: { type: "string", description: "delete/split: note id from the same context." },
+              noteIndex: {
+                type: "integer",
+                minimum: 0,
+                description: "delete/split: 0-based note index within the NoteGroup.",
+              },
               expected: {
                 type: "object",
                 description: "delete only: fingerprint preconditions checked before any write.",
@@ -2521,11 +2526,11 @@ export const TOOLS = [
                 description: "split only: group-local position strictly inside the note.",
               },
               secondLyrics: { type: "string", description: 'split only; defaults to "-".' },
-              noteIds: {
+              notes: {
                 type: "array",
                 minItems: 2,
-                items: { type: "string" },
-                description: "merge only: consecutive notes in group order.",
+                items: { type: "integer", minimum: 0 },
+                description: "merge only: consecutive note indexes in group order.",
               },
               lyricsJoin: { enum: ["first", "concat"], description: "merge only; default first." },
             },

@@ -592,10 +592,10 @@ test("harmony resolves contexts honestly across error paths", async () => {
     service.plan({
       contextId: known.stored.contextId,
       targetOccurrenceId: known.targetId,
-      noteIds: [`${known.sourceId}:n:9`],
+      notes: [9],
       ...options,
     }),
-    (error) => error.code === "UNKNOWN_NOTE_ID"
+    (error) => error.code === "NOTE_INDEX_OUT_OF_RANGE"
   );
   // 单音级源 + 无显式 key → INSUFFICIENT_PITCH_VARIETY。
   const mono = createStoredContext(store, {
@@ -648,7 +648,7 @@ test("harmony rejects malformed requests before touching the store", async () =>
       contextId: "ctx",
       targetOccurrenceId: "t",
       harmony: { interval: "third_below" },
-      noteIds: [],
+      notes: [],
     },
     { contextId: "ctx", targetOccurrenceId: "t", harmony: { interval: "third_below" }, bogus: 1 },
   ]) {

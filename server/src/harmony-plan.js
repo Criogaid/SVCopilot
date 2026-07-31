@@ -189,7 +189,6 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
   const targetPitchOffset = occurrencePitchOffset(target, "target");
   const allSourceNotes = [...(source.noteFingerprints ?? [])]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       pitch: fingerprint.pitch + sourcePitchOffset,
@@ -204,14 +203,26 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
     );
   }
   let selected = allSourceNotes;
-  if (input.noteIds !== undefined) {
-    const wanted = new Set(input.noteIds);
-    selected = allSourceNotes.filter((note) => wanted.has(note.noteId));
+  if (input.notes !== undefined) {
+    const wanted = new Set(input.notes);
+    selected = allSourceNotes.filter((note) => wanted.has(note.indexInGroup));
     if (selected.length !== wanted.size) {
-      const missing = input.noteIds.find(
-        (noteId) => !allSourceNotes.some((note) => note.noteId === noteId)
+      const missing = input.notes.find(
+        (index) => !allSourceNotes.some((note) => note.indexInGroup === index)
       );
-      throw codedError("UNKNOWN_NOTE_ID", `noteId is not part of the source occurrence: ${missing}`);
+      const groupNoteCount = source.groupNoteCount ?? allSourceNotes.length;
+      if (missing >= groupNoteCount) {
+        throw codedError(
+          "NOTE_INDEX_OUT_OF_RANGE",
+          `note index ${missing} is outside the source note group`,
+          { got: missing, max: groupNoteCount - 1 }
+        );
+      }
+      throw codedError(
+        "NOTE_NOT_IN_CONTEXT",
+        `note ${missing} exists but was not captured in the source occurrence`,
+        { got: missing }
+      );
     }
   }
   const melodicNotes = selected.filter((note) => !isBreathEventLyrics(note.lyrics));
@@ -222,7 +233,6 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
     );
   }
   const targetNotes = [...(target.noteFingerprints ?? [])].map((fingerprint) => ({
-    noteId: fingerprint.noteId,
     localOnsetBlick: fingerprint.onsetBlick,
     durationBlick: fingerprint.durationBlick,
     pitch: fingerprint.pitch,
@@ -365,7 +375,7 @@ function mapHarmony(loaded, input, warnings) {
   let firstMelodicLyricsUsed = false;
   for (const note of loaded.melodicNotes) {
     const item = {
-      sourceNoteId: note.noteId,
+      sourceNote: note.indexInGroup,
       sourceLyrics: note.lyrics,
       sourcePitch: note.pitch,
       absOnsetBlick: note.absOnsetBlick,
@@ -503,7 +513,7 @@ function mapHarmony(loaded, input, warnings) {
         plannedOnsetBlick: item.localOnsetBlick,
         plannedPitch: item.harmonyPitch,
         plannedLyrics: item.harmonyLyrics,
-        existingNoteId: overlapping.noteId,
+        existingNote: overlapping.indexInGroup,
         existingPitch: overlapping.pitch,
         existingLyrics: overlapping.lyrics,
       });
@@ -636,7 +646,8 @@ function buildHarmonyResponse(
         targetGroupUuid: loaded.target.targetGroupUuid,
         occurrenceId: loaded.target.occurrenceId,
         contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.target, {
-          noteIds: [],
+          // harmony 往空目标里插音符，因此不引用目标组的任何既有音符。
+          noteIndexes: [],
         }),
       });
       planRef = artifactReference(
@@ -749,7 +760,7 @@ function normalizeHarmonyRequest(request) {
       "harmony",
       "register",
       "lyricsMode",
-      "noteIds",
+      "notes",
       "responseMode",
       "usePlanRef",
     ],
@@ -826,15 +837,15 @@ function normalizeHarmonyRequest(request) {
   if (!HARMONY_LYRICS_MODES.includes(lyricsMode)) {
     throw codedError("INVALID_ARGUMENTS", `lyricsMode must be one of ${HARMONY_LYRICS_MODES.join(", ")}`);
   }
-  if (request.noteIds !== undefined) {
+  if (request.notes !== undefined) {
     if (
-      !Array.isArray(request.noteIds) ||
-      request.noteIds.length === 0 ||
-      request.noteIds.length > 2000 ||
-      !request.noteIds.every((noteId) => typeof noteId === "string" && noteId.length > 0) ||
-      new Set(request.noteIds).size !== request.noteIds.length
+      !Array.isArray(request.notes) ||
+      request.notes.length === 0 ||
+      request.notes.length > 2000 ||
+      !request.notes.every((index) => Number.isSafeInteger(index) && index >= 0) ||
+      new Set(request.notes).size !== request.notes.length
     ) {
-      throw codedError("INVALID_ARGUMENTS", "noteIds must be 1-2000 unique non-empty strings");
+      throw codedError("INVALID_ARGUMENTS", "notes must be 1-2000 unique non-negative indexes");
     }
   }
   const responseMode = request.responseMode ?? "standard";
@@ -849,7 +860,7 @@ function normalizeHarmonyRequest(request) {
     intervalSpec,
     register,
     lyricsMode,
-    noteIds: request.noteIds,
+    notes: request.notes,
     responseMode,
     usePlanRef: request.usePlanRef !== false,
   };

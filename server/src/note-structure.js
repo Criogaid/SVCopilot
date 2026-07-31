@@ -1,8 +1,6 @@
 import {
   appendSharedTargetDryRunWarnings,
-  deriveRangeOccurrenceId,
   ensureSharedTargetConfirmed,
-  parseContextNoteId,
   resolveContextTarget,
 } from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
@@ -55,8 +53,8 @@ export class NoteStructureService {
         resolved = await resolveContextTarget(host, stored, {
           verify: true,
           acceptRange: true,
-          occurrenceId:
-            input.occurrenceId ?? deriveRangeOccurrenceId(stored, operationNoteIdList(input)),
+          occurrenceId: input.occurrenceId,
+          noteIndicesInGroup: operationNoteIndexList(input),
         });
         const scope = resolved.scope;
         const initialNoteCount = await scope.call(resolved.target, "getNumNotes");
@@ -300,9 +298,12 @@ function buildPlan(input, resolved, initialNoteCount) {
   const usedPositions = new Set();
   let noteCountDelta = 0;
 
-  const claimPosition = (noteId, position) => {
+  const claimPosition = (noteIndex, position) => {
     if (usedPositions.has(position)) {
-      throw codedError("DUPLICATE_NOTE_ID", `noteId is used by more than one operation: ${noteId}`);
+      throw codedError(
+        "DUPLICATE_NOTE_INDEX",
+        `note index is used by more than one operation: ${noteIndex}`
+      );
     }
     usedPositions.add(position);
   };
@@ -315,22 +316,23 @@ function buildPlan(input, resolved, initialNoteCount) {
       continue;
     }
     if (op.op === "delete") {
-      const position = parseContextNoteId(op.noteId, input.contextId, resolved);
-      claimPosition(op.noteId, position);
+      const position = resolveOpNoteIndex(op.noteIndex, input, resolved, index);
+      claimPosition(op.noteIndex, position);
       const fingerprint = resolved.fingerprints[position];
       for (const [field, expected] of Object.entries(op.expected ?? {})) {
         if (!deepEqual(fingerprint[field], expected)) {
-          mismatches.push({ noteId: op.noteId, field, expected, observed: fingerprint[field] });
+          mismatches.push({ note: op.noteIndex, field, expected, observed: fingerprint[field] });
         }
       }
       noteCountDelta -= 1;
+      // note 被宿主 handle 占用，因此组内身份存在 noteIndex 上。
       operations.push({ ...op, position, note: resolved.notes[position], fingerprint });
-      summaries.push({ op: "delete", noteId: op.noteId, indexInGroup: fingerprint.indexInGroup });
+      summaries.push({ op: "delete", note: fingerprint.indexInGroup });
       continue;
     }
     if (op.op === "split") {
-      const position = parseContextNoteId(op.noteId, input.contextId, resolved);
-      claimPosition(op.noteId, position);
+      const position = resolveOpNoteIndex(op.noteIndex, input, resolved, index);
+      claimPosition(op.noteIndex, position);
       const fingerprint = resolved.fingerprints[position];
       const onset = fingerprint.onsetBlick;
       const end = onset + fingerprint.durationBlick;
@@ -341,27 +343,30 @@ function buildPlan(input, resolved, initialNoteCount) {
         );
       }
       noteCountDelta += 1;
+      // note 被宿主 handle 占用，因此组内身份存在 noteIndex 上。
       operations.push({ ...op, position, note: resolved.notes[position], fingerprint });
       summaries.push({
         op: "split",
-        noteId: op.noteId,
+        note: op.noteIndex,
         atBlick: op.atBlick,
         secondLyrics: op.secondLyrics,
       });
       continue;
     }
-    // merge：noteIds 必须是组内 index 连续的音符，按时间升序合并进第一个。
-    const positions = op.noteIds.map((noteId) =>
-      parseContextNoteId(noteId, input.contextId, resolved)
+    // merge：notes 必须是组内 index 连续的音符，按时间升序合并进第一个。
+    const positions = op.notes.map((noteIndex) =>
+      resolveOpNoteIndex(noteIndex, input, resolved, index)
     );
-    for (const [itemIndex, position] of positions.entries()) claimPosition(op.noteIds[itemIndex], position);
+    for (const [itemIndex, position] of positions.entries()) {
+      claimPosition(op.notes[itemIndex], position);
+    }
     const fingerprints = positions.map((position) => resolved.fingerprints[position]);
     const sorted = [...fingerprints].sort((a, b) => a.indexInGroup - b.indexInGroup);
     for (let itemIndex = 1; itemIndex < sorted.length; itemIndex += 1) {
       if (sorted[itemIndex].indexInGroup !== sorted[itemIndex - 1].indexInGroup + 1) {
         throw codedError(
           "INVALID_ARGUMENTS",
-          `operations[${index}].noteIds must reference consecutive notes in the group`
+          `operations[${index}].notes must reference consecutive notes in the group`
         );
       }
     }
@@ -369,20 +374,21 @@ function buildPlan(input, resolved, initialNoteCount) {
       .map((position, itemIndex) => ({
         position,
         fingerprint: fingerprints[itemIndex],
-        noteId: op.noteIds[itemIndex],
+        note: op.notes[itemIndex],
       }))
       .sort((a, b) => a.fingerprint.indexInGroup - b.fingerprint.indexInGroup);
-    noteCountDelta -= op.noteIds.length - 1;
+    noteCountDelta -= op.notes.length - 1;
     operations.push({
       ...op,
       ordered: order.map((item) => ({
         position: item.position,
+        // note 是宿主 handle（写入用），noteIndex 是组内身份——两者不能同名。
         note: resolved.notes[item.position],
         fingerprint: item.fingerprint,
-        noteId: item.noteId,
+        noteIndex: item.note,
       })),
     });
-    summaries.push({ op: "merge", noteIds: op.noteIds, lyricsJoin: op.lyricsJoin });
+    summaries.push({ op: "merge", notes: op.notes, lyricsJoin: op.lyricsJoin });
   }
   void initialNoteCount;
   return { operations, summaries, mismatches, noteCountDelta };
@@ -440,7 +446,7 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
     const liveIndex = await scope.call(operation.note, "getIndexInParent");
     await scope.call(resolved.target, "removeNote", [liveIndex]);
     inverses.push({ op: "addBackup", backup });
-    return { op: "delete", noteId: operation.noteId, removedHostIndex: liveIndex };
+    return { op: "delete", note: operation.noteIndex, removedHostIndex: liveIndex };
   }
   if (operation.op === "split") {
     const original = operation.note;
@@ -460,7 +466,7 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
       { op: "split", note: second, getter: "getLyrics", expected: operation.secondLyrics },
       { op: "split", note: second, getter: "getPitch", expected: operation.fingerprint.pitch }
     );
-    return { op: "split", noteId: operation.noteId, secondHostIndex: hostIndex };
+    return { op: "split", note: operation.noteIndex, secondHostIndex: hostIndex };
   }
   // merge
   const first = operation.ordered[0];
@@ -473,7 +479,7 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
     if (!Number.isSafeInteger(liveIndex) || liveIndex < 1) {
       throw codedError(
         "STALE_CONTEXT",
-        `merge note is no longer in the target group: ${item.noteId}`
+        `merge note is no longer in the target group: ${item.noteIndex}`
       );
     }
     liveIndices.push(liveIndex);
@@ -482,7 +488,7 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
     if (liveIndices[itemIndex] !== liveIndices[itemIndex - 1] + 1) {
       throw codedError(
         "INVALID_ARGUMENTS",
-        "merge noteIds are no longer consecutive at execution time; an earlier operation in this request placed a note between them"
+        "merge notes are no longer consecutive at execution time; an earlier operation in this request placed a note between them"
       );
     }
   }
@@ -508,7 +514,7 @@ async function applyOperation(scope, resolved, operation, inverses, checks) {
     { op: "merge", note: first.note, getter: "getDuration", expected: span },
     { op: "merge", note: first.note, getter: "getLyrics", expected: mergedLyrics }
   );
-  return { op: "merge", noteIds: operation.noteIds, mergedDurationBlick: span };
+  return { op: "merge", notes: operation.notes, mergedDurationBlick: span };
 }
 
 async function verifyStructure(scope, resolved, plan, initialNoteCount, checks) {
@@ -599,14 +605,38 @@ function rollbackError(error) {
   };
 }
 
-// range occurrence 推导使用的 noteId 全集：insert 没有 noteId,delete/split 一个,merge 多个。
-function operationNoteIdList(input) {
-  const noteIds = [];
+// 请求引用到的组内 index 全集：insert 不引用任何音符，delete/split 一个，merge 多个。
+function operationNoteIndexList(input) {
+  const indexes = [];
   for (const op of input.operations) {
-    if (typeof op.noteId === "string") noteIds.push(op.noteId);
-    if (Array.isArray(op.noteIds)) noteIds.push(...op.noteIds.filter((id) => typeof id === "string"));
+    if (Number.isSafeInteger(op.noteIndex)) indexes.push(op.noteIndex);
+    if (Array.isArray(op.notes)) indexes.push(...op.notes.filter((n) => Number.isSafeInteger(n)));
   }
-  return noteIds;
+  return indexes;
+}
+
+// 组内 index -> 已解析上下文里的位置。两种失败保持可区分（§3.2 规则 5）。
+function resolveOpNoteIndex(noteIndex, input, resolved, operationIndex) {
+  const position = resolved.fingerprints.findIndex(
+    (fingerprint) => fingerprint.indexInGroup === noteIndex
+  );
+  if (position < 0) {
+    const groupNoteCount =
+      resolved.occurrence?.groupNoteCount ?? resolved.fingerprints.length;
+    if (noteIndex >= groupNoteCount) {
+      throw codedError(
+        "NOTE_INDEX_OUT_OF_RANGE",
+        `operations[${operationIndex}] note index ${noteIndex} is outside the note group`,
+        { got: noteIndex, max: groupNoteCount - 1 }
+      );
+    }
+    throw codedError(
+      "NOTE_NOT_IN_CONTEXT",
+      `operations[${operationIndex}] note ${noteIndex} exists but was not captured in this context`,
+      { got: noteIndex }
+    );
+  }
+  return position;
 }
 
 function normalizeRequest(request) {
@@ -689,17 +719,23 @@ function normalizeOperation(op, index) {
     };
   }
   if (op.op === "delete") {
-    if (typeof op.noteId !== "string") {
-      throw codedError("INVALID_ARGUMENTS", `${label}.noteId must be a string`);
+    if (!Number.isSafeInteger(op.noteIndex) || op.noteIndex < 0) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `${label}.noteIndex must be a non-negative note index in the group`
+      );
     }
     if (op.expected !== undefined && !isRecord(op.expected)) {
       throw codedError("INVALID_ARGUMENTS", `${label}.expected must be an object`);
     }
-    return { op: "delete", noteId: op.noteId, expected: op.expected };
+    return { op: "delete", noteIndex: op.noteIndex, expected: op.expected };
   }
   if (op.op === "split") {
-    if (typeof op.noteId !== "string") {
-      throw codedError("INVALID_ARGUMENTS", `${label}.noteId must be a string`);
+    if (!Number.isSafeInteger(op.noteIndex) || op.noteIndex < 0) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `${label}.noteIndex must be a non-negative note index in the group`
+      );
     }
     if (!Number.isSafeInteger(op.atBlick) || op.atBlick < 1) {
       throw codedError("INVALID_ARGUMENTS", `${label}.atBlick must be a positive integer (group-local blick)`);
@@ -707,20 +743,23 @@ function normalizeOperation(op, index) {
     if (op.secondLyrics !== undefined && typeof op.secondLyrics !== "string") {
       throw codedError("INVALID_ARGUMENTS", `${label}.secondLyrics must be a string`);
     }
-    return { op: "split", noteId: op.noteId, atBlick: op.atBlick, secondLyrics: op.secondLyrics ?? "-" };
+    return { op: "split", noteIndex: op.noteIndex, atBlick: op.atBlick, secondLyrics: op.secondLyrics ?? "-" };
   }
   if (op.op === "merge") {
     if (
-      !Array.isArray(op.noteIds) ||
-      op.noteIds.length < 2 ||
-      !op.noteIds.every((noteId) => typeof noteId === "string")
+      !Array.isArray(op.notes) ||
+      op.notes.length < 2 ||
+      !op.notes.every((noteIndex) => Number.isSafeInteger(noteIndex) && noteIndex >= 0)
     ) {
-      throw codedError("INVALID_ARGUMENTS", `${label}.noteIds must be an array of at least two noteIds`);
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `${label}.notes must be an array of at least two non-negative note indexes`
+      );
     }
     if (op.lyricsJoin !== undefined && !["first", "concat"].includes(op.lyricsJoin)) {
       throw codedError("INVALID_ARGUMENTS", `${label}.lyricsJoin must be "first" or "concat"`);
     }
-    return { op: "merge", noteIds: op.noteIds, lyricsJoin: op.lyricsJoin ?? "first" };
+    return { op: "merge", notes: op.notes, lyricsJoin: op.lyricsJoin ?? "first" };
   }
   throw codedError("INVALID_ARGUMENTS", `${label}.op must be insert, delete, split, or merge`);
 }

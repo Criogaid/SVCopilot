@@ -172,7 +172,8 @@ async function createFixture() {
   return { model, snapshots, service, snapshot };
 }
 
-const nid = (snapshot, index) => `${snapshot.contextId}:n:${index}`;
+// 身份就是组内 index（§3.1）；保留 helper 让测试改动最小、意图仍可读。
+const nid = (_snapshot, index) => index;
 
 test("sv_restructure_notes dryRun plans without side effects", async () => {
   const { model, service, snapshot } = await createFixture();
@@ -181,7 +182,7 @@ test("sv_restructure_notes dryRun plans without side effects", async () => {
     dryRun: true,
     operations: [
       { op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 65, lyrics: "e" } },
-      { op: "delete", noteId: nid(snapshot, 0) },
+      { op: "delete", noteIndex: nid(snapshot, 0) },
     ],
   });
   assert.equal(result.status, "dry_run");
@@ -213,7 +214,7 @@ test("sv_restructure_notes delete honors expected preconditions", async () => {
   const { model, service, snapshot } = await createFixture();
   const mismatch = await service.restructureNotes({
     contextId: snapshot.contextId,
-    operations: [{ op: "delete", noteId: nid(snapshot, 1), expected: { lyrics: "wrong" } }],
+    operations: [{ op: "delete", noteIndex: nid(snapshot, 1), expected: { lyrics: "wrong" } }],
   });
   assert.equal(mismatch.ok, false);
   assert.equal(mismatch.error.code, "EXPECTED_MISMATCH");
@@ -222,7 +223,7 @@ test("sv_restructure_notes delete honors expected preconditions", async () => {
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    operations: [{ op: "delete", noteId: nid(snapshot, 1), expected: { lyrics: "i" } }],
+    operations: [{ op: "delete", noteIndex: nid(snapshot, 1), expected: { lyrics: "i" } }],
   });
   assert.equal(result.ok, true);
   assert.deepEqual(model.groupLyrics(), ["a", "u"]);
@@ -233,7 +234,7 @@ test("sv_restructure_notes splits a note with an extender second half", async ()
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    operations: [{ op: "split", noteId: nid(snapshot, 0), atBlick: Q / 4 }],
+    operations: [{ op: "split", noteIndex: nid(snapshot, 0), atBlick: Q / 4 }],
   });
   assert.equal(result.ok, true);
   assert.equal(model.groupNotes.length, 4);
@@ -251,7 +252,7 @@ test("sv_restructure_notes merges consecutive notes and can concat lyrics", asyn
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [
-      { op: "merge", noteIds: [nid(snapshot, 0), nid(snapshot, 1)], lyricsJoin: "concat" },
+      { op: "merge", notes: [nid(snapshot, 0), nid(snapshot, 1)], lyricsJoin: "concat" },
     ],
   });
   assert.equal(result.ok, true);
@@ -264,7 +265,7 @@ test("sv_restructure_notes rejects non-consecutive merges before writing", async
   const { model, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
-    operations: [{ op: "merge", noteIds: [nid(snapshot, 0), nid(snapshot, 2)] }],
+    operations: [{ op: "merge", notes: [nid(snapshot, 0), nid(snapshot, 2)] }],
   });
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "INVALID_ARGUMENTS");
@@ -280,8 +281,8 @@ test("sv_restructure_notes atomic mode restores structure on mid-apply failure",
     contextId: snapshot.contextId,
     operations: [
       { op: "insert", note: { onsetBlick: 5 * Q, durationBlick: Q, pitch: 65, lyrics: "e" } },
-      { op: "delete", noteId: nid(snapshot, 1) },
-      { op: "split", noteId: nid(snapshot, 2), atBlick: 2 * Q + Q / 2 },
+      { op: "delete", noteIndex: nid(snapshot, 1) },
+      { op: "split", noteIndex: nid(snapshot, 2), atBlick: 2 * Q + Q / 2 },
     ],
   });
 
@@ -300,7 +301,7 @@ test("sv_restructure_notes invalidates the context after a successful write", as
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    operations: [{ op: "delete", noteId: nid(snapshot, 0) }],
+    operations: [{ op: "delete", noteIndex: nid(snapshot, 0) }],
   });
   assert.equal(result.ok, true);
   assert.equal(snapshots.store.get(snapshot.contextId), null);
@@ -313,7 +314,7 @@ test("sv_restructure_notes detects silently ignored setters via field read-back"
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    operations: [{ op: "merge", noteIds: [nid(snapshot, 0), nid(snapshot, 1)] }],
+    operations: [{ op: "merge", notes: [nid(snapshot, 0), nid(snapshot, 1)] }],
   });
 
   assert.equal(result.ok, false);
@@ -331,7 +332,7 @@ test("sv_restructure_notes rolls back when the verification getter throws", asyn
   model.failures.push({ method: "getNumNotes", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
-    operations: [{ op: "delete", noteId: nid(snapshot, 0) }],
+    operations: [{ op: "delete", noteIndex: nid(snapshot, 0) }],
   });
 
   assert.equal(result.ok, false);
@@ -483,13 +484,13 @@ test("sv_restructure_notes expands a planRef and restores its bounded context ca
   assert.ok(snapshots.store.get(contextId));
 });
 
-test("sv_restructure_notes accepts a range context and derives the occurrence from noteIds", async () => {
+test("sv_restructure_notes accepts a range context and resolves notes by group index", async () => {
   const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();
   const result = await service.restructureNotes({
     contextId,
     operations: [
-      { op: "split", noteId: `${occurrenceId}:n:1`, atBlick: Q + Q / 2 },
-      { op: "delete", noteId: `${occurrenceId}:n:2` },
+      { op: "split", noteIndex: 1, atBlick: Q + Q / 2 },
+      { op: "delete", noteIndex: 2 },
     ],
     waitFor: "none",
   });
@@ -535,7 +536,7 @@ test("sv_restructure_notes range context enforces shared-target confirmation", a
   const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
   const refused = await service.restructureNotes({
     contextId,
-    operations: [{ op: "delete", noteId: `${occurrenceId}:n:0` }],
+    operations: [{ op: "delete", noteIndex: 0 }],
     waitFor: "none",
   });
   assert.equal(refused.ok, false);
@@ -546,7 +547,7 @@ test("sv_restructure_notes range context enforces shared-target confirmation", a
 
   const confirmed = await service.restructureNotes({
     contextId,
-    operations: [{ op: "delete", noteId: `${occurrenceId}:n:0` }],
+    operations: [{ op: "delete", noteIndex: 0 }],
     allowSharedTargetMutation: true,
     waitFor: "none",
   });
@@ -563,7 +564,7 @@ test("sv_restructure_notes rejects a merge whose notes stopped being adjacent af
     waitFor: "none",
     operations: [
       { op: "insert", note: { onsetBlick: Q / 2, durationBlick: Q / 4, pitch: 61, lyrics: "n" } },
-      { op: "merge", noteIds: [nid(snapshot, 0), nid(snapshot, 1)] },
+      { op: "merge", notes: [nid(snapshot, 0), nid(snapshot, 1)] },
     ],
   });
 
@@ -594,7 +595,7 @@ test("sv_restructure_notes keeps verified success when post-commit processing ob
     timeoutMs: 100,
     pollIntervalMs: 20,
     operations: [
-      { op: "split", noteId: nid(snapshot, 0), atBlick: Q / 2, secondLyrics: "-" },
+      { op: "split", noteIndex: nid(snapshot, 0), atBlick: Q / 2, secondLyrics: "-" },
     ],
   });
 

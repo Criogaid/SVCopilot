@@ -1189,7 +1189,7 @@ try {
         operations: [
           {
             op: "split",
-            noteId: rangeNote.id,
+            noteIndex: rangeNote.indexInGroup,
             atBlick: rangeNote.onsetBlick + Math.floor(rangeNote.durationBlick / 2),
           },
         ],
@@ -1448,7 +1448,7 @@ try {
         contextId: structureSnapshot.contextId,
         waitFor: "none",
         operations: [
-          { op: "split", noteId: structureSnapshot.data.notes[0].id, atBlick: 352800 },
+          { op: "split", noteIndex: 0, atBlick: 352800 },
         ],
       },
     })
@@ -1478,7 +1478,7 @@ try {
         operations: [
           {
             op: "merge",
-            noteIds: [afterSplit.data.notes[0].id, afterSplit.data.notes[1].id],
+            notes: [0, 1],
             lyricsJoin: "first",
           },
         ],
@@ -1525,7 +1525,7 @@ try {
         operations: [
           {
             op: "delete",
-            noteId: deleteSnapshot.data.notes[2].id,
+            noteIndex: 2,
             expected: { lyrics: "ん" },
           },
         ],
