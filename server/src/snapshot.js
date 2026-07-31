@@ -135,6 +135,43 @@ export class SnapshotStore {
   }
 
   /**
+   * 失效所有指向同一个 NoteGroup 的 Context（§4.6）。
+   *
+   * 单删发起写入的那一个是不够的：同一个 NoteGroup 可以被多个 Context 捕获
+   * （不同 range、不同 track 的引用、或先后两次快照），它们全都在这次写入后过期。
+   * 只删一个会让剩下的继续被信任，而它们的 fingerprint 已经不再描述宿主。
+   *
+   * @param {string} targetGroupUuid
+   * @param {string} [reason]
+   * @returns {string[]} 被失效的 contextId
+   */
+  invalidateContextsForTarget(targetGroupUuid, reason = "invalidated_by_mutation") {
+    if (typeof targetGroupUuid !== "string" || targetGroupUuid === "") return [];
+    const affected = [];
+    for (const [contextId, entry] of this.entries) {
+      if (contextTouchesTarget(entry, targetGroupUuid)) affected.push(contextId);
+    }
+    for (const contextId of affected) this.delete(contextId, reason);
+    return affected;
+  }
+
+  /**
+   * 失效受工程结构变化影响的全部 Context（§4.6 的 clone_track 行）。
+   *
+   * clone_track 插入一条轨道，于是**所有** Context 里记录的 trackIndex 都可能指向
+   * 别的轨道了。按 NoteGroup 失效在这里不够：受影响的不是某个音符组，而是索引本身
+   * 的含义。因此这是唯一一处全量失效。
+   *
+   * @param {string} [reason]
+   * @returns {string[]}
+   */
+  invalidateAllForProjectStructureChange(reason = "invalidated_by_mutation") {
+    const affected = [...this.entries.keys()];
+    for (const contextId of affected) this.delete(contextId, reason);
+    return affected;
+  }
+
+  /**
    * 存储可观测面，供 doctor 报告。accountedBytes 是逻辑驻留字节
    * （canonical payload 的 UTF-8 bytes），不是 V8 heap 实测值。
    */
@@ -254,6 +291,23 @@ export function unknownContextError(store, contextId, label) {
 }
 
 // 96-bit Base64URL 随机值，不再使用 UUID 文本：短、无结构、不编码时间或宿主身份。
+// 一个 Context 是否捕获了给定 NoteGroup。三种 context kind 记录目标的方式不同：
+// range 在每个 occurrence 上带 targetGroupUuid；group/selection 只记 track/group 索引，
+// 拿不到 UUID。
+//
+// 对后两者返回 true 是刻意的保守选择：宁可多失效一个仍然有效的 Context（代价是一次
+// 重新快照），也不能让一个已经过期的 Context 继续被信任（代价是基于错误 fingerprint
+// 的写入）。B2 让 group/selection 也记录 targetGroupUuid 后可以收紧。
+function contextTouchesTarget(entry, targetGroupUuid) {
+  const context = entry?.context;
+  if (!context) return false;
+  if (context.kind === "range") {
+    const occurrences = Array.isArray(context.occurrences) ? context.occurrences : [];
+    return occurrences.some((occurrence) => occurrence.targetGroupUuid === targetGroupUuid);
+  }
+  return context.kind === "group" || context.kind === "selection";
+}
+
 function createContextId() {
   return `c_${randomBytes(12).toString("base64url")}`;
 }
