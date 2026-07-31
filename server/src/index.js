@@ -906,7 +906,7 @@ export const TOOLS = [
   {
     name: "sv_patch_notes",
     description:
-      'Patch fields of existing notes identified by snapshot noteIds or a scoped noteIndexInGroup. The compact index form requires an occurrenceId when a range has multiple vocal occurrences and avoids repeating long context-prefixed ids. For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. diagnostics:true adds phase timings and aggregate host method counts without logging musical values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
+      'Patch fields of existing notes identified by 0-based note index within the resolved NoteGroup. Provide occurrence when a range context has multiple vocal occurrences. For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. diagnostics:true adds phase timings and aggregate host method counts without logging musical values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -933,15 +933,11 @@ export const TOOLS = [
             type: "object",
             additionalProperties: false,
             properties: {
-              noteId: {
-                type: "string",
-                description: "Note id from the same snapshot context, e.g. ctx_...:n:4.",
-              },
-              noteIndexInGroup: {
+              note: {
                 type: "integer",
                 minimum: 0,
                 description:
-                  "0-based index within the resolved target NoteGroup. Provide occurrenceId when the range context has multiple vocal occurrences.",
+                  "0-based note index within the resolved target NoteGroup, from the snapshot. Provide occurrence when the range context has multiple vocal occurrences.",
               },
               expected: {
                 type: "object",
@@ -979,8 +975,7 @@ export const TOOLS = [
                 },
               },
             },
-            required: ["set"],
-            oneOf: [{ required: ["noteId"] }, { required: ["noteIndexInGroup"] }],
+            required: ["note", "set"],
           },
         },
         dryRun: {

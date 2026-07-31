@@ -26,7 +26,7 @@ async function runScenario({ indices }, { bulk }) {
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
     occurrenceId: fixture.occurrenceId,
-    patches: indices.map((index) => ({ noteIndexInGroup: index, set: { lyrics: `b${index}` } })),
+    patches: indices.map((index) => ({ note: index, set: { lyrics: `b${index}` } })),
     dryRun: true,
     waitFor: "none",
     diagnostics: true,

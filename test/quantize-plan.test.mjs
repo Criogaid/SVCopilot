@@ -101,7 +101,7 @@ test("full-strength 1/8 quantization snaps offsets and emits expected preconditi
   assert.equal(patch.arguments.contextId, stored.contextId);
   assert.equal(patch.arguments.patches.length, 3);
   const first = patch.arguments.patches[0];
-  assert.equal(first.noteId, `${occurrenceId}:n:0`);
+  assert.equal(first.note, 0);
   assert.deepEqual(first.expected, { onsetBlick: Q / 8, durationBlick: Q });
   assert.deepEqual(first.set, { onsetBlick: 0 });
   assert.equal(result.provenance.humanize, "not_provided_conflicts_with_deterministic_planner_contract");
@@ -340,9 +340,9 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   });
   assert.ok(second.warnings.some((warning) => warning.code === "STALE_SELECTOR_REANCHORED"));
   assert.equal(second.patchRequest.arguments.patches.length, 1);
-  // 续轮 patch 引用新 occurrence 的 noteId（预烤批次不可能提前知道）。
+  // 续轮 patch 落在新 occurrence 的组内 index 上（预烤批次不可能提前知道）。
   assert.ok(
-    second.patchRequest.arguments.patches[0].noteId.startsWith(round2.stored.contextId)
+    Number.isSafeInteger(second.patchRequest.arguments.patches[0].note)
   );
   assert.equal(second.continuation, undefined);
 

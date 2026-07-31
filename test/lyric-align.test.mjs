@@ -164,7 +164,7 @@ test("a single lyric change produces one guarded patch", async () => {
   const patches = result.patchRequest.arguments.patches;
   assert.equal(patches.length, 1);
   assert.deepEqual(patches[0], {
-    noteId: noteId(occurrenceId, 3),
+    note: 3,
     expected: { lyrics: "see" },
     set: { lyrics: "saw" },
   });
@@ -185,8 +185,8 @@ function mandarinLyrics(count) {
 function applyPatchesToNotes(notes, occurrenceId, patches) {
   const updated = notes.map((note) => ({ ...note }));
   for (const patch of patches) {
-    const index = Number(patch.noteId.slice(patch.noteId.lastIndexOf(":n:") + 3));
-    assert.equal(patch.noteId, `${occurrenceId}:n:${index}`);
+    const index = patch.note;
+    assert.ok(Number.isSafeInteger(index) && index >= 0, "patch identity is a group index");
     assert.equal(updated[index].lyrics ?? "", patch.expected.lyrics); // expected 前置条件成立
     updated[index].lyrics = patch.set.lyrics;
     if (patch.set.languageOverride !== undefined) {
@@ -210,7 +210,7 @@ test("oversized plans emit one submittable batch plus an honest continuation, ne
   assert.equal(result.status, "planned");
   assert.equal(result.summary.changedCount, count);
   // 唯一可提交批：当前 context 下的前 200 项。预烤第二批必然 UNKNOWN_CONTEXT（提交成功即删
-  // context，noteId 又内嵌 contextId），因此响应里不允许存在 patchRequests 数组。
+  // context），因此响应里不允许存在 patchRequests 数组。
   assert.equal(result.patchRequest.arguments.patches.length, 200);
   assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
   assert.equal(result.patchRequests, undefined);
@@ -243,8 +243,8 @@ test("continuation rounds converge: commit, re-snapshot, re-align until no_chang
   assert.equal(round2.status, "planned");
   assert.equal(round2.patchRequest.arguments.patches.length, 1);
   assert.equal(round2.continuation, undefined);
-  // 续轮 patch 引用的是新 occurrence 的 noteId——这正是预烤批次不可能提前知道的部分。
-  assert.equal(round2.patchRequest.arguments.patches[0].noteId, `${round2Context.occurrenceId}:n:200`);
+  // 续轮 patch 落在新 occurrence 的组内 index 上——这正是预烤批次不可能提前知道的部分。
+  assert.equal(round2.patchRequest.arguments.patches[0].note, 200);
   notes = applyPatchesToNotes(notes, round2Context.occurrenceId, round2.patchRequest.arguments.patches);
 
   // 第 3 轮：全部就位 → no_change，循环终止。
@@ -297,8 +297,8 @@ test("PATCH_CAP continuation can replay explicit occurrenceId/startNoteId agains
   assert.equal(round2.status, "planned");
   assert.equal(round2.patchRequest.arguments.patches.length, 1);
   assert.equal(
-    round2.patchRequest.arguments.patches[0].noteId,
-    noteId(round2Context.occurrenceId, 201)
+    round2.patchRequest.arguments.patches[0].note,
+    201
   );
 });
 

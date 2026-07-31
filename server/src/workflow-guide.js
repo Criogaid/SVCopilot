@@ -404,7 +404,7 @@ const RECIPES = [
         arguments: {
           contextId: EXAMPLE.contextId,
           patches: [
-            { noteId: EXAMPLE.noteId, expected: { lyrics: "" }, set: { lyrics: "ひ" } },
+            { note: 0, expected: { lyrics: "" }, set: { lyrics: "ひ" } },
           ],
           dryRun: true,
         },
@@ -418,7 +418,7 @@ const RECIPES = [
         arguments: {
           contextId: EXAMPLE.contextId,
           patches: [
-            { noteId: EXAMPLE.noteId, expected: { lyrics: "" }, set: { lyrics: "ひ" } },
+            { note: 0, expected: { lyrics: "" }, set: { lyrics: "ひ" } },
           ],
           atomic: true,
         },
@@ -743,7 +743,7 @@ const RECIPES = [
           contextId: EXAMPLE.contextId,
           patches: [
             {
-              noteId: EXAMPLE.noteId,
+              note: 0,
               expected: { onsetBlick: 176400123 },
               set: { onsetBlick: 176400000 },
             },
@@ -761,7 +761,7 @@ const RECIPES = [
           contextId: EXAMPLE.contextId,
           patches: [
             {
-              noteId: EXAMPLE.noteId,
+              note: 0,
               expected: { onsetBlick: 176400123 },
               set: { onsetBlick: 176400000 },
             },

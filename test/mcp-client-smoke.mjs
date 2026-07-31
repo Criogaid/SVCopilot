@@ -995,12 +995,11 @@ try {
       arguments: { scope: { kind: "selection" } },
     })
   );
-  const patchTargetId = patchSnapshot.data.notes[0].id;
   const patchArguments = {
     contextId: patchSnapshot.contextId,
     patches: [
       {
-        noteId: patchTargetId,
+        note: 0,
         expected: { lyrics: "さ" },
         set: { lyrics: "ら", pitch: 61, detuneCents: -8 },
       },
@@ -1031,8 +1030,8 @@ try {
   assert.equal(patchApplied.data.actuallyChangedNotes, 1);
   assert.equal(patchApplied.undo.boundaryCallsCompleted, 2);
   assert.equal(patchApplied.verification.passed, true);
-  assert.equal(patchApplied.verification.evidence.observed[patchTargetId].lyrics, "ら");
-  assert.equal(patchApplied.verification.evidence.observed[patchTargetId].detuneCents, -8);
+  assert.equal(patchApplied.verification.evidence.observed[0].lyrics, "ら");
+  assert.equal(patchApplied.verification.evidence.observed[0].detuneCents, -8);
   assert.equal(patchApplied.data.processing.state, "ready");
 
   const patchedSnapshot = parseToolResult(
@@ -1055,7 +1054,7 @@ try {
       arguments: {
         contextId: patchedSnapshot.contextId,
         patches: [
-          { noteId: patchedSnapshot.data.notes[0].id, expected: { lyrics: "さ" }, set: { lyrics: "x" } },
+          { note: 0, expected: { lyrics: "さ" }, set: { lyrics: "x" } },
         ],
       },
     })
@@ -1165,7 +1164,7 @@ try {
         allowSharedTargetMutation: true,
         patches: [
           {
-            noteId: rangeNote.id,
+            note: rangeNote.indexInGroup,
             expected: { lyrics: rangeNote.lyrics },
             set: { lyrics: "仮" },
           },

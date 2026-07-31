@@ -91,9 +91,10 @@ export class NotePatchService {
           acceptRange: true,
           occurrenceId:
             input.occurrenceId ??
-            deriveRangeOccurrenceId(stored, input.patches.map((patch) => patch.noteId)),
-          noteIds: input.patches.map((patch) => patch.noteId),
-          noteIndicesInGroup: input.patches.map((patch) => patch.noteIndexInGroup),
+            // index 身份不含 occurrence 前缀，因此不能从引用里推导 occurrence。
+            // 单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 由 resolveContextTarget 负责。
+            undefined,
+          noteIndicesInGroup: input.patches.map((patch) => patch.note),
           diagnostics,
         });
         const targets = resolveNoteTargets(input, resolved);
@@ -149,7 +150,7 @@ export class NotePatchService {
           };
         }
 
-        const plannedChangedNotes = new Set(plannedDiff.map((entry) => entry.noteId)).size;
+        const plannedChangedNotes = new Set(plannedDiff.map((entry) => entry.indexInGroup)).size;
         if (plannedDiff.some((entry) => entry.field === "onsetBlick")) {
           warnings.push({
             code: "NOTE_ORDER_MAY_CHANGE",
@@ -320,7 +321,7 @@ export class NotePatchService {
               targets,
               plannedDiff,
               appliedDiff,
-              rollback.outcomeUnknown ? null : (rollback.unrestoredNoteIds?.length ?? 0)
+              rollback.outcomeUnknown ? null : (rollback.unrestoredNoteIndexes?.length ?? 0)
             ),
             rollback: {
               attempted: true,
@@ -417,7 +418,7 @@ export class NotePatchService {
       } catch (error) {
         const unknown = isUnknownOutcomeError(error);
         const effects = writeAttempted ? (unknown ? "unknown" : "may_remain") : "none";
-        const attemptedChangedNotes = new Set(appliedDiff.map((entry) => entry.noteId)).size;
+        const attemptedChangedNotes = new Set(appliedDiff.map((entry) => entry.indexInGroup)).size;
         const remainingChangedNotes = writeAttempted
           ? unknown
             ? null
@@ -462,8 +463,8 @@ export class NotePatchService {
       const target = targetByPosition.get(entry.targetPosition);
       const spec = FIELD_BY_NAME.get(entry.field);
       const value = await readField(host, target.note, spec);
-      observed[entry.noteId] = observed[entry.noteId] ?? {};
-      observed[entry.noteId][entry.field] = value;
+      observed[entry.indexInGroup] = observed[entry.indexInGroup] ?? {};
+      observed[entry.indexInGroup][entry.field] = value;
       if (!fieldMatches(spec, entry.to, value)) passed = false;
     }
     return { passed, evidence: { observed } };
@@ -488,7 +489,7 @@ export class NotePatchService {
             verified: false,
             evidence,
             outcomeUnknown: true,
-            unrestoredNoteIds: [...new Set(appliedDiff.map((entry) => entry.noteId))],
+            unrestoredNoteIndexes: [...new Set(appliedDiff.map((entry) => entry.indexInGroup))],
             error: {
               code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
               message: error instanceof Error ? error.message : String(error),
@@ -496,7 +497,7 @@ export class NotePatchService {
           };
         }
         errors.push({
-          noteId: entry.noteId,
+          note: entry.indexInGroup,
           field: entry.field,
           code: typeof error?.code === "string" ? error.code : "ROLLBACK_FAILED",
           message: error instanceof Error ? error.message : String(error),
@@ -504,15 +505,15 @@ export class NotePatchService {
       }
     }
     let verified = errors.length === 0;
-    const unrestoredNoteIds = new Set(
-      errors.filter((entry) => entry.noteId).map((entry) => entry.noteId)
+    const unrestoredNoteIndexes = new Set(
+      errors.filter((entry) => entry.note !== undefined).map((entry) => entry.note)
     );
     try {
       for (const entry of appliedDiff) {
         const spec = FIELD_BY_NAME.get(entry.field);
         const value = await readField(host, targetByPosition.get(entry.targetPosition).note, spec);
-        evidence.restored[entry.noteId] = evidence.restored[entry.noteId] ?? {};
-        evidence.restored[entry.noteId][entry.field] = value;
+        evidence.restored[entry.indexInGroup] = evidence.restored[entry.indexInGroup] ?? {};
+        evidence.restored[entry.indexInGroup][entry.field] = value;
         // 回滚后比较完整旧值；官方部分更新无法删除新增 key，此时如实报告未恢复。
         const restoredMatches =
           spec.kind === "attributes"
@@ -520,12 +521,12 @@ export class NotePatchService {
             : fieldMatches(spec, entry.from, value);
         if (!restoredMatches) {
           verified = false;
-          unrestoredNoteIds.add(entry.noteId);
+          unrestoredNoteIndexes.add(entry.indexInGroup);
         }
       }
     } catch (error) {
       verified = false;
-      for (const entry of appliedDiff) unrestoredNoteIds.add(entry.noteId);
+      for (const entry of appliedDiff) unrestoredNoteIndexes.add(entry.indexInGroup);
       errors.push({
         code: typeof error?.code === "string" ? error.code : "ROLLBACK_VERIFY_FAILED",
         message: error instanceof Error ? error.message : String(error),
@@ -535,7 +536,7 @@ export class NotePatchService {
       verified,
       evidence,
       outcomeUnknown: false,
-      unrestoredNoteIds: [...unrestoredNoteIds],
+      unrestoredNoteIndexes: [...unrestoredNoteIndexes],
       ...(errors.length > 0 ? { error: errors[0], errors } : {}),
     };
   }
@@ -567,11 +568,11 @@ function resolveNoteTargets(input, resolved) {
   const seen = new Set();
   const targets = [];
   for (const patch of input.patches) {
-    const { noteId, position, outputPosition } = resolvePatchReference(patch, input, resolved);
+    const { position, outputPosition } = resolvePatchReference(patch, input, resolved);
     if (seen.has(position)) {
       throw codedError(
-        "DUPLICATE_NOTE_ID",
-        `the same note appears more than once: ${patch.noteId ?? patch.noteIndexInGroup}`
+        "DUPLICATE_NOTE_INDEX",
+        `the same note appears more than once: ${patch.note}`
       );
     }
     seen.add(position);
@@ -580,8 +581,6 @@ function resolveNoteTargets(input, resolved) {
       ...Object.keys(patch.expected ?? {}),
     ]);
     targets.push({
-      noteId,
-      compactReference: patch.noteIndexInGroup !== undefined,
       position,
       outputPosition,
       note: resolved.notes[position],
@@ -598,44 +597,37 @@ function resolveNoteTargets(input, resolved) {
   return targets;
 }
 
+// 组内 index → 上下文位置。三种上下文都用同一条路径：指纹数组里找 indexInGroup。
+//
+// 越界与"合法但未捕获"必须分开（§3.2 规则 5）：越界靠重试永远不会成功，未捕获则
+// 需要重新捕获更宽的范围——合并成一个码会让模型分不清该怎么办。
 function resolvePatchReference(patch, input, resolved) {
-  if (patch.noteId !== undefined) {
-    const position = parseContextNoteId(patch.noteId, input.contextId, resolved);
-    return {
-      noteId: patch.noteId,
-      position,
-      outputPosition:
-        resolved.contextKind === "range"
-          ? resolved.contextPositionByNoteId.get(patch.noteId)
-          : position,
-    };
-  }
   const position = resolved.fingerprints.findIndex(
-    (fingerprint) => fingerprint.indexInGroup === patch.noteIndexInGroup
+    (fingerprint) => fingerprint.indexInGroup === patch.note
   );
   if (position < 0) {
-    throw codedError(
-      "NOTE_INDEX_OUT_OF_RANGE",
-      `noteIndexInGroup ${patch.noteIndexInGroup} is not part of the resolved occurrence`
-    );
-  }
-  if (resolved.contextKind === "range") {
-    const noteId = resolved.occurrence.noteFingerprints.find(
-      (fingerprint) => fingerprint.indexInGroup === patch.noteIndexInGroup
-    )?.noteId;
-    if (typeof noteId !== "string") {
+    const groupNoteCount =
+      resolved.occurrence?.groupNoteCount ?? resolved.fingerprints.length;
+    if (patch.note >= groupNoteCount) {
       throw codedError(
-        "UNKNOWN_NOTE_ID",
-        `noteIndexInGroup ${patch.noteIndexInGroup} has no identity in the range context`
+        "NOTE_INDEX_OUT_OF_RANGE",
+        `note index ${patch.note} is outside the note group`,
+        { got: patch.note, max: groupNoteCount - 1 }
       );
     }
-    return {
-      noteId,
-      position,
-      outputPosition: resolved.contextPositionByIndexInGroup.get(patch.noteIndexInGroup),
-    };
+    throw codedError(
+      "NOTE_NOT_IN_CONTEXT",
+      `note ${patch.note} exists but was not captured in this context`,
+      { got: patch.note }
+    );
   }
-  return { noteId: `${input.contextId}:n:${position}`, position, outputPosition: position };
+  return {
+    position,
+    outputPosition:
+      resolved.contextKind === "range"
+        ? resolved.contextPositionByIndexInGroup.get(patch.note)
+        : position,
+  };
 }
 
 function collectExpectedMismatches(targets) {
@@ -651,7 +643,12 @@ function collectExpectedMismatches(targets) {
             ? numbersClose(current, expectedValue)
             : jsonValueEquals(current, expectedValue);
       if (!matches) {
-        mismatches.push({ noteId: target.noteId, field, expected: expectedValue, observed: current });
+        mismatches.push({
+          note: target.indexInGroup,
+          field,
+          expected: expectedValue,
+          observed: current,
+        });
       }
     }
   }
@@ -673,8 +670,6 @@ function buildPlannedDiff(targets) {
           : target.set[spec.field];
       if (fieldMatches(spec, to, from)) continue;
       diff.push({
-        noteId: target.noteId,
-        compactReference: target.compactReference,
         targetPosition: target.position,
         position: target.outputPosition,
         indexInGroup: target.indexInGroup,
@@ -760,11 +755,11 @@ function jsonValueEquals(a, b) {
 // attemptedChangedNotes 是"曾写过"的音符数；remainingChangedNotes 是最终仍偏离原值的数量
 // （成功 = attempted；已验证回滚 = 0；结果不可知 = null）。actuallyChangedNotes 与后者同义。
 function patchResultData(targets, plannedDiff, appliedDiff, remainingChangedNotes) {
-  const attempted = new Set(appliedDiff.map((entry) => entry.noteId)).size;
+  const attempted = new Set(appliedDiff.map((entry) => entry.indexInGroup)).size;
   const remaining = remainingChangedNotes === undefined ? attempted : remainingChangedNotes;
   return {
     processedNotes: targets.length,
-    plannedChangedNotes: new Set(plannedDiff.map((entry) => entry.noteId)).size,
+    plannedChangedNotes: new Set(plannedDiff.map((entry) => entry.indexInGroup)).size,
     attemptedChangedNotes: attempted,
     remainingChangedNotes: remaining,
     actuallyChangedNotes: remaining,
@@ -779,10 +774,8 @@ function publicDiff(diff) {
       writeValue: _writeValue,
       rollbackValue: _rollbackValue,
       targetPosition: _targetPosition,
-      compactReference,
-      noteId,
       ...entry
-    }) => (compactReference ? entry : { noteId, ...entry })
+    }) => entry
   );
 }
 
@@ -820,24 +813,13 @@ function normalizeRequest(request) {
   }
   const patches = request.patches.map((patch, index) => {
     if (!isRecord(patch)) throw codedError("INVALID_ARGUMENTS", `patches[${index}] must be an object`);
-    const hasNoteId = patch.noteId !== undefined;
-    const hasIndex = patch.noteIndexInGroup !== undefined;
-    if (hasNoteId === hasIndex) {
+    // 身份只有一种写法：组内 index（§3.1）。三种上下文（range/group/selection）的
+    // 指纹都带 indexInGroup，且 selection/group 都锁定单个 group，因此 index 在
+    // 每种上下文内都唯一。
+    if (!Number.isSafeInteger(patch.note) || patch.note < 0) {
       throw codedError(
         "INVALID_ARGUMENTS",
-        `patches[${index}] must provide exactly one of noteId or noteIndexInGroup`
-      );
-    }
-    if (hasNoteId && (typeof patch.noteId !== "string" || !patch.noteId)) {
-      throw codedError("INVALID_ARGUMENTS", `patches[${index}].noteId must be a non-empty string`);
-    }
-    if (
-      hasIndex &&
-      (!Number.isSafeInteger(patch.noteIndexInGroup) || patch.noteIndexInGroup < 0)
-    ) {
-      throw codedError(
-        "INVALID_ARGUMENTS",
-        `patches[${index}].noteIndexInGroup must be a non-negative safe integer`
+        `patches[${index}].note must be a non-negative note index in the group`
       );
     }
     if (!isRecord(patch.set) || Object.keys(patch.set).length === 0) {
@@ -851,8 +833,7 @@ function normalizeRequest(request) {
       validateFieldObject(patch.expected, `patches[${index}].expected`, false);
     }
     return {
-      noteId: patch.noteId,
-      noteIndexInGroup: patch.noteIndexInGroup,
+      note: patch.note,
       set: patch.set,
       expected: patch.expected,
     };

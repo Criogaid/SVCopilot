@@ -522,6 +522,7 @@ function mapUnitsToNotes(tokens, loaded, input, warnings) {
       const note = loaded.notes[loaded.startIndex + index];
       return {
         noteId: item.noteId,
+        indexInGroup: item.indexInGroup,
         onsetBlick: note.onsetBlick,
         durationBlick: note.durationBlick,
         lyrics: item.plannedLyrics,
@@ -591,7 +592,8 @@ function buildAlignResponse(
 ) {
   const changed = mapped.perNote.filter((item) => item.changed);
   const patches = changed.map((item) => ({
-    noteId: item.noteId,
+    // sv_patch_notes 的身份是组内 index（§3.1）。
+    note: item.indexInGroup,
     // expected 前置条件：快照后的并发漂移在 apply 阶段被 sv_patch_notes 冲突检查捕获。
     expected: { lyrics: item.currentLyrics },
     set: {
@@ -683,7 +685,8 @@ function buildAlignResponse(
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
         occurrenceId: loaded.occurrence.occurrenceId,
         contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
-          noteIds: submittable.map((patch) => patch.noteId),
+          // capsule 只封存被这批 patch 触及的音符；身份是组内 index（§3.1）。
+          noteIndexes: submittable.map((patch) => patch.note),
         }),
       });
       planRef = artifactReference(

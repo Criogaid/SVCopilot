@@ -174,7 +174,8 @@ async function createFixture() {
   return { model, snapshots, service, snapshot };
 }
 
-const nid = (snapshot, index) => `${snapshot.contextId}:n:${index}`;
+// 身份就是组内 index（§3.1）；保留 helper 只为让测试改动最小、意图仍然可读。
+const nid = (_snapshot, index) => index;
 
 test("sv_patch_notes dryRun plans a diff without any host side effect", async () => {
   const { model, service, snapshot } = await createFixture();
@@ -182,8 +183,8 @@ test("sv_patch_notes dryRun plans a diff without any host side effect", async ()
     contextId: snapshot.contextId,
     dryRun: true,
     patches: [
-      { noteId: nid(snapshot, 0), set: { lyrics: "ka", pitch: 61 } },
-      { noteId: nid(snapshot, 2), set: { lyrics: "u" } },
+      { note: nid(snapshot, 0), set: { lyrics: "ka", pitch: 61 } },
+      { note: nid(snapshot, 2), set: { lyrics: "u" } },
     ],
   });
 
@@ -215,11 +216,11 @@ test("sv_patch_notes applies multi-field patches deterministically and verifies 
     pollIntervalMs: 20,
     patches: [
       {
-        noteId: nid(snapshot, 1),
+        note: nid(snapshot, 1),
         expected: { lyrics: "i" },
         set: { lyrics: "mi", detuneCents: -8, attributes: { tF0Offset: 0.5 } },
       },
-      { noteId: nid(snapshot, 0), set: { durationBlick: 352800, pitch: 63 } },
+      { note: nid(snapshot, 0), set: { durationBlick: 352800, pitch: 63 } },
     ],
   });
 
@@ -260,7 +261,7 @@ test("sv_patch_notes rejects expected mismatches before any write", async () => 
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [
-      { noteId: nid(snapshot, 0), expected: { lyrics: "wrong" }, set: { lyrics: "ka" } },
+      { note: nid(snapshot, 0), expected: { lyrics: "wrong" }, set: { lyrics: "ka" } },
     ],
   });
 
@@ -271,7 +272,7 @@ test("sv_patch_notes rejects expected mismatches before any write", async () => 
   assert.equal(result.data.attemptedChangedNotes, 0);
   assert.equal(result.data.remainingChangedNotes, 0);
   assert.deepEqual(result.data.mismatches, [
-    { noteId: nid(snapshot, 0), field: "lyrics", expected: "wrong", observed: "a" },
+    { note: nid(snapshot, 0), field: "lyrics", expected: "wrong", observed: "a" },
   ]);
   assert.equal(model.undoCount, 0);
   assert.equal(model.notes[0].lyrics, "a");
@@ -281,7 +282,7 @@ test("sv_patch_notes reports no_change without undo records for a no-op set", as
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
-    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "a", pitch: 60 } }],
+    patches: [{ note: nid(snapshot, 0), set: { lyrics: "a", pitch: 60 } }],
   });
 
   assert.equal(result.ok, true);
@@ -298,8 +299,8 @@ test("sv_patch_notes atomic mode rolls back applied writes on mid-apply failure"
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [
-      { noteId: nid(snapshot, 0), set: { pitch: 61, detuneCents: 10 } },
-      { noteId: nid(snapshot, 1), set: { lyrics: "mi" } },
+      { note: nid(snapshot, 0), set: { pitch: 61, detuneCents: 10 } },
+      { note: nid(snapshot, 1), set: { lyrics: "mi" } },
     ],
   });
 
@@ -326,7 +327,7 @@ test("sv_patch_notes atomic mode rolls back on read-back mismatch", async () => 
   model.ignoreSetters.add("setPitch");
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
-    patches: [{ noteId: nid(snapshot, 0), set: { pitch: 61, lyrics: "ka" } }],
+    patches: [{ note: nid(snapshot, 0), set: { pitch: 61, lyrics: "ka" } }],
   });
 
   assert.equal(result.ok, false);
@@ -345,8 +346,8 @@ test("sv_patch_notes non-atomic mode reports partial and leaves applied writes",
     contextId: snapshot.contextId,
     atomic: false,
     patches: [
-      { noteId: nid(snapshot, 0), set: { pitch: 61 } },
-      { noteId: nid(snapshot, 1), set: { lyrics: "mi" } },
+      { note: nid(snapshot, 0), set: { pitch: 61 } },
+      { note: nid(snapshot, 1), set: { lyrics: "mi" } },
     ],
   });
 
@@ -365,8 +366,8 @@ test("sv_patch_notes reports outcome_unknown without compensation when the host 
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [
-      { noteId: nid(snapshot, 0), set: { pitch: 61 } },
-      { noteId: nid(snapshot, 1), set: { lyrics: "mi" } },
+      { note: nid(snapshot, 0), set: { pitch: 61 } },
+      { note: nid(snapshot, 1), set: { lyrics: "mi" } },
     ],
   });
 
@@ -388,8 +389,8 @@ test("sv_patch_notes reports rollback_failed when compensation itself fails", as
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [
-      { noteId: nid(snapshot, 0), set: { pitch: 61 } },
-      { noteId: nid(snapshot, 1), set: { lyrics: "mi" } },
+      { note: nid(snapshot, 0), set: { pitch: 61 } },
+      { note: nid(snapshot, 1), set: { lyrics: "mi" } },
     ],
   });
 
@@ -402,43 +403,38 @@ test("sv_patch_notes reports rollback_failed when compensation itself fails", as
   assert.equal(model.notes[0].pitch, 61);
 });
 
-test("sv_patch_notes validates noteIds, duplicates, and field names", async () => {
+test("sv_patch_notes validates note indexes, duplicates, and field names", async () => {
   const { service, snapshot } = await createFixture();
-  // noteId/重复类错误在独占段内发现，返回结构化失败而不是 reject。
-  const invalidId = await service.patchNotes({
-    contextId: snapshot.contextId,
-    patches: [{ noteId: "other:n:0", set: { lyrics: "x" } }],
-  });
-  assert.equal(invalidId.ok, false);
-  assert.equal(invalidId.error.code, "INVALID_NOTE_ID");
-  assert.equal(invalidId.effects, "none");
-
+  // index/重复类错误在独占段内发现，返回结构化失败而不是 reject。
+  //
+  // 「引用了别的上下文」不再是一种可能的输入：index 不携带 context/occurrence 前缀，
+  // 因此那种请求在结构上无法表达，只剩下越界这一种失败。
   const outOfRange = await service.patchNotes({
     contextId: snapshot.contextId,
-    patches: [{ noteId: nid(snapshot, 9), set: { lyrics: "x" } }],
+    patches: [{ note: nid(snapshot, 9), set: { lyrics: "x" } }],
   });
   assert.equal(outOfRange.error.code, "NOTE_INDEX_OUT_OF_RANGE");
 
   const duplicate = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [
-      { noteId: nid(snapshot, 0), set: { lyrics: "x" } },
-      { noteId: nid(snapshot, 0), set: { pitch: 61 } },
+      { note: nid(snapshot, 0), set: { lyrics: "x" } },
+      { note: nid(snapshot, 0), set: { pitch: 61 } },
     ],
   });
-  assert.equal(duplicate.error.code, "DUPLICATE_NOTE_ID");
+  assert.equal(duplicate.error.code, "DUPLICATE_NOTE_INDEX");
 
   await assert.rejects(
     service.patchNotes({
       contextId: snapshot.contextId,
-      patches: [{ noteId: nid(snapshot, 0), set: { color: "red" } }],
+      patches: [{ note: nid(snapshot, 0), set: { color: "red" } }],
     }),
     (error) => error.code === "UNKNOWN_FIELD"
   );
   await assert.rejects(
     service.patchNotes({
       contextId: snapshot.contextId,
-      patches: [{ noteId: nid(snapshot, 0), set: { pitch: 200 } }],
+      patches: [{ note: nid(snapshot, 0), set: { pitch: 200 } }],
     }),
     (error) => error.code === "INVALID_ARGUMENTS"
   );
@@ -449,7 +445,7 @@ test("sv_patch_notes warns when onset changes may reorder notes", async () => {
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     dryRun: true,
-    patches: [{ noteId: nid(snapshot, 0), set: { onsetBlick: 2116800 } }],
+    patches: [{ note: nid(snapshot, 0), set: { onsetBlick: 2116800 } }],
   });
   assert.ok(result.warnings.some((warning) => warning.code === "NOTE_ORDER_MAY_CHANGE"));
 });
@@ -459,7 +455,7 @@ test("sv_patch_notes invalidates the context after a successful write", async ()
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+    patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
   });
   assert.equal(result.ok, true);
   assert.equal(snapshots.store.get(snapshot.contextId), null);
@@ -472,7 +468,7 @@ test("sv_patch_notes verifies null-prototype nested attributes from the pipe dec
     waitFor: "none",
     patches: [
       {
-        noteId: nid(snapshot, 0),
+        note: nid(snapshot, 0),
         set: { attributes: { tF0Offset: 0.25, expr: { depth: 1, kind: "soft" } } },
       },
     ],
@@ -497,7 +493,7 @@ test("sv_patch_notes does not echo typed-v2 sentinels in partial attribute write
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    patches: [{ noteId: nid(snapshot, 0), set: { attributes: { dur: 1.25 } } }],
+    patches: [{ note: nid(snapshot, 0), set: { attributes: { dur: 1.25 } } }],
   });
 
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -511,7 +507,7 @@ test("sv_patch_notes normalizes a typed empty attribute table before writing", a
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    patches: [{ noteId: nid(snapshot, 0), set: { attributes: { muted: true } } }],
+    patches: [{ note: nid(snapshot, 0), set: { attributes: { muted: true } } }],
   });
 
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -524,7 +520,7 @@ test("sv_patch_notes atomic mode rolls back when the read-back getter throws", a
   injectFailure(model, "getLyrics", { skip: 3, code: "UNKNOWN_HANDLE", message: "getter exploded" });
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
-    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+    patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
   });
 
   assert.equal(result.ok, false);
@@ -542,7 +538,7 @@ test("sv_patch_notes accepts fractional detuneCents", async () => {
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    patches: [{ noteId: nid(snapshot, 0), set: { detuneCents: -7.5 } }],
+    patches: [{ note: nid(snapshot, 0), set: { detuneCents: -7.5 } }],
   });
   assert.equal(result.ok, true);
   assert.equal(model.notes[0].detune, -7.5);
@@ -573,7 +569,7 @@ test("sv_patch_notes reports rollback_failed when a merge-semantics host cannot 
     contextId: snapshot.contextId,
     patches: [
       {
-        noteId: nid(snapshot, 0),
+        note: nid(snapshot, 0),
         set: { pitch: 61, attributes: { brandNewKey: 0.7 } },
       },
     ],
@@ -609,7 +605,7 @@ test("sv_patch_notes reports rollback_failed under an undocumented replace-seman
     contextId: snapshot.contextId,
     patches: [
       {
-        noteId: nid(snapshot, 0),
+        note: nid(snapshot, 0),
         set: { pitch: 61, attributes: { brandNewKey: 0.7 } },
       },
     ],
@@ -629,8 +625,8 @@ test("sv_patch_notes reports zero remaining changes after a verified rollback", 
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     patches: [
-      { noteId: nid(snapshot, 0), set: { pitch: 61 } },
-      { noteId: nid(snapshot, 1), set: { lyrics: "mi" } },
+      { note: nid(snapshot, 0), set: { pitch: 61 } },
+      { note: nid(snapshot, 1), set: { lyrics: "mi" } },
     ],
   });
 
@@ -694,11 +690,11 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
   return { model, snapshots, service, contextId: entry.contextId, occurrenceId };
 }
 
-test("sv_patch_notes accepts a range context and derives the occurrence from noteIds", async () => {
+test("sv_patch_notes accepts a range context and resolves notes by group index", async () => {
   const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();
   const result = await service.patchNotes({
     contextId,
-    patches: [{ noteId: `${occurrenceId}:n:1`, set: { lyrics: "ne", pitch: 65 } }],
+    patches: [{ note: 1, set: { lyrics: "ne", pitch: 65 } }],
     waitFor: "none",
   });
 
@@ -710,8 +706,8 @@ test("sv_patch_notes accepts a range context and derives the occurrence from not
   assert.equal(model.undoCount, 2);
   assert.equal(snapshots.store.get(contextId), null);
   assert.deepEqual(
-    result.data.appliedDiff.map((entry) => entry.noteId),
-    [`${occurrenceId}:n:1`, `${occurrenceId}:n:1`]
+    result.data.appliedDiff.map((entry) => entry.indexInGroup),
+    [1, 1]
   );
 });
 
@@ -719,7 +715,7 @@ test("sv_patch_notes range context enforces shared-target confirmation", async (
   const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
   const refused = await service.patchNotes({
     contextId,
-    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     waitFor: "none",
   });
   assert.equal(refused.ok, false);
@@ -731,7 +727,7 @@ test("sv_patch_notes range context enforces shared-target confirmation", async (
 
   const confirmed = await service.patchNotes({
     contextId,
-    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     allowSharedTargetMutation: true,
     waitFor: "none",
   });
@@ -743,7 +739,7 @@ test("sv_patch_notes range context dry-run defers the shared-target scan with wa
   const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
   const result = await service.patchNotes({
     contextId,
-    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
   });
@@ -756,24 +752,19 @@ test("sv_patch_notes range context dry-run defers the shared-target scan with wa
   assert.equal(model.undoCount, 0);
 });
 
-test("sv_patch_notes range context rejects foreign and mixed noteIds", async () => {
+test("sv_patch_notes separates an out-of-range index from an uncaptured one", async () => {
+  // 迁移到 index 身份后，「引用了别的 occurrence」与「一个请求里混用两个 occurrence」
+  // 都不再是可能的输入：index 不携带 occurrence 前缀。剩下的两种失败必须保持可区分
+  // （§3.2 规则 5）——越界靠重试永远不会成功，未捕获则需要重新捕获更宽的范围。
   const { service, contextId } = createRangeFixture();
-  const foreign = await service.patchNotes({
+  const outOfRange = await service.patchNotes({
     contextId,
-    patches: [{ noteId: `${contextId}:t:9:r:9:n:0`, set: { lyrics: "x" } }],
+    patches: [{ note: 999, set: { lyrics: "x" } }],
     waitFor: "none",
   });
-  assert.equal(foreign.error.code, "UNKNOWN_OCCURRENCE");
-
-  const mixed = await service.patchNotes({
-    contextId,
-    patches: [
-      { noteId: `${contextId}:t:0:r:0:n:0`, set: { lyrics: "x" } },
-      { noteId: `${contextId}:t:9:r:9:n:0`, set: { lyrics: "y" } },
-    ],
-    waitFor: "none",
-  });
-  assert.equal(mixed.error.code, "INVALID_NOTE_ID");
+  assert.equal(outOfRange.ok, false);
+  assert.equal(outOfRange.error.code, "NOTE_INDEX_OUT_OF_RANGE");
+  assert.equal(outOfRange.effects, "none");
 });
 
 test("sv_patch_notes range context detects stale fingerprints before writing", async () => {
@@ -781,7 +772,7 @@ test("sv_patch_notes range context detects stale fingerprints before writing", a
   model.notes[0].lyrics = "changed-behind-context";
   const result = await service.patchNotes({
     contextId,
-    patches: [{ noteId: `${occurrenceId}:n:0`, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     waitFor: "none",
   });
   assert.equal(result.ok, false);
@@ -795,7 +786,7 @@ test("sv_patch_notes range preflight ignores unrelated note drift", async () => 
   const result = await service.patchNotes({
     contextId,
     occurrenceId,
-    patches: [{ noteIndexInGroup: 0, expected: { lyrics: "a" }, set: { lyrics: "x" } }],
+    patches: [{ note: 0, expected: { lyrics: "a" }, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
   });
@@ -805,12 +796,12 @@ test("sv_patch_notes range preflight ignores unrelated note drift", async () => 
   assert.equal(model.undoCount, 0);
 });
 
-test("sv_patch_notes accepts scoped note indices and keeps compact diffs free of repeated noteIds", async () => {
+test("sv_patch_notes resolves notes by group index and keeps diffs free of redundant identity", async () => {
   const { model, service, contextId, occurrenceId } = createRangeFixture();
   const result = await service.patchNotes({
     contextId,
     occurrenceId,
-    patches: [{ noteIndexInGroup: 1, expected: { lyrics: "i" }, set: { lyrics: "ne" } }],
+    patches: [{ note: 1, expected: { lyrics: "i" }, set: { lyrics: "ne" } }],
     dryRun: true,
     waitFor: "none",
   });
@@ -829,35 +820,22 @@ test("sv_patch_notes accepts scoped note indices and keeps compact diffs free of
   assert.equal("noteId" in result.data.plannedDiff[0], false);
 });
 
-test("sv_patch_notes requires exactly one note reference form per patch", async () => {
+test("sv_patch_notes requires the note field in every patch", async () => {
+  // 只剩一种引用写法，因此"两种形式混用"不再可构造；要守的是必填与类型。
   const { service, contextId, occurrenceId } = createRangeFixture();
-  await assert.rejects(
-    service.patchNotes({
-      contextId,
-      occurrenceId,
-      patches: [{ set: { lyrics: "x" } }],
-      dryRun: true,
-      waitFor: "none",
-    }),
-    { code: "INVALID_ARGUMENTS" }
-  );
-
-  await assert.rejects(
-    service.patchNotes({
-      contextId,
-      occurrenceId,
-      patches: [
-        {
-          noteId: `${occurrenceId}:n:0`,
-          noteIndexInGroup: 0,
-          set: { lyrics: "x" },
-        },
-      ],
-      dryRun: true,
-      waitFor: "none",
-    }),
-    { code: "INVALID_ARGUMENTS" }
-  );
+  for (const patch of [{ set: { lyrics: "x" } }, { note: -1, set: { lyrics: "x" } }, { note: "0", set: { lyrics: "x" } }]) {
+    await assert.rejects(
+      service.patchNotes({
+        contextId,
+        occurrenceId,
+        patches: [patch],
+        dryRun: true,
+        waitFor: "none",
+      }),
+      { code: "INVALID_ARGUMENTS" },
+      JSON.stringify(patch)
+    );
+  }
 });
 
 // 让夹具宿主宣告并实现批量读取原语，语义与真实 Lua 桥一致：
@@ -905,7 +883,7 @@ test("sv_patch_notes routes scoped preflight through one bulk read", async () =>
   const legacyResult = await legacy.service.patchNotes({
     contextId: legacy.contextId,
     occurrenceId: legacy.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
     diagnostics: true,
@@ -916,7 +894,7 @@ test("sv_patch_notes routes scoped preflight through one bulk read", async () =>
   const bulkResult = await bulk.service.patchNotes({
     contextId: bulk.contextId,
     occurrenceId: bulk.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
     diagnostics: true,
@@ -960,7 +938,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
   const mismatched = await mismatch.service.patchNotes({
     contextId: mismatch.contextId,
     occurrenceId: mismatch.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, expected: { pitch: 99 }, set: { pitch: 61 } }],
+    patches: [{ note: 0, expected: { pitch: 99 }, set: { pitch: 61 } }],
     dryRun: true,
     waitFor: "none",
   });
@@ -971,7 +949,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
   assert.equal(mismatched.effects, "none");
   assert.deepEqual(mismatched.data.mismatches, [
     {
-      noteId: `${mismatch.occurrenceId}:n:0`,
+      note: 0,
       field: "pitch",
       expected: 99,
       observed: 60,
@@ -985,7 +963,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
   const staleResult = await stale.service.patchNotes({
     contextId: stale.contextId,
     occurrenceId: stale.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
   });
@@ -1001,7 +979,7 @@ test("sv_patch_notes diagnostics expose phases and method aggregates only when r
   const plain = await plainFixture.service.patchNotes({
     contextId: plainFixture.contextId,
     occurrenceId: plainFixture.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
   });
@@ -1011,7 +989,7 @@ test("sv_patch_notes diagnostics expose phases and method aggregates only when r
   const diagnosed = await diagnosticFixture.service.patchNotes({
     contextId: diagnosticFixture.contextId,
     occurrenceId: diagnosticFixture.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
     diagnostics: true,
@@ -1038,7 +1016,7 @@ test("sv_patch_notes reuses verified fingerprints for expected checks", async ()
     occurrenceId: fixture.occurrenceId,
     patches: [
       {
-        noteIndexInGroup: 0,
+        note: 0,
         expected: { lyrics: "wrong" },
         set: { lyrics: "x" },
       },
@@ -1057,7 +1035,7 @@ test("sv_patch_notes still reads attributes outside the verified fingerprint", a
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
     occurrenceId: fixture.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { attributes: { muted: true } } }],
+    patches: [{ note: 0, set: { attributes: { muted: true } } }],
     dryRun: true,
     waitFor: "none",
     diagnostics: true,
@@ -1072,7 +1050,7 @@ test("sv_patch_notes keeps post-write read-back after fingerprint reuse", async 
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
     occurrenceId: fixture.occurrenceId,
-    patches: [{ noteIndexInGroup: 0, set: { lyrics: "x" } }],
+    patches: [{ note: 0, set: { lyrics: "x" } }],
     waitFor: "none",
     diagnostics: true,
   });
@@ -1093,7 +1071,7 @@ test("sv_patch_notes keeps verified success when post-commit processing observat
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "phonemes",
-    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+    patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
   });
 
   assert.equal(result.ok, true);
@@ -1114,7 +1092,7 @@ test("sv_patch_notes no_change keeps the context valid for reuse", async () => {
   const noop = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "a" } }],
+    patches: [{ note: nid(snapshot, 0), set: { lyrics: "a" } }],
   });
   assert.equal(noop.status, "no_change");
   // 没有写入发生，context 仍然准确；不应强迫调用方重新快照。
@@ -1123,7 +1101,7 @@ test("sv_patch_notes no_change keeps the context valid for reuse", async () => {
   const real = await service.patchNotes({
     contextId: snapshot.contextId,
     waitFor: "none",
-    patches: [{ noteId: nid(snapshot, 0), set: { lyrics: "ka" } }],
+    patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
   });
   assert.equal(real.ok, true);
   assert.equal(model.notes[0].lyrics, "ka");
@@ -1158,7 +1136,7 @@ test("sv_patch_notes tolerates float32 quantization on detune and attribute floa
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [
-      { noteId: nid(snapshot, 0), set: { detuneCents: -7.3, attributes: { tF0Offset: 0.1 } } },
+      { note: nid(snapshot, 0), set: { detuneCents: -7.3, attributes: { tF0Offset: 0.1 } } },
     ],
   });
 

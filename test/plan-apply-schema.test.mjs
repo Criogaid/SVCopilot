@@ -148,7 +148,7 @@ test("served sv_patch_notes schema exposes diagnostics and scoped note reference
     validate({
       contextId: "ctx_test",
       occurrenceId: "ctx_test:t:0:r:0",
-      patches: [{ noteIndexInGroup: 0, set: { lyrics: "test" } }],
+      patches: [{ note: 0, set: { lyrics: "test" } }],
       dryRun: true,
       diagnostics: true,
     }),

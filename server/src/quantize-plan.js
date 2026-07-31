@@ -357,7 +357,8 @@ function gridContextAt(absBlick, meterMarks, quarterBlick) {
 function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifactStore, sessionId) {
   const changed = planned.filter((item) => item.changed);
   const patches = changed.map((item) => ({
-    noteId: item.note.noteId,
+    // sv_patch_notes 的身份是组内 index（§3.1）。
+    note: item.note.indexInGroup,
     // expected 前置条件用组内本地坐标（sv_patch_notes 的 onsetBlick 语义）。
     expected: {
       onsetBlick: item.note.localOnsetBlick,
@@ -455,7 +456,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           occurrenceId: loaded.occurrence.occurrenceId,
           fingerprints: {},
           contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
-            noteIds: submittable.map((patch) => patch.noteId),
+            noteIndexes: submittable.map((patch) => patch.note),
           }),
       });
       const planArtifact = artifactStore.seal({

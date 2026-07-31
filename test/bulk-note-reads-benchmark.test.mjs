@@ -66,8 +66,8 @@ test("a 373-note group resolves scoped targets without reading every note", asyn
     contextId: fixture.contextId,
     occurrenceId: fixture.occurrenceId,
     patches: [
-      { noteIndexInGroup: 0, set: { lyrics: "x" } },
-      { noteIndexInGroup: 372, set: { lyrics: "y" } },
+      { note: 0, set: { lyrics: "x" } },
+      { note: 372, set: { lyrics: "y" } },
     ],
     dryRun: true,
     waitFor: "none",
