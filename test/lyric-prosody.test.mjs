@@ -91,7 +91,7 @@ test("breath check flags overrides and unusually long breaths", async () => {
   assert.equal(result.summary.byKind.breath_unusually_long, 1);
   assert.equal(result.summary.issueCount, 2);
   const withOverride = result.issues.find((issue) => issue.kind === "breath_with_overrides");
-  assert.deepEqual(withOverride.noteIds, [`${occurrenceId}:n:0`]);
+  assert.deepEqual(withOverride.notes, [0]);
   assert.equal(withOverride.severity, "warning");
   const long = result.issues.find((issue) => issue.kind === "breath_unusually_long");
   assert.equal(long.severity, "info");
@@ -117,7 +117,7 @@ test("specialLyricChains reports orphan continuations with stable structured cod
     result.issues.map((issue) => issue.code),
     ["ORPHAN_PLUS", "ORPHAN_PHONATION_CONTINUATION"]
   );
-  assert.deepEqual(result.issues[0].noteIds, [`${occurrenceId}:n:0`]);
+  assert.deepEqual(result.issues[0].notes, [0]);
   assert.equal(result.issues[0].semanticRole, "syllable_continuation");
   assert.equal(result.issues[1].startBlick, 2 * Q);
   assert.equal(result.issues[1].confidence, "official_contract");
@@ -158,10 +158,7 @@ test("specialLyricChains preserves a one-BLICK continuation gap as evidence", as
   assert.equal(result.issues[0].code, "SYLLABLE_CHAIN_GAP");
   assert.equal(result.issues[0].gapBlick, 1);
   assert.equal(result.issues[0].confidence, "host_observed");
-  assert.deepEqual(result.issues[0].noteIds, [
-    `${occurrenceId}:n:0`,
-    `${occurrenceId}:n:1`,
-  ]);
+  assert.deepEqual(result.issues[0].notes, [0, 1]);
 });
 
 test("japaneseMora flags multi-mora lyrics and isolated small kana; clean kana pass", async () => {
@@ -207,10 +204,10 @@ test("englishSyllables compares heuristic counts against following '+' notes", a
   assert.equal(result.summary.byKind.word_overfilled_syllables, 1);
   assert.equal(result.summary.issueCount, 2);
   const under = result.issues.find((issue) => issue.kind === "word_underfilled_syllables");
-  assert.deepEqual(under.noteIds, [`${occurrenceId}:n:0`]);
+  assert.deepEqual(under.notes, [0]);
   assert.equal(under.confidence, "heuristic_estimate");
   const over = result.issues.find((issue) => issue.kind === "word_overfilled_syllables");
-  assert.deepEqual(over.noteIds, [`${occurrenceId}:n:1`, `${occurrenceId}:n:2`]);
+  assert.deepEqual(over.notes, [1, 2]);
 });
 
 test("languageConsistency flags script/override conflicts and override-bearing continuations", async () => {
@@ -286,7 +283,7 @@ test("phonemeCoverage flags only melodic words; br and continuations stay legiti
     checks: ["phonemeCoverage"],
   });
   assert.equal(result.summary.byKind.melodic_note_empty_phonemes, 1);
-  assert.deepEqual(result.issues[0].noteIds, [`${occurrenceId}:n:1`]);
+  assert.deepEqual(result.issues[0].notes, [1]);
   assert.equal(result.coverage.phonemeCoverage.status, "captured");
   assert.equal(result.coverage.phonemeCoverage.flaggedNotes, 1);
   assert.equal(result.coverage.phonemeCoverage.legitimatelyEmpty, 2);
@@ -322,7 +319,7 @@ test("near-miss special lyrics remain lexical across every validator check", asy
   const empty = result.issues.find(
     (issue) => issue.kind === "melodic_note_empty_phonemes"
   );
-  assert.deepEqual(empty.noteIds, [`${occurrenceId}:n:0`]);
+  assert.deepEqual(empty.notes, [0]);
   assert.equal(result.coverage.phonemeCoverage.flaggedNotes, 1);
   assert.equal(result.coverage.phonemeCoverage.legitimatelyEmpty, 0);
 });

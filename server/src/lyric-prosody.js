@@ -116,7 +116,6 @@ function resolveValidateSource(store, input) {
   const timeOffset = occurrence.timeOffsetBlick ?? 0;
   const notes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       phonemesOverride: fingerprint.phonemesOverride ?? "",
@@ -170,7 +169,9 @@ function runChecks(loaded, input, warnings) {
 function pushIssue(issues, note, issue) {
   issues.push({
     ...issue,
-    noteIds: issue.noteIds ?? [note.noteId],
+    notes: (issue.notes ?? [note]).map((item) =>
+      Number.isSafeInteger(item) ? item : item.indexInGroup
+    ),
     lyrics: issue.lyrics ?? note.lyrics,
     startBlick: note.absOnsetBlick,
   });
@@ -183,6 +184,8 @@ function checkSpecialLyricChains(loaded, issues) {
   for (const issue of sequence.issues) {
     issues.push({
       ...issue,
+      // 共享模块回传的是本模块传入的 note 对象；对外身份是组内 index（§3.1）。
+      notes: (issue.notes ?? []).map((item) => item.indexInGroup),
       kind: issue.code.toLowerCase(),
       confidence: specialLyricIssueConfidence(issue.code),
       suggestion: specialLyricIssueSuggestion(issue.code),
@@ -299,12 +302,12 @@ function checkEnglishSyllables(loaded, issues) {
     if (continuations === syllables - 1) continue;
     const involved = loaded.notes
       .slice(index, index + 1 + Math.max(continuations, 0))
-      .map((item) => item.noteId);
+      .map((item) => item.indexInGroup);
     pushIssue(issues, note, {
       kind: continuations < syllables - 1 ? "word_underfilled_syllables" : "word_overfilled_syllables",
       severity: "warning",
       confidence: "heuristic_estimate",
-      noteIds: involved,
+      notes: involved,
       message: `"${lyrics}" is estimated at ${syllables} syllable(s) (heuristic, ~85-90% accurate) but is followed by ${continuations} "+" note(s); expected ${syllables - 1}.`,
       suggestion:
         continuations < syllables - 1

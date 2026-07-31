@@ -8,7 +8,7 @@
 // - 纯内存只读：只消费 phrase-analysis 已加载的音符指纹与 meterMarks，不访问宿主。
 // - "br" 呼吸音符继续排除在所有音高统计之外（与 v0.6.2 契约一致）。
 // - confidence 是排序用的启发式分数，绝不冒充概率；歧义时必须返回多个候选。
-// - suspension/resolution 同时给出前后 noteId 与实际半音/音级运动，不只说"有个挂留"。
+// - suspension/resolution 同时给出前后音符 index 与实际半音/音级运动，不只说"有个挂留"。
 // - 缺 meterMarks 时相关 section 如实报 not_captured，绝不假设 4/4。
 
 import { segmentPhrases } from "./expression-plan.js";
@@ -82,7 +82,7 @@ export function analyzeMetricalRoles(loaded, responseMode, warnings) {
     const position = blickToMusical(note.absOnsetBlick, loaded.meterMarks, loaded.quarterBlick);
     const role = metricalRole(position, loaded.quarterBlick);
     return {
-      noteId: note.noteId,
+      note: note.indexInGroup,
       bar: position.bar,
       beat: position.beat,
       tickInBeatBlick: position.tickInBeatBlick,
@@ -134,7 +134,7 @@ function detectAnacrusis(loaded, items) {
   if (first.beat === 1 && first.tickInBeatBlick === 0) return null;
   return {
     present: true,
-    firstNoteId: first.noteId,
+    firstNote: first.indexInGroup,
     bar: first.bar,
     beat: first.beat,
     note: "The first melodic note does not fall on a downbeat; treat bar 1 as an upbeat when reading chord windows.",
@@ -236,7 +236,7 @@ function scoreWindow(window, options) {
     const weight = (entry.overlapBlick / loaded.quarterBlick) * metricWeight;
     const pitchClass = ((entry.note.pitch % 12) + 12) % 12;
     weights[pitchClass] += weight;
-    contributors.push({ noteId: entry.note.noteId, pitchClass, weight });
+    contributors.push({ note: entry.note.indexInGroup, pitchClass, weight });
   }
   const totalWeight = weights.reduce((sum, value) => sum + value, 0);
   if (totalWeight === 0) {
@@ -292,7 +292,7 @@ function scoreWindow(window, options) {
     bar: musical.bar,
     beat: musical.beat,
     status: "succeeded",
-    noteIds: contributors.map((entry) => entry.noteId),
+    notes: contributors.map((entry) => entry.note),
     pitchClassesPresent: present
       .sort((left, right) => right.weight - left.weight)
       .map((entry) => PITCH_CLASS_NAMES[entry.pitchClass]),
@@ -456,8 +456,8 @@ function classifyCadence(loaded, key, scale, finalNote, penultimate, phrase, cho
     phraseIndex: phrase.index,
     startBlick: phrase.startBlick,
     endBlick: phrase.endBlick,
-    finalNoteId: finalNote.noteId,
-    ...(penultimate ? { penultimateNoteId: penultimate.noteId } : {}),
+    finalNote: finalNote.indexInGroup,
+    ...(penultimate ? { penultimateNote: penultimate.indexInGroup } : {}),
     finalScaleDegree: finalDegree,
     penultimateScaleDegree: penultimateDegree,
     onStrongBeat,
@@ -479,7 +479,7 @@ function degreeOf(pitch, tonicPitchClass, scale) {
 
 // ---------- tensionResolution ----------
 
-// 张力—解决：必须同时指出前后 noteId 与实际半音/音级运动，而不是只说"有个悬留"。
+// 张力—解决：必须同时指出前后音符 index 与实际半音/音级运动，而不是只说"有个悬留"。
 export function analyzeTensionResolution(loaded, keyResult, options, warnings) {
   const best = keyResult?.bestCandidate ?? null;
   if (!best) {
@@ -539,8 +539,8 @@ function classifyTension(loaded, motion, options) {
     : null;
   const fromRole = position ? metricalRole(position, loaded.quarterBlick) : null;
   const base = {
-    fromNoteId: from.noteId,
-    toNoteId: to.noteId,
+    fromNote: from.indexInGroup,
+    toNote: to.indexInGroup,
     fromScaleDegree: fromDegree,
     toScaleDegree: toDegree,
     motionSemitone,

@@ -135,7 +135,7 @@ test("a clear I-IV-V-I melody yields the expected chord and cadence reading", as
   const first = result.chordCandidates.items[0];
   assert.deepEqual([...first.pitchClassesPresent].sort(), ["C", "E", "G"]);
   assert.deepEqual(first.candidates[0].chordTonesAbsent, []);
-  assert.ok(first.noteIds.length >= 3);
+  assert.ok(first.notes.length >= 3);
 
   assert.equal(result.cadence.status, "succeeded");
   const ending = result.cadence.items[result.cadence.items.length - 1];
@@ -226,9 +226,9 @@ test("chromatic notes are reported as non-chord tones and tracked for resolution
   assert.ok(chromatic, "the chromatic note must produce a tension event");
   assert.equal(chromatic.resolved, true);
   assert.equal(chromatic.fromScaleDegree.nonDiatonic, true);
-  // 必须同时给出前后 noteId 与实际半音运动。
-  assert.ok(chromatic.fromNoteId);
-  assert.ok(chromatic.toNoteId);
+  // 必须同时给出前后音符 index 与实际半音运动。
+  assert.ok(Number.isSafeInteger(chromatic.fromNote));
+  assert.ok(Number.isSafeInteger(chromatic.toNote));
   assert.equal(chromatic.motionSemitone, 1);
   assert.equal(chromatic.motionDirection, "up");
 });
@@ -305,7 +305,7 @@ test("breath notes never enter harmonic statistics", async () => {
   assert.deepEqual([...window.pitchClassesPresent].sort(), ["C", "E", "G"]);
   assert.equal(result.metricalRoles.summary.noteCount, 3);
   for (const item of result.metricalRoles.items) {
-    assert.ok(!item.noteId.endsWith(":n:2"), "the breath note must not get a metrical role");
+    assert.notEqual(item.note, 2, "the breath note must not get a metrical role");
   }
   for (const event of result.tensionResolution.items ?? []) {
     assert.ok(!event.fromNoteId.endsWith(":n:2"));

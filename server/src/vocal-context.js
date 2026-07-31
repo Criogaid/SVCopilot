@@ -478,7 +478,7 @@ function collectFindings(sections, input) {
         ...issue,
         source: "prosody",
         authority: "sv_validate_lyrics_prosody",
-        ...(Array.isArray(issue.noteIds) ? { noteIds: [...issue.noteIds] } : {}),
+        ...(Array.isArray(issue.notes) ? { notes: [...issue.notes] } : {}),
       });
     }
   }
@@ -496,7 +496,7 @@ function collectFindings(sections, input) {
         startBlick: segment.startBlick,
         endBlick: segment.endBlick,
         peakAbsCent: segment.peakAbsCent,
-        ...(segment.noteId ? { noteId: segment.noteId } : {}),
+        ...(Number.isSafeInteger(segment.note) ? { note: segment.note } : {}),
       });
     }
   }

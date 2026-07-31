@@ -153,14 +153,11 @@ test("non-diatonic notes are flagged explicitly", async () => {
     include: ["key", "scaleDegrees"],
   });
   // 排除 br 后 F# 大调本就居首；加入 C 自然音不再翻转排名，只是新增一个外音。
-  // E4 与 C 都是 F# 大调外音，noteId 保持原 indexInGroup 派生（br 占位 n:0 不重新编号）。
+  // E4 与 C 都是 F# 大调外音；身份是组内 index，br 占位不重新编号。
   assert.equal(result.key.bestCandidate.tonic, "F#");
   assert.equal(result.key.bestCandidate.mode, "major");
-  assert.ok(result.scaleDegrees.nonDiatonicNoteIds.includes(`${occurrenceId}:n:12`));
-  assert.deepEqual(result.scaleDegrees.nonDiatonicNoteIds, [
-    `${occurrenceId}:n:5`,
-    `${occurrenceId}:n:12`,
-  ]);
+  assert.ok(result.scaleDegrees.nonDiatonicNotes.includes(12));
+  assert.deepEqual(result.scaleDegrees.nonDiatonicNotes, [5, 12]);
 });
 
 test("phrase segmentation finds the climax and the one-beat rest without counting the breath", async () => {
@@ -174,7 +171,7 @@ test("phrase segmentation finds the climax and the one-beat rest without countin
   const [first, second] = result.phrases.items;
   // br 修复前 noteCount 是 4（br 被算进第一乐句）；呼吸不是旋律音符，如实数 3。
   assert.equal(first.noteCount, 3);
-  assert.equal(first.firstNoteId.endsWith(":n:1"), true); // 乐句从 when 开始，不从 br
+  assert.equal(first.firstNote, 1); // 乐句从 when 开始，不从 br
   assert.equal(first.climax.lyrics, "see");
   assert.equal(first.climax.pitch, 66);
   assert.equal(first.restAfterBlick, Q);

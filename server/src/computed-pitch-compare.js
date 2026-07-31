@@ -270,7 +270,6 @@ function buildNoteSpans(occurrence) {
   const pitchOffset = occurrence.pitchOffsetSemitone ?? 0;
   return (occurrence.noteFingerprints ?? [])
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       // 目标音高 = note MIDI + detune(cent→半音) + reference pitchOffset（官方 getPitchOffset 语义）。
@@ -401,7 +400,7 @@ function buildPerNoteItems(spans, perSpan, params, context, series, { vibrato, w
       series.intervalBlick
     );
     items.push({
-      noteId: span.noteId,
+      note: span.indexInGroup,
       indexInGroup: span.indexInGroup,
       lyrics: span.lyrics,
       targetSemitone: span.targetSemitone,
@@ -472,8 +471,8 @@ function buildTransitions(spans, perSpan, params, context) {
     const to = spans[index + 1];
     const direction = Math.sign(to.targetSemitone - from.targetSemitone);
     const item = {
-      fromNoteId: from.noteId,
-      toNoteId: to.noteId,
+      fromNote: from.indexInGroup,
+      toNote: to.indexInGroup,
       intervalSemitones: to.targetSemitone - from.targetSemitone,
       gapBlick: Math.max(0, to.absOnsetBlick - from.absEndBlick),
     };
@@ -690,7 +689,7 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings, melo
     });
     return null;
   }
-  // noteId 由 occurrence:index 派生，不是跨快照稳定身份，故不能按 indexInGroup 对齐 before/after：
+  // indexInGroup 不是跨快照稳定身份（结构编辑会重排），故不能按它对齐 before/after：
   // 开头插入一个音符会让其后所有 index 错位，把新音符拿去和旧音符比。改按乐谱绝对起点建立 before 索引。
   const beforeOffset = before.occurrence.timeOffsetBlick ?? 0;
   const beforeByOnset = new Map(
@@ -751,7 +750,7 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings, melo
     });
     if (!comparable) {
       items.push({
-        noteId: span.noteId,
+        note: span.indexInGroup,
         indexInGroup: span.indexInGroup,
         lyrics: span.lyrics,
         unmatched: true,
@@ -772,7 +771,7 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings, melo
       vibrato: wantVibrato,
     });
     items.push({
-      noteId: span.noteId,
+      note: span.indexInGroup,
       indexInGroup: span.indexInGroup,
       lyrics: span.lyrics,
       ...(changedFields.length > 0 ? { noteChanged: true, changedFields } : {}),

@@ -170,7 +170,6 @@ function resolveAnalysisSource(store, input) {
   }
   const allNotes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       // Reference 的 pitch offset 会改变实际发声音高；调性、音域与和声语境必须使用同一坐标。
@@ -238,7 +237,7 @@ function buildBreathEvents(loaded, responseMode, warnings) {
   return {
     count,
     items: loaded.breathNotes.slice(0, cap).map((note) => ({
-      noteId: note.noteId,
+      note: note.indexInGroup,
       lyrics: note.lyrics,
       nominalPitch: note.pitch,
       startBlick: note.absOnsetBlick,
@@ -381,7 +380,7 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
     const offset = (pitchClass - key.tonicPitchClass + 12) % 12;
     const degree = degreeByOffset.get(offset) ?? null;
     return {
-      noteId: note.noteId,
+      note: note.indexInGroup,
       lyrics: note.lyrics,
       pitch: note.pitch,
       pitchClass: PITCH_CLASS_NAMES[pitchClass],
@@ -389,7 +388,7 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
       inScale: degree !== null,
     };
   });
-  const nonDiatonicNoteIds = items.filter((item) => !item.inScale).map((item) => item.noteId);
+  const nonDiatonicNotes = items.filter((item) => !item.inScale).map((item) => item.note);
   // 汇总各模式都返回：时值无关的音级直方图与非调内计数，便于不展开逐音符也能判断调性贴合度。
   const degreeHistogram = Object.create(null);
   for (const item of items) {
@@ -400,8 +399,8 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
     relativeTo: { tonic: key.tonic, mode: key.mode },
     summary: {
       noteCount: items.length,
-      inScaleCount: items.length - nonDiatonicNoteIds.length,
-      nonDiatonicCount: nonDiatonicNoteIds.length,
+      inScaleCount: items.length - nonDiatonicNotes.length,
+      nonDiatonicCount: nonDiatonicNotes.length,
       degreeHistogram,
     },
   };
@@ -409,8 +408,8 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
     // compact：不逐音符展开，只给汇总与（截断的）非调内音符 id。
     return {
       ...base,
-      nonDiatonicNoteIds: nonDiatonicNoteIds.slice(0, MAX_LIST_ITEMS),
-      nonDiatonicTruncated: nonDiatonicNoteIds.length > MAX_LIST_ITEMS,
+      nonDiatonicNotes: nonDiatonicNotes.slice(0, MAX_LIST_ITEMS),
+      nonDiatonicTruncated: nonDiatonicNotes.length > MAX_LIST_ITEMS,
     };
   }
   const cap = responseMode === "verbose" ? items.length : MAX_LIST_ITEMS;
@@ -424,7 +423,7 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
     ...base,
     items: items.slice(0, cap),
     itemsTruncated: items.length > cap,
-    nonDiatonicNoteIds,
+    nonDiatonicNotes,
   };
 }
 
@@ -439,13 +438,13 @@ function analyzePhrases(loaded, phraseGapQuarter, responseMode, warnings) {
     return {
       index,
       noteCount: phrase.notes.length,
-      firstNoteId: first.noteId,
-      lastNoteId: last.noteId,
+      firstNote: first.indexInGroup,
+      lastNote: last.indexInGroup,
       startBlick: first.absOnsetBlick,
       endBlick: last.absEndBlick,
       durationQuarter: (last.absEndBlick - first.absOnsetBlick) / loaded.quarterBlick,
       climax: {
-        noteId: phrase.climax.noteId,
+        note: phrase.climax.indexInGroup,
         lyrics: phrase.climax.lyrics,
         pitch: phrase.climax.pitch,
       },

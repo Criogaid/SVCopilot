@@ -281,7 +281,7 @@ test("prosody issues surface as ranked findings with an actionable next step", a
   assert.equal(finding.source, "prosody");
   assert.equal(finding.authority, "sv_validate_lyrics_prosody");
   assert.ok(["error", "warning", "info"].includes(finding.severity));
-  assert.deepEqual(finding.noteIds, [`${stored.contextId}:t:0:r:0:n:6`]);
+  assert.deepEqual(finding.notes, [6]);
   assert.equal(finding.startBlick, 6 * Q);
   // 最高严重度排在最前，供 compact 模式直接展示。
   assert.ok(
@@ -316,10 +316,7 @@ test("composite preserves special-lyric gap evidence and does not call it clean"
   assert.ok(finding);
   assert.equal(finding.gapBlick, 1);
   assert.equal(finding.semanticRole, "syllable_continuation");
-  assert.deepEqual(finding.noteIds, [
-    `${occurrenceId}:n:0`,
-    `${occurrenceId}:n:1`,
-  ]);
+  assert.deepEqual(finding.notes, [0, 1]);
   assert.ok(
     result.nextSteps.some((step) => step.reason === "special_lyric_chain_findings_present")
   );
@@ -346,9 +343,7 @@ test("mixed findings preserve prosody identity and sort equal severity by score 
   const prosodyIndex = warnings.findIndex((finding) => finding.source === "prosody");
   assert.ok(pitchIndex >= 0 && prosodyIndex >= 0);
   assert.ok(pitchIndex < prosodyIndex, "equal-severity findings must follow score time");
-  assert.deepEqual(warnings[prosodyIndex].noteIds, [
-    `${stored.contextId}:t:0:r:0:n:${MELODY.length - 1}`,
-  ]);
+  assert.deepEqual(warnings[prosodyIndex].notes, [MELODY.length - 1]);
   assert.equal(warnings[prosodyIndex].startBlick, 5 * Q);
 });
 

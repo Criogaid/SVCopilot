@@ -136,7 +136,6 @@ function resolveProfileTarget(store, target, index) {
   const timeOffset = occurrence.timeOffsetBlick ?? 0;
   const allNotes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
-      noteId: fingerprint.noteId,
       indexInGroup: fingerprint.indexInGroup,
       lyrics: fingerprint.lyrics,
       pitch: fingerprint.pitch,
