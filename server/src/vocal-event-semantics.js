@@ -114,6 +114,7 @@ export function analyzeVocalEventSequence(notes = []) {
       issues.push({
         ...warning,
         severity: "warning",
+        notes: [event.note],
         noteIds: event.noteId ? [event.noteId] : [],
         semanticRole: classification.role,
         lyrics: classification.rawLyrics,
@@ -214,6 +215,7 @@ function appendChainSpacingIssue(issues, previous, current) {
         'A "+" syllable continuation is separated from the preceding chain event.'
       ),
       gapBlick,
+      notes: [previous.note, current.note],
       noteIds: [previous.noteId, current.noteId].filter(Boolean),
     });
   } else if (gapBlick < 0) {
@@ -225,15 +227,23 @@ function appendChainSpacingIssue(issues, previous, current) {
         'A "+" syllable continuation overlaps the preceding chain event.'
       ),
       overlapBlick: -gapBlick,
+      notes: [previous.note, current.note],
       noteIds: [previous.noteId, current.noteId].filter(Boolean),
     });
   }
 }
 
+// issue 同时携带 `notes`（调用方传入的 note 对象引用）与 `noteIds`（字符串 ID）。
+//
+// 本模块被 6 个 planner 共用，而计划 §B2 步骤 5 要求 planner 逐对迁移到 fingerprint
+// 身份。`notes` 是身份无关的：本模块只把调用方给的对象原样回传，由调用方决定对外
+// 怎么表达身份。`noteIds` 服务于尚未迁移的调用方，随各自那一对迁移时删除——在这里
+// 一次性改掉会把另外五对的工作全拽进同一个提交，正是分对迁移要避免的。
 function sequenceIssue(code, severity, event, message) {
   return {
     code,
     severity,
+    notes: [event.note],
     noteIds: event.noteId ? [event.noteId] : [],
     semanticRole: event.semanticRole,
     lyrics: event.classification.rawLyrics,

@@ -48,6 +48,9 @@ const DEFAULT_FIELDS_BY_TYPE = Object.freeze({
   ]),
   scoop: Object.freeze(["lengthQuarter", "shapePower"]),
   fall: Object.freeze(["lengthQuarter", "shapePower"]),
+  // portamento 不在计划 §3.4 的示例里，但 planner 一直支持它。删掉它是能力回退，
+  // 而计划要求的是替换身份、不缩减语义（§B2 步骤 7 同一原则）。
+  portamento: Object.freeze(["lengthQuarter", "maxCents"]),
 });
 
 const MAX_GROUPED_NOTES = 512;
@@ -104,6 +107,210 @@ export function normalizeExpressionDefaults(rawDefaults) {
  * @param {object} options.scope - resolveMutationScope 的返回值
  * @returns {object[]} canonical gesture
  */
+// 各 gesture 类型允许的字段。展开与前置形状检查共用同一份表，因此不会出现
+// "前置放过、展开拒绝"或反之的漂移。
+const ALLOWED_FIELDS_BY_TYPE = Object.freeze({
+  hairpin: Object.freeze(["type", "from", "to", "peak", "amounts"]),
+  vibrato: Object.freeze([
+    "type",
+    "notes",
+    "surface",
+    "depthCents",
+    "rateHz",
+    "onsetDelayQuarter",
+    "rampQuarter",
+    "fadeOutQuarter",
+    "level",
+  ]),
+  scoop: Object.freeze(["type", "targets", "lengthQuarter", "shapePower"]),
+  fall: Object.freeze(["type", "targets", "lengthQuarter", "shapePower"]),
+  portamento: Object.freeze(["type", "transitions", "lengthQuarter", "maxCents"]),
+});
+
+// 每个类型承载 Note 引用的字段，以及它的形状。前置检查只看形状，不解析身份
+// ——身份要等 Context 解析出来才能判断。
+const REFERENCE_FIELD_BY_TYPE = Object.freeze({
+  hairpin: Object.freeze({ fields: Object.freeze(["from", "to"]), shape: "index" }),
+  vibrato: Object.freeze({ fields: Object.freeze(["notes"]), shape: "indexList" }),
+  scoop: Object.freeze({ fields: Object.freeze(["targets"]), shape: "tupleList" }),
+  fall: Object.freeze({ fields: Object.freeze(["targets"]), shape: "tupleList" }),
+  portamento: Object.freeze({ fields: Object.freeze(["transitions"]), shape: "tupleList" }),
+});
+
+/**
+ * 请求形状的前置校验：**不接触 SnapshotStore、不解析身份**。
+ *
+ * 为什么必须单独存在：形状错误（拼错的键、缺失的 targets、超范围的 depthCents）与
+ * contextId 是否存在无关，理应先报出来。若等到展开阶段才校验，一个形状错误的请求
+ * 会先撞上 UNKNOWN_CONTEXT，模型收到的是"上下文没了"，于是去重新快照——而真正的
+ * 问题在它自己的请求里，重新快照多少次都不会变好。
+ *
+ * @param {object[]} gestures
+ * @returns {void}
+ */
+export function assertExpressionGestureShapes(gestures) {
+  if (!Array.isArray(gestures)) {
+    throw codedError("INVALID_ARGUMENTS", "gestures must be an array", { path: "/gestures" });
+  }
+  for (const [requestIndex, gesture] of gestures.entries()) {
+    const path = `/gestures/${requestIndex}`;
+    if (!isRecord(gesture)) {
+      throw codedError("INVALID_ARGUMENTS", "gesture must be an object", { path });
+    }
+    const allowed = ALLOWED_FIELDS_BY_TYPE[gesture.type];
+    if (!allowed) {
+      throw codedError("INVALID_ARGUMENTS", "unsupported gesture type", {
+        path: `${path}/type`,
+        rule: Object.keys(ALLOWED_FIELDS_BY_TYPE).join(" | "),
+      });
+    }
+    assertKnownKeys(gesture, allowed, path);
+    const reference = REFERENCE_FIELD_BY_TYPE[gesture.type];
+    for (const field of reference.fields) {
+      const value = gesture[field];
+      const fieldPath = `${path}/${field}`;
+      if (value === undefined) {
+        throw codedError("INVALID_ARGUMENTS", `${gesture.type} requires ${field}`, {
+          path: fieldPath,
+        });
+      }
+      if (reference.shape === "index" && !Number.isSafeInteger(value)) {
+        throw codedError("INVALID_ARGUMENTS", "note reference must be an integer index", {
+          path: fieldPath,
+        });
+      }
+      if (reference.shape === "indexList") {
+        requireIndexList(value, fieldPath, MAX_GROUPED_NOTES);
+      }
+      if (reference.shape === "tupleList") {
+        if (!Array.isArray(value) || value.length === 0) {
+          throw codedError("INVALID_ARGUMENTS", `${field} must be a non-empty array`, {
+            path: fieldPath,
+          });
+        }
+        if (value.length > MAX_GROUPED_TARGETS) {
+          throw codedError("INVALID_ARGUMENTS", `${field} accepts at most ${MAX_GROUPED_TARGETS} items`, {
+            path: fieldPath,
+          });
+        }
+        for (const [position, tuple] of value.entries()) {
+          if (!Array.isArray(tuple) || tuple.length !== 2) {
+            throw codedError("INVALID_ARGUMENTS", "expected a 2-element tuple", {
+              path: `${fieldPath}/${position}`,
+              rule: "array of exactly 2 numbers",
+            });
+          }
+        }
+      }
+    }
+    // 数值范围与互斥规则同样与身份无关，因此也放在前置。这里调用的就是展开阶段
+    // 用的同一个函数，因此不会出现"前置放过、展开拒绝"的漂移。
+    assertGestureValues(gesture, path, {});
+  }
+}
+
+// 与身份无关的值校验：范围、互斥、非零。展开阶段与前置检查共用。
+//
+// defaults 参与校验，因为 gesture 字段覆盖 defaults 之后才是最终值——只校验
+// gesture 自身会放过一个由 defaults 带进来的越界值。前置阶段传 {} 是刻意的：
+// 那时还没有 defaults 语境，而 defaults 自身的合法性由 normalizeExpressionDefaults
+// 单独负责。
+function assertGestureValues(gesture, path, defaults) {
+  switch (gesture.type) {
+    case "hairpin": {
+      if (
+        gesture.from !== undefined &&
+        gesture.to !== undefined &&
+        gesture.from > gesture.to
+      ) {
+        throw codedError("INVALID_ARGUMENTS", "hairpin needs from <= to", {
+          path: `${path}/to`,
+          rule: "to >= from",
+        });
+      }
+      if (!isRecord(gesture.amounts) || Object.keys(gesture.amounts).length === 0) {
+        throw codedError("INVALID_ARGUMENTS", "hairpin needs a non-empty amounts object", {
+          path: `${path}/amounts`,
+        });
+      }
+      const unknown = Object.keys(gesture.amounts).filter(
+        (parameter) => !HAIRPIN_PARAMETER_ORDER.includes(parameter)
+      );
+      if (unknown.length > 0) {
+        throw codedError(
+          "INVALID_ARGUMENTS",
+          `hairpin amounts has no such parameter: ${unknown.join(", ")}`,
+          { path: `${path}/amounts`, rule: `one of ${HAIRPIN_PARAMETER_ORDER.join(", ")}` }
+        );
+      }
+      checkNumber(gesture.peak, 0.05, 0.95, `${path}/peak`);
+      for (const parameter of HAIRPIN_PARAMETER_ORDER) {
+        if (!Object.hasOwn(gesture.amounts, parameter)) continue;
+        const limit = HAIRPIN_LIMITS[parameter];
+        const amount = gesture.amounts[parameter];
+        checkNumber(amount, -limit.max, limit.max, `${path}/amounts/${parameter}`);
+        if (amount === 0) {
+          throw codedError("INVALID_ARGUMENTS", "hairpin amount must be non-zero", {
+            path: `${path}/amounts/${parameter}`,
+          });
+        }
+      }
+      return;
+    }
+    case "vibrato": {
+      const merged = { ...(defaults.vibrato ?? {}), ...omit(gesture, ["type", "notes"]) };
+      if (merged.surface !== undefined && !["pitchDelta", "vibratoEnv"].includes(merged.surface)) {
+        throw codedError("INVALID_ARGUMENTS", "vibrato surface must be pitchDelta or vibratoEnv", {
+          path: `${path}/surface`,
+        });
+      }
+      checkNumber(merged.depthCents, 1, 600, `${path}/depthCents`);
+      checkNumber(merged.rateHz, 0.5, 12, `${path}/rateHz`);
+      checkNumber(merged.onsetDelayQuarter, 0, 16, `${path}/onsetDelayQuarter`);
+      checkNumber(merged.rampQuarter, 0, 16, `${path}/rampQuarter`);
+      checkNumber(merged.fadeOutQuarter, 0, 16, `${path}/fadeOutQuarter`);
+      checkNumber(merged.level, 0, 2, `${path}/level`);
+      // vibratoEnv 与 pitchDelta 的参数集合互斥：混用说明调用方没弄清写的是哪条曲线。
+      if (
+        merged.surface === "vibratoEnv" &&
+        (merged.depthCents !== undefined || merged.fadeOutQuarter !== undefined)
+      ) {
+        throw codedError(
+          "INVALID_ARGUMENTS",
+          "vibratoEnv takes level/onsetDelayQuarter/rampQuarter, not depthCents/fadeOutQuarter",
+          { path }
+        );
+      }
+      return;
+    }
+    case "scoop":
+    case "fall": {
+      const merged = { ...(defaults[gesture.type] ?? {}), ...omit(gesture, ["type", "targets"]) };
+      checkNumber(merged.lengthQuarter, 0.01, 16, `${path}/lengthQuarter`);
+      checkNumber(merged.shapePower, 0.5, 8, `${path}/shapePower`);
+      for (const [position, tuple] of (gesture.targets ?? []).entries()) {
+        if (!Array.isArray(tuple) || tuple.length !== 2) continue; // 形状已在别处报错
+        checkNumber(tuple[1], 1, 600, `${path}/targets/${position}/1`, { required: true });
+      }
+      return;
+    }
+    case "portamento": {
+      const merged = {
+        ...(defaults.portamento ?? {}),
+        ...omit(gesture, ["type", "transitions"]),
+      };
+      checkNumber(merged.lengthQuarter, 0.01, 4, `${path}/lengthQuarter`);
+      checkNumber(merged.maxCents, 10, 1200, `${path}/maxCents`);
+      return;
+    }
+    default:
+      throw codedError("INVALID_ARGUMENTS", "unsupported gesture type", {
+        path: `${path}/type`,
+        rule: Object.keys(ALLOWED_FIELDS_BY_TYPE).join(" | "),
+      });
+  }
+}
+
 export function expandExpressionGestures({ gestures, defaults = {}, scope }) {
   if (!Array.isArray(gestures)) {
     throw codedError("INVALID_ARGUMENTS", "gestures must be an array", { path: "/gestures" });
@@ -125,10 +332,13 @@ export function expandExpressionGestures({ gestures, defaults = {}, scope }) {
       case "fall":
         expandScoopOrFall(gesture, { path, requestIndex, scope, defaults, into: expanded });
         break;
+      case "portamento":
+        expandPortamento(gesture, { path, requestIndex, scope, defaults, into: expanded });
+        break;
       default:
         throw codedError("INVALID_ARGUMENTS", "unsupported gesture type", {
           path: `${path}/type`,
-          rule: "hairpin | vibrato | scoop | fall",
+          rule: "hairpin | vibrato | scoop | fall | portamento",
         });
     }
   }
@@ -136,49 +346,21 @@ export function expandExpressionGestures({ gestures, defaults = {}, scope }) {
 }
 
 function expandHairpin(gesture, { path, requestIndex, scope, into }) {
-  assertKnownKeys(gesture, ["type", "from", "to", "peak", "amounts"], path);
+  assertKnownKeys(gesture, ALLOWED_FIELDS_BY_TYPE.hairpin, path);
+  assertGestureValues(gesture, path, {});
   const fromNote = resolveNoteIndex(scope, gesture.from, `${path}/from`);
   const toNote = resolveNoteIndex(scope, gesture.to, `${path}/to`);
-  if (gesture.from > gesture.to) {
-    throw codedError("INVALID_ARGUMENTS", "hairpin needs from <= to", {
-      path: `${path}/to`,
-      rule: "to >= from",
-    });
-  }
-  if (!isRecord(gesture.amounts) || Object.keys(gesture.amounts).length === 0) {
-    throw codedError("INVALID_ARGUMENTS", "hairpin needs a non-empty amounts object", {
-      path: `${path}/amounts`,
-    });
-  }
-  const unknown = Object.keys(gesture.amounts).filter(
-    (parameter) => !HAIRPIN_PARAMETER_ORDER.includes(parameter)
-  );
-  if (unknown.length > 0) {
-    throw codedError("INVALID_ARGUMENTS", `hairpin amounts has no such parameter: ${unknown.join(", ")}`, {
-      path: `${path}/amounts`,
-      rule: `one of ${HAIRPIN_PARAMETER_ORDER.join(", ")}`,
-    });
-  }
-  checkNumber(gesture.peak, 0.05, 0.95, `${path}/peak`);
 
   // 按参数白名单顺序展开，而不是按 Object.keys 的插入顺序：后者会让语义相同的
   // 两个请求（只是键序不同）产出不同的 operation 序列。
   for (const parameter of HAIRPIN_PARAMETER_ORDER) {
     if (!Object.hasOwn(gesture.amounts, parameter)) continue;
-    const limit = HAIRPIN_LIMITS[parameter];
-    const amount = gesture.amounts[parameter];
-    checkNumber(amount, -limit.max, limit.max, `${path}/amounts/${parameter}`);
-    if (amount === 0) {
-      throw codedError("INVALID_ARGUMENTS", "hairpin amount must be non-zero", {
-        path: `${path}/amounts/${parameter}`,
-      });
-    }
     into.push({
       type: "hairpin",
       fromNote,
       toNote,
       parameter,
-      amount,
+      amount: gesture.amounts[parameter],
       ...(gesture.peak === undefined ? {} : { peakPosition: gesture.peak }),
       source: { requestIndex, parameter },
     });
@@ -186,46 +368,11 @@ function expandHairpin(gesture, { path, requestIndex, scope, into }) {
 }
 
 function expandVibrato(gesture, { path, requestIndex, scope, defaults, into }) {
-  assertKnownKeys(
-    gesture,
-    [
-      "type",
-      "notes",
-      "surface",
-      "depthCents",
-      "rateHz",
-      "onsetDelayQuarter",
-      "rampQuarter",
-      "fadeOutQuarter",
-      "level",
-    ],
-    path
-  );
+  assertKnownKeys(gesture, ALLOWED_FIELDS_BY_TYPE.vibrato, path);
   const notes = requireIndexList(gesture.notes, `${path}/notes`, MAX_GROUPED_NOTES);
+  assertGestureValues(gesture, path, defaults);
   // gesture 自身字段覆盖 defaults（§3.4）。
   const merged = { ...(defaults.vibrato ?? {}), ...omit(gesture, ["type", "notes"]) };
-  if (merged.surface !== undefined && !["pitchDelta", "vibratoEnv"].includes(merged.surface)) {
-    throw codedError("INVALID_ARGUMENTS", "vibrato surface must be pitchDelta or vibratoEnv", {
-      path: `${path}/surface`,
-    });
-  }
-  checkNumber(merged.depthCents, 1, 600, `${path}/depthCents`);
-  checkNumber(merged.rateHz, 0.5, 12, `${path}/rateHz`);
-  checkNumber(merged.onsetDelayQuarter, 0, 16, `${path}/onsetDelayQuarter`);
-  checkNumber(merged.rampQuarter, 0, 16, `${path}/rampQuarter`);
-  checkNumber(merged.fadeOutQuarter, 0, 16, `${path}/fadeOutQuarter`);
-  checkNumber(merged.level, 0, 2, `${path}/level`);
-  // vibratoEnv 与 pitchDelta 的参数集合互斥：混用说明调用方没弄清写的是哪条曲线。
-  if (
-    merged.surface === "vibratoEnv" &&
-    (merged.depthCents !== undefined || merged.fadeOutQuarter !== undefined)
-  ) {
-    throw codedError(
-      "INVALID_ARGUMENTS",
-      "vibratoEnv takes level/onsetDelayQuarter/rampQuarter, not depthCents/fadeOutQuarter",
-      { path }
-    );
-  }
 
   for (const [notePosition, index] of notes.entries()) {
     into.push({
@@ -271,6 +418,46 @@ function expandScoopOrFall(gesture, { path, requestIndex, scope, defaults, into 
       depthCents,
       ...merged,
       source: { requestIndex, targetPosition },
+    });
+  }
+}
+
+// portamento 的紧凑形式与 scoop/fall 同构，但 tuple 的两个位置都是 Note index：
+// `transitions: [[fromIndex, toIndex], ...]`。一次请求常包含多个过渡且共享
+// lengthQuarter/maxCents，这正是 grouping 要省掉的重复。
+//
+// 相邻性不在这里检查：那要比较 onset 与 end，属于 planner 的乐理判断
+// （PORTAMENTO_NOT_ADJACENT）。展开层只解析身份。
+function expandPortamento(gesture, { path, requestIndex, scope, defaults, into }) {
+  assertKnownKeys(gesture, ["type", "transitions", "lengthQuarter", "maxCents"], path);
+  if (!Array.isArray(gesture.transitions) || gesture.transitions.length === 0) {
+    throw codedError("INVALID_ARGUMENTS", "portamento needs a non-empty transitions array", {
+      path: `${path}/transitions`,
+    });
+  }
+  if (gesture.transitions.length > MAX_GROUPED_TARGETS) {
+    throw codedError("INVALID_ARGUMENTS", `transitions accepts at most ${MAX_GROUPED_TARGETS} items`, {
+      path: `${path}/transitions`,
+    });
+  }
+  const merged = { ...(defaults.portamento ?? {}), ...omit(gesture, ["type", "transitions"]) };
+  checkNumber(merged.lengthQuarter, 0.01, 4, `${path}/lengthQuarter`);
+  checkNumber(merged.maxCents, 10, 1200, `${path}/maxCents`);
+
+  for (const [transitionPosition, tuple] of gesture.transitions.entries()) {
+    const tuplePath = `${path}/transitions/${transitionPosition}`;
+    if (!Array.isArray(tuple) || tuple.length !== 2) {
+      throw codedError("INVALID_ARGUMENTS", "transition must be [fromIndex, toIndex]", {
+        path: tuplePath,
+        rule: "array of exactly 2 numbers",
+      });
+    }
+    into.push({
+      type: "portamento",
+      fromNote: resolveNoteIndex(scope, tuple[0], `${tuplePath}/0`),
+      toNote: resolveNoteIndex(scope, tuple[1], `${tuplePath}/1`),
+      ...merged,
+      source: { requestIndex, transitionPosition },
     });
   }
 }

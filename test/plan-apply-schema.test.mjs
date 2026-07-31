@@ -42,12 +42,14 @@ function createStoredContext(store, notes) {
   });
   const occurrenceId = `${stored.contextId}:t:0:r:0`;
   stored.context.occurrences.push({
+    occurrence: 0,
     occurrenceId,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-schema-test",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
+    groupNoteCount: notes.length,
     sharedTargetOccurrences: [occurrenceId],
     noteFingerprints: notes.map((note, index) => ({
       indexInGroup: index,
@@ -586,17 +588,15 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
     gestures: [
       {
         type: "hairpin",
-        fromNoteId: notes[0].noteId,
-        toNoteId: notes[1].noteId,
-        parameter: "loudness",
-        amount: 3,
+        from: 0,
+        to: 1,
+        amounts: { loudness: 3 },
       },
       {
         type: "hairpin",
-        fromNoteId: notes[2].noteId,
-        toNoteId: notes[3].noteId,
-        parameter: "loudness",
-        amount: 3,
+        from: 2,
+        to: 3,
+        amounts: { loudness: 3 },
       },
     ],
   });
@@ -637,17 +637,15 @@ test("a partial multi-call artifact seal releases every artifact from that attem
     gestures: [
       {
         type: "hairpin",
-        fromNoteId: notes[0].noteId,
-        toNoteId: notes[1].noteId,
-        parameter: "loudness",
-        amount: 3,
+        from: 0,
+        to: 1,
+        amounts: { loudness: 3 },
       },
       {
         type: "hairpin",
-        fromNoteId: notes[2].noteId,
-        toNoteId: notes[3].noteId,
-        parameter: "loudness",
-        amount: 3,
+        from: 2,
+        to: 3,
+        amounts: { loudness: 3 },
       },
     ],
   });

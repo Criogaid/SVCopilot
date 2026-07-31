@@ -42,24 +42,28 @@ function createStoredContext(store, options = {}) {
     noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
+    occurrence: 0,
     occurrenceId,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-plan-test",
     timeOffsetBlick,
     pitchOffsetSemitone: 0,
+    groupNoteCount: noteFingerprints.length,
     sharedTargetOccurrences: sharedTargetOccurrences ?? [occurrenceId],
     noteFingerprints,
   });
   if (extraOccurrenceWithNotes) {
     const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
+      occurrence: 1,
       occurrenceId: secondId,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: "uuid-plan-test",
       timeOffsetBlick,
       pitchOffsetSemitone: 0,
+      groupNoteCount: noteFingerprints.length,
       sharedTargetOccurrences: [occurrenceId, secondId],
       noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
         ...fingerprint,
@@ -136,7 +140,7 @@ test("explicit scoop compiles to a guarded pitchDelta replace operation", async 
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    gestures: [{ type: "scoop", noteId: noteId(occurrenceId, 0), depthCents: 30, lengthQuarter: 0.5 }],
+    gestures: [{ type: "scoop", targets: [[0, 30]], lengthQuarter: 0.5 }],
   });
   assert.equal(result.ok, true);
   assert.equal(result.status, "planned");
@@ -173,7 +177,7 @@ test("explicit fall ends at -depth with a trailing baseline guard", async () => 
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    gestures: [{ type: "fall", noteId: noteId(occurrenceId, 0), depthCents: 50, lengthQuarter: 0.5 }],
+    gestures: [{ type: "fall", targets: [[0, 50]], lengthQuarter: 0.5 }],
   });
   const points = result.applyRequests[0].arguments.curves[0].points;
   approx(points[0].value, 0, 1e-9);
@@ -196,8 +200,7 @@ test("portamento bends symmetrically so perceived pitch stays continuous", async
     gestures: [
       {
         type: "portamento",
-        fromNoteId: noteId(occurrenceId, 0),
-        toNoteId: noteId(occurrenceId, 1),
+        transitions: [[0, 1]],
         lengthQuarter: 0.25,
       },
     ],
@@ -226,7 +229,7 @@ test("portamento rejects non-adjacent notes and equal pitches", async () => {
     service.plan({
       contextId: stored.contextId,
       gestures: [
-        { type: "portamento", fromNoteId: noteId(occurrenceId, 0), toNoteId: noteId(occurrenceId, 1) },
+        { type: "portamento", transitions: [[0, 1]] },
       ],
     }),
     (error) => error.code === "PORTAMENTO_NOT_ADJACENT"
@@ -235,7 +238,7 @@ test("portamento rejects non-adjacent notes and equal pitches", async () => {
     service.plan({
       contextId: stored.contextId,
       gestures: [
-        { type: "portamento", fromNoteId: noteId(occurrenceId, 1), toNoteId: noteId(occurrenceId, 2) },
+        { type: "portamento", transitions: [[1, 2]] },
       ],
     }),
     (error) => error.code === "INVALID_ARGUMENTS"
@@ -249,7 +252,7 @@ test("vibrato renders a bounded sine with envelope and honest stacking warning",
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    gestures: [{ type: "vibrato", noteId: noteId(occurrenceId, 0), depthCents: 40, rateHz: 5.5 }],
+    gestures: [{ type: "vibrato", notes: [0], depthCents: 40, rateHz: 5.5 }],
   });
   const operation = result.operations[0];
   assert.equal(operation.parameter, "pitchDelta");
@@ -269,7 +272,7 @@ test("vibrato respects avoidExcessiveVibrato and minimum sustain", async () => {
   await assert.rejects(
     service.plan({
       contextId: stored.contextId,
-      gestures: [{ type: "vibrato", noteId: noteId(occurrenceId, 0) }],
+      gestures: [{ type: "vibrato", notes: [0] }],
     }),
     (error) => error.code === "CONSTRAINT_VIOLATION"
   );
@@ -277,7 +280,7 @@ test("vibrato respects avoidExcessiveVibrato and minimum sustain", async () => {
     service.plan({
       contextId: stored.contextId,
       constraints: { avoidExcessiveVibrato: false },
-      gestures: [{ type: "vibrato", noteId: noteId(occurrenceId, 0), rateHz: 2, onsetDelayQuarter: 0.5 }],
+      gestures: [{ type: "vibrato", notes: [0], rateHz: 2, onsetDelayQuarter: 0.5 }],
     }),
     (error) => error.code === "VIBRATO_SPAN_TOO_SHORT"
   );
@@ -294,7 +297,7 @@ test("vibratoEnv shapes the envelope with baseline-1 guards and conflicts are re
     gestures: [
       {
         type: "vibrato",
-        noteId: noteId(occurrenceId, 0),
+        notes: [0],
         surface: "vibratoEnv",
         onsetDelayQuarter: 1,
         rampQuarter: 0.5,
@@ -313,8 +316,8 @@ test("vibratoEnv shapes the envelope with baseline-1 guards and conflicts are re
     service.plan({
       contextId: stored.contextId,
       gestures: [
-        { type: "vibrato", noteId: noteId(occurrenceId, 0), surface: "vibratoEnv" },
-        { type: "vibrato", noteId: noteId(occurrenceId, 0), surface: "vibratoEnv", level: 1.5 },
+        { type: "vibrato", notes: [0], surface: "vibratoEnv" },
+        { type: "vibrato", notes: [0], surface: "vibratoEnv", level: 1.5 },
       ],
     }),
     (error) => error.code === "PLAN_CONFLICT"
@@ -334,10 +337,10 @@ test("hairpin peaks at the requested position in the parameter's own unit", asyn
     gestures: [
       {
         type: "hairpin",
-        fromNoteId: noteId(occurrenceId, 0),
-        toNoteId: noteId(occurrenceId, 1),
-        amount: 3,
-        peakPosition: 0.5,
+        from: 0,
+        to: 1,
+        peak: 0.5,
+        amounts: { loudness: 3 },
       },
     ],
   });
@@ -359,8 +362,8 @@ test("overlapping gestures on one parameter merge additively into one operation"
   const result = await createService(store).plan({
     contextId: stored.contextId,
     gestures: [
-      { type: "scoop", noteId: noteId(occurrenceId, 0), depthCents: 30, lengthQuarter: 0.5 },
-      { type: "vibrato", noteId: noteId(occurrenceId, 0), depthCents: 25 },
+      { type: "scoop", targets: [[0, 30]], lengthQuarter: 0.5 },
+      { type: "vibrato", notes: [0], depthCents: 25 },
     ],
   });
   assert.equal(result.summary.operationCount, 1);
@@ -383,8 +386,8 @@ test("disjoint clusters of one parameter partition into sequential apply calls",
   const result = await createService(store).plan({
     contextId: stored.contextId,
     gestures: [
-      { type: "scoop", noteId: noteId(occurrenceId, 0), lengthQuarter: 0.25 },
-      { type: "scoop", noteId: noteId(occurrenceId, 1), lengthQuarter: 0.25 },
+      { type: "scoop", targets: [[0, 30]], lengthQuarter: 0.25 },
+      { type: "scoop", targets: [[1, 30]], lengthQuarter: 0.25 },
     ],
   });
   assert.equal(result.summary.operationCount, 2);
@@ -445,8 +448,8 @@ test("intent-derived gestures skip every non-melodic event with structured warni
   const scoops = result.gestures.filter((gesture) => gesture.type === "scoop");
   assert.equal(scoops.length, 2);
   assert.deepEqual(
-    scoops.map((gesture) => gesture.noteIds[0]),
-    [noteId(occurrenceId, 4), noteId(occurrenceId, 8)]
+    scoops.map((gesture) => gesture.noteIndexes[0]),
+    [4, 8]
   );
   const skipped = result.warnings.filter(
     (warning) => warning.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
@@ -461,7 +464,11 @@ test("intent-derived gestures skip every non-melodic event with structured warni
       "breath_event",
     ]
   );
-  assert.ok(skipped.every((warning) => warning.noteId && warning.evidence));
+  assert.ok(
+    skipped.every(
+      (warning) => Number.isSafeInteger(warning.noteIndex) && warning.evidence
+    )
+  );
   assert.ok(
     skipped.find((warning) => warning.semanticRole === "syllable_continuation")
       .issueCodes.includes("ORPHAN_PLUS")
@@ -475,9 +482,9 @@ test("intent-derived gestures skip every non-melodic event with structured warni
   // 显式表现手法不受 intent 过滤：用户点名 br 音符仍可规划。
   const explicit = await createService(store).plan({
     contextId: stored.contextId,
-    gestures: [{ type: "fall", noteId: noteId(occurrenceId, 0) }],
+    gestures: [{ type: "fall", targets: [[0, 40]] }],
   });
-  assert.equal(explicit.gestures[0].noteIds[0], noteId(occurrenceId, 0));
+  assert.equal(explicit.gestures[0].noteIndexes[0], 0);
 });
 
 test("intent treats only exact lowercase br as breath and keeps valid continuations melodic", async () => {
@@ -497,21 +504,21 @@ test("intent treats only exact lowercase br as breath and keeps valid continuati
   });
   const scoops = result.gestures.filter((gesture) => gesture.type === "scoop");
   assert.deepEqual(
-    scoops.map((gesture) => gesture.noteIds[0]),
-    [noteId(occurrenceId, 0), noteId(occurrenceId, 4)]
+    scoops.map((gesture) => gesture.noteIndexes[0]),
+    [0, 4]
   );
   assert.ok(
     result.warnings.some(
       (warning) =>
         warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT" &&
-        warning.noteIds.includes(noteId(occurrenceId, 0))
+        warning.notes.some((note) => note.indexInGroup === 0)
     )
   );
   assert.deepEqual(
     result.warnings
       .filter((warning) => warning.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED")
-      .map((warning) => warning.noteId),
-    [noteId(occurrenceId, 3)]
+      .map((warning) => warning.noteIndex),
+    [3]
   );
 });
 
@@ -627,10 +634,9 @@ test("plan attaches referenced note fingerprints to each apply target (F1 drift 
     gestures: [
       {
         type: "hairpin",
-        fromNoteId: noteId(occurrenceId, 0),
-        toNoteId: noteId(occurrenceId, 1),
-        parameter: "loudness",
-        amount: 3,
+        from: 0,
+        to: 1,
+        amounts: { loudness: 3 },
       },
     ],
   });
@@ -654,7 +660,7 @@ test("explicit gestures supersede overlapping intent candidates", async () => {
   const result = await createService(store).plan({
     contextId: stored.contextId,
     intent: { genre: "jpop" },
-    gestures: [{ type: "scoop", noteId: noteId(occurrenceId, 0), depthCents: 55 }],
+    gestures: [{ type: "scoop", targets: [[0, 55]] }],
   });
   assert.ok(result.warnings.some((warning) => warning.code === "INTENT_GESTURE_SUPERSEDED"));
   assert.equal(result.summary.explicitGestureCount, 1);
@@ -671,7 +677,7 @@ test("constraint clamping bounds values and reports honestly", async () => {
   const result = await createService(store).plan({
     contextId: stored.contextId,
     constraints: { maxAbsPitchDeltaCents: 100 },
-    gestures: [{ type: "scoop", noteId: noteId(occurrenceId, 0), depthCents: 300 }],
+    gestures: [{ type: "scoop", targets: [[0, 300]] }],
   });
   const values = result.applyRequests[0].arguments.curves[0].points.map((point) => point.value);
   assert.equal(Math.min(...values), -100);
@@ -688,7 +694,7 @@ test("plans over the point budget fail with PLAN_TOO_DENSE", async () => {
     createService(store).plan({
       contextId: stored.contextId,
       constraints: { maxTotalPoints: 16 },
-      gestures: [{ type: "vibrato", noteId: noteId(occurrenceId, 0) }],
+      gestures: [{ type: "vibrato", notes: [0] }],
     }),
     (error) => {
       assert.equal(error.code, "PLAN_TOO_DENSE");
@@ -708,7 +714,7 @@ test("plan resolves contexts and notes honestly across error paths", async () =>
   const noNotes = createStoredContext(store, { notes: [] });
   await assert.rejects(
     service.plan({ contextId: noNotes.stored.contextId, intent: { genre: "jpop" } }),
-    (error) => error.code === "NOTES_NOT_CAPTURED"
+    (error) => error.code === "OCCURRENCE_NOT_CAPTURED"
   );
   const ambiguous = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60 }],
@@ -718,7 +724,7 @@ test("plan resolves contexts and notes honestly across error paths", async () =>
     service.plan({ contextId: ambiguous.stored.contextId, intent: { genre: "jpop" } }),
     (error) => {
       assert.equal(error.code, "AMBIGUOUS_CONTEXT");
-      assert.equal(error.details.candidateOccurrences.length, 2);
+      assert.deepEqual(error.details.candidates, [0, 1]);
       return true;
     }
   );
@@ -728,16 +734,17 @@ test("plan resolves contexts and notes honestly across error paths", async () =>
   await assert.rejects(
     service.plan({
       contextId: single.stored.contextId,
-      gestures: [{ type: "scoop", noteId: "ctx_other:t:0:r:0:n:0" }],
+      occurrence: 7,
+      gestures: [{ type: "scoop", targets: [[0, 30]] }],
     }),
-    (error) => error.code === "UNKNOWN_OCCURRENCE"
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
   await assert.rejects(
     service.plan({
       contextId: single.stored.contextId,
-      gestures: [{ type: "scoop", noteId: `${single.occurrenceId}:n:9` }],
+      gestures: [{ type: "scoop", targets: [[9, 30]] }],
     }),
-    (error) => error.code === "UNKNOWN_NOTE_ID"
+    (error) => error.code === "NOTE_INDEX_OUT_OF_RANGE"
   );
   // 意图对短乐句派生不出任何候选且无显式表现手法 → EMPTY_PLAN。
   await assert.rejects(
@@ -757,13 +764,13 @@ test("plan validates request shape before touching the store", async () => {
     { contextId: "ctx_x" }, // 既无 gestures 也无 intent
     { contextId: "ctx_x", bogus: true },
     { contextId: "ctx_x", gestures: [{ type: "bogus" }] },
-    { contextId: "ctx_x", gestures: [{ type: "scoop" }] }, // 缺 noteId
-    { contextId: "ctx_x", gestures: [{ type: "scoop", noteId: "n", depthCents: 9000 }] },
+    { contextId: "ctx_x", gestures: [{ type: "scoop" }] }, // 缺 targets
+    { contextId: "ctx_x", gestures: [{ type: "scoop", targets: [[0, 9000]] }] },
     { contextId: "ctx_x", intent: { genre: "metal" } },
     { contextId: "ctx_x", intent: {} },
     {
       contextId: "ctx_x",
-      gestures: [{ type: "vibrato", noteId: "n", surface: "vibratoEnv", depthCents: 20 }],
+      gestures: [{ type: "vibrato", notes: [0], surface: "vibratoEnv", depthCents: 20 }],
     },
     { contextId: "ctx_x", intent: { genre: "jpop" }, responseMode: "loud" },
   ]) {
@@ -779,7 +786,7 @@ test("compact responses keep summary, applyRequests, and review only", async () 
   const result = await createService(store).plan({
     contextId: stored.contextId,
     responseMode: "compact",
-    gestures: [{ type: "scoop", noteId: noteId(occurrenceId, 0) }],
+    gestures: [{ type: "scoop", targets: [[0, 30]] }],
   });
   assert.equal(result.gestures, undefined);
   assert.equal(result.operations, undefined);
@@ -796,7 +803,7 @@ test("shared targets surface in review and default constraints are exposed", asy
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    gestures: [{ type: "scoop", noteId: noteId(occurrenceId, 0) }],
+    gestures: [{ type: "scoop", targets: [[0, 30]] }],
   });
   assert.equal(result.review.requiresSharedTargetConfirmation, true);
   assert.ok(result.review.checklist.some((item) => /allowSharedTargetMutation/.test(item)));
@@ -887,7 +894,7 @@ test("spoken_rap_transition seeds vibratoEnv flattening on sustains", async () =
   );
   assert.equal(flattened.length, 1);
   assert.equal(flattened[0].parameter, "vibratoEnv");
-  assert.deepEqual(flattened[0].noteIds, [noteId(occurrenceId, 1)]);
+  assert.deepEqual(flattened[0].noteIndexes, [1]);
   assert.equal(flattened[0].params.level, 0.2);
   // preset 收窄 pitchDelta 预算进入 constraintDefaults 回显。
   assert.equal(result.presetExpansion.constraintDefaults.maxAbsPitchDeltaCents, 40);
