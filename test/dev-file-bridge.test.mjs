@@ -153,6 +153,109 @@ test("the dev entry lets the host start first and reuses the real dispatcher", a
   assert.equal(exitCode, 0, `dev bridge exited non-zero. stdout=${stdout} stderr=${stderr}`);
 });
 
+test("a startup failure lands in state.json instead of only a message box", async (t) => {
+  // 这个入口的使用者在进程外，只能通过 state.json 观察脚本。若失败只弹窗，
+  // 窗口一关，「没启动」与「启动后立刻失败」在外部就完全无法区分——而这正是
+  // 一次真实的 SV2 排查里遇到的情况（state 停在 starting，43 分钟无心跳）。
+  if (!fs.existsSync(luaBin)) {
+    t.skip(`Lua interpreter not found: ${luaBin}`);
+    return;
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sv-copilot-dev-fail-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // 指向一个不存在的桥：loadfile 失败，也就没有 dispatcher 可复用。
+  const child = spawn(luaBin, [harness, devScript, dir], {
+    env: { ...process.env, SV_COPILOT_BRIDGE_PATH: path.join(dir, "no-such-bridge.lua") },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  await new Promise((resolve) => child.once("exit", resolve));
+
+  const state = readJson(path.join(dir, "state.json"));
+  assert.equal(state?.state, "failed", `state.json must record the failure. stderr=${stderr}`);
+  assert.match(String(state.reason), /no-such-bridge/);
+  // 不得退化成"自己实现一个 dispatcher"：没有桥就没有可复用的协议实现。
+  assert.equal(readJson(path.join(dir, "response.json")), null);
+});
+
+test("the bridge is found even when the host loads scripts from source text", async (t) => {
+  // 真实故障：SV2 用 load(源码) 而不是 loadfile 加载脚本，因此
+  // debug.getinfo().source 是整段正文，不是 "@路径"。朴素的路径推导会从正文里
+  // 切出一段假目录，把 16KB 源码当路径喂给 loadfile——现象是一个超长的 usage 弹窗。
+  if (!fs.existsSync(luaBin)) {
+    t.skip(`Lua interpreter not found: ${luaBin}`);
+    return;
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sv-copilot-dev-src-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const env = { ...process.env, SV_COPILOT_TEST_LOAD_AS_SOURCE: "1" };
+  // 不给 SV_COPILOT_BRIDGE_PATH：正是要考察没有 override 时的自力解析。
+  delete env.SV_COPILOT_BRIDGE_PATH;
+  const child = spawn(luaBin, [harness, devScript, dir], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stdout = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+
+  t.after(() => {
+    if (child.exitCode === null) child.kill();
+  });
+
+  const stateFile = path.join(dir, "state.json");
+  const deadline = Date.now() + 8000;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = readJson(stateFile);
+    if (state?.state === "listening" || state?.state === "failed") break;
+    if (child.exitCode !== null) break;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  assert.equal(
+    state?.state,
+    "listening",
+    `path resolution must survive source-text loading. reason=${state?.reason} stdout=${stdout}`
+  );
+
+  // 真实 dispatcher 仍然在线。
+  writeCommand(dir, { id: 1, op: "ping" });
+  const pong = await awaitResponse(dir, 1);
+  assert.equal(pong.result, "pong");
+  writeCommand(dir, { id: 2, op: "__dev_stop__" });
+  await awaitResponse(dir, 2);
+});
+
+test("a startup failure reason is truncated, never a whole script", async (t) => {
+  // 诊断信息本身不该需要被诊断：那次 16KB 的 reason 把弹窗糊满，真正的问题
+  // 反而看不见。
+  if (!fs.existsSync(luaBin)) {
+    t.skip(`Lua interpreter not found: ${luaBin}`);
+    return;
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sv-copilot-dev-long-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // 一个存在但巨大的"路径"：模拟把整段正文当路径传进来。
+  const child = spawn(luaBin, [harness, devScript, dir], {
+    env: { ...process.env, SV_COPILOT_BRIDGE_PATH: "x".repeat(3000) + ".lua" },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  await new Promise((resolve) => child.once("exit", resolve));
+
+  const state = readJson(path.join(dir, "state.json"));
+  assert.equal(state?.state, "failed");
+  assert.ok(state.reason.length < 600, `reason must be bounded, got ${state.reason.length}`);
+  assert.match(state.reason, /truncated/);
+});
+
 test("the dev entry never opens a pipe and never reimplements the dispatcher", () => {
   // 这个入口的全部价值在于「不影响正式路径」。文档里当然会提到管道（说明它不碰
   // 什么），因此先剥掉注释，只检查代码：真正的风险是某行代码真的去打开了管道。

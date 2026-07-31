@@ -67,15 +67,38 @@ SV = {
 }
 
 -- 让开发脚本用我们指定的目录与桥路径。
-local bridgePath = devScript:gsub("DevSVCopilotFileBridge%.lua$", "StartSynthVCopilot.lua")
+-- 桥路径只在调用方没给的时候才兜底：失败路径的测试要能指向一个不存在的桥，
+-- 若这里无条件覆盖，那种测试就永远测不到 loadfile 失败。
 local realGetenv = os.getenv
+local bridgePath = realGetenv("SV_COPILOT_BRIDGE_PATH")
+if not bridgePath or bridgePath == "" then
+  bridgePath = devScript:gsub("DevSVCopilotFileBridge%.lua$", "StartSynthVCopilot.lua")
+end
 os.getenv = function(name)
   if name == "SV_COPILOT_DEV_DIR" then return dir end
   if name == "SV_COPILOT_BRIDGE_PATH" then return bridgePath end
   return realGetenv(name)
 end
 
-dofile(devScript)
+-- 模拟 SV2 的加载方式。
+--
+-- SV2 不用 loadfile 加载脚本，而是读出正文再 load(源码)。差别是可观测的：
+-- 此时 debug.getinfo().source 是**整段正文**而不是 "@路径"。真实故障就出在这里
+-- ——朴素的路径推导从源码里切出一段假目录，把 16KB 正文当路径喂给 loadfile。
+-- dofile 会给出 "@路径"，因此用 dofile 的 harness 永远测不到这个故障。
+local function loadLikeSV2(scriptPath)
+  local handle = assert(io.open(scriptPath, "rb"))
+  local source = handle:read("*a")
+  handle:close()
+  local chunk = assert(load(source))
+  chunk()
+end
+
+if os.getenv("SV_COPILOT_TEST_LOAD_AS_SOURCE") == "1" then
+  loadLikeSV2(devScript)
+else
+  dofile(devScript)
+end
 main()
 
 -- 驱动 tick 循环：真实 SV 靠 setTimeout 调度，这里同步跑。
