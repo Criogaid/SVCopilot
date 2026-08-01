@@ -60,13 +60,6 @@ export function resolvePlanReference({
   if (!["dry_run", "commit"].includes(action)) {
     throw codedError("INVALID_ARGUMENTS", "planRef action must be dry_run or commit");
   }
-  // 执行态检查必须在展开请求**之前**：一个已提交的计划不该走到 live preflight，
-  // 因为 preflight 会通过——工程状态确实满足计划的前提，计划只是已经生效过了
-  // （§4.3.1）。这一点 preflight 无法自己发现。
-  if (planLedger) {
-    if (action === "commit") planLedger.beginCommit(planRef);
-    else planLedger.noteDryRun(planRef);
-  }
   // capsule 不写回 store（§4.3.2）：只读证据一旦进了 store 就会被别人查到、
   // 被 LRU 淘汰、并与真实快照混淆。改为随返回值交给调用方，由它显式传给
   // getContext——用途因此在调用点可见，而不是藏在一次副作用里。
@@ -79,6 +72,21 @@ export function resolvePlanReference({
   mutationRequest.dryRun = action === "dry_run";
   applyConfirmations(mutationRequest, expectedTargetTool, confirmations);
   applyExecutionOptions(mutationRequest, expectedTargetTool, executionOptions);
+
+  // ledger 推进必须排在**全部纯参数校验之后**，且仍在返回调用方之前。
+  //
+  // 两个约束同时成立：一个已提交的计划不该走到 live preflight（preflight 会通过——
+  // 工程状态确实满足计划的前提，计划只是已经生效过了，§4.3.1），但一个连参数都没
+  // 通过校验的请求根本没碰宿主，不该消耗掉 PlanRef 的唯一一次 commit 机会。
+  //
+  // 先前的顺序把两者搞混了：`executionOptions: {waitFor}` 这种纯参数错误会把条目
+  // 推进到 committing 并永久卡死，此后任何 commit 都拿到 PLAN_ALREADY_EXECUTED，
+  // 而宿主从未被触碰。上面的展开与校验全是纯内存操作，因此把 ledger 挪到它们之后
+  // 不会放宽任何防重放保证。
+  if (planLedger) {
+    if (action === "commit") planLedger.beginCommit(planRef);
+    else planLedger.noteDryRun(planRef);
+  }
 
   return {
     targetTool: plan.targetTool,

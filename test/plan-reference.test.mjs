@@ -364,4 +364,89 @@ const sessionId = "sess_plan";
   assert.strictEqual(ledger.get(artifact.id), null);
 }
 
+// 纯参数错误不得消耗 PlanRef 的唯一一次 commit 机会。
+//
+// 这是一个真实 bug 的回归：ledger 推进曾排在 applyConfirmations /
+// applyExecutionOptions **之前**，于是 `executionOptions:{waitFor}` 这种目标工具
+// 不支持的选项会把条目推到 committing 并永久卡死——宿主从未被触碰，PlanRef 却
+// 再也无法提交。顺序本身就是契约，因此这里逐条钉住。
+{
+  const ledger = new PlanExecutionLedger();
+  const store = new ArtifactStore({ planLedger: ledger });
+  const artifact = store.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload: buildPlanArtifact({
+      targetTool: "sv_patch_parameter_curves",
+      mutationRequest: { target: { contextId: "c_x" }, curves: [] },
+    }).payload,
+  });
+  const base = {
+    planRef: artifact.id,
+    expectedTargetTool: "sv_patch_parameter_curves",
+    sessionId,
+    artifactStore: store,
+    planLedger: ledger,
+  };
+  resolvePlanReference({ ...base, action: "dry_run" });
+
+  // 每一种纯参数拒绝都必须让条目停在 dry_run_seen。
+  const pureArgumentRejections = [
+    // 目标工具不支持的 executionOptions。
+    { executionOptions: { waitFor: "none" } },
+    // 未知 confirmation 键。
+    { confirmations: { bogusConfirmation: true } },
+    // confirmation 值类型错误。
+    { confirmations: { allowSharedTargetMutation: "yes" } },
+    // executionOptions 不是对象。
+    { executionOptions: [] },
+  ];
+  for (const overrides of pureArgumentRejections) {
+    assert.throws(
+      () => resolvePlanReference({ ...base, action: "commit", ...overrides }),
+      (error) => error.code === "INVALID_ARGUMENTS",
+      JSON.stringify(overrides)
+    );
+    assert.strictEqual(
+      ledger.get(artifact.id).state,
+      "dry_run_seen",
+      `a pure-argument rejection must not consume the planRef: ${JSON.stringify(overrides)}`
+    );
+  }
+
+  // 参数正确时才进入 committing——防重放保证没有被放宽。
+  const accepted = resolvePlanReference({ ...base, action: "commit" });
+  assert.strictEqual(accepted.ledgerRef, artifact.id);
+  assert.strictEqual(ledger.get(artifact.id).state, "committing");
+}
+
+// 目标工具不匹配同样不得消耗 PlanRef：它连 artifact 都没认对。
+{
+  const ledger = new PlanExecutionLedger();
+  const store = new ArtifactStore({ planLedger: ledger });
+  const artifact = store.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload: buildPlanArtifact({
+      targetTool: "sv_patch_notes",
+      mutationRequest: { contextId: "c_x", patches: [] },
+    }).payload,
+  });
+  assert.throws(
+    () =>
+      resolvePlanReference({
+        planRef: artifact.id,
+        action: "commit",
+        expectedTargetTool: "sv_restructure_notes",
+        sessionId,
+        artifactStore: store,
+        planLedger: ledger,
+      }),
+    (error) => error.code === "PLAN_TARGET_MISMATCH"
+  );
+  assert.strictEqual(ledger.get(artifact.id).state, "sealed");
+}
+
 console.log("plan-reference.test.mjs passed");
