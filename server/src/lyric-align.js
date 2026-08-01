@@ -665,7 +665,7 @@ function buildAlignResponse(
   }
   let planRef = null;
   let planExpiresAt = null;
-  if (input.usePlanRef && artifactStore && sessionId && patchRequest) {
+  if (artifactStore && sessionId && patchRequest) {
     try {
       const { payload } = buildPlanArtifact({
         targetTool: "sv_patch_notes",
@@ -799,7 +799,6 @@ function normalizeAlignRequest(request) {
       "startNote",
       "setLanguageOverride",
       "responseMode",
-      "usePlanRef",
     ],
     "request"
   );
@@ -849,7 +848,6 @@ function normalizeAlignRequest(request) {
     startNote: request.startNote,
     setLanguageOverride: request.setLanguageOverride ?? true,
     responseMode,
-    usePlanRef: request.usePlanRef !== false,
   };
 }
 

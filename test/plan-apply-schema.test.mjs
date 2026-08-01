@@ -674,7 +674,6 @@ test("a partial multi-call artifact seal releases every artifact from that attem
   });
   const plan = await service.plan({
     contextId: context.stored.contextId,
-    usePlanRef: true,
     gestures: [
       {
         type: "hairpin",

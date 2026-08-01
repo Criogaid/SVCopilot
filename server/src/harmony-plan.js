@@ -663,7 +663,7 @@ function buildHarmonyResponse(
   }
   let planRef = null;
   let planExpiresAt = null;
-  if (input.usePlanRef && artifactStore && sessionId && restructureRequest) {
+  if (artifactStore && sessionId && restructureRequest) {
     try {
       const { payload } = buildPlanArtifact({
         targetTool: "sv_restructure_notes",
@@ -788,7 +788,6 @@ function normalizeHarmonyRequest(request) {
       "lyricsMode",
       "notes",
       "responseMode",
-      "usePlanRef",
     ],
     "request"
   );
@@ -888,7 +887,6 @@ function normalizeHarmonyRequest(request) {
     lyricsMode,
     notes: request.notes,
     responseMode,
-    usePlanRef: request.usePlanRef !== false,
   };
 }
 

@@ -437,7 +437,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   }
   let planArtifactRef = null;
   let planExpiresAt = null;
-  if (input.usePlanRef && artifactStore && sessionId && patchRequest) {
+  if (artifactStore && sessionId && patchRequest) {
     try {
       const { payload } = buildPlanArtifact({
           targetTool: "sv_patch_notes",
@@ -538,7 +538,7 @@ function normalizeQuantizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrence", "notes", "grid", "strength", "swing", "quantizeDurations", "responseMode", "usePlanRef"],
+    ["contextId", "occurrence", "notes", "grid", "strength", "swing", "quantizeDurations", "responseMode"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -599,7 +599,6 @@ function normalizeQuantizeRequest(request) {
     swing,
     quantizeDurations: request.quantizeDurations ?? false,
     responseMode,
-    usePlanRef: request.usePlanRef !== false,
   };
 }
 

@@ -291,6 +291,10 @@ export const BANNED_REQUEST_FIELDS = Object.freeze([
   "occurrenceId",
   "sourceOccurrenceId",
   "targetOccurrenceId",
+  // usePlanRef:false 曾允许把整份 mutation payload 内联回响应里。它不只是体积问题：
+  // 内联路径绕过 Plan Artifact，因此也绕过 plan-ledger 的防重放——同一份 mode:"add"
+  // 曲线可以被提交两次而 preflight 全部通过。规划器现在一律交接 planRef。
+  "usePlanRef",
   // dryRun 是**布尔**，因此有默认值，而默认值在写操作上指向错误的方向：省略它就
   // 等于同意写入。`action` 是无默认的 enum，所以「忘了填」在 schema 层就被挡住，
   // 不会变成一次真实写入。两者不能并存——那会让同一个请求有两处说法。
@@ -304,5 +308,4 @@ export const BANNED_REQUEST_FIELDS = Object.freeze([
 export const LEGACY_REQUEST_FIELDS = Object.freeze({
   responseMode: "§3.6：响应形状由契约规定，不由调用方选择（B2）",
   cursor: "§4.1：offset 分页降级为待数据评估（C2）",
-  usePlanRef: "§4.3：inline apply 取消后该开关一并删除（C1）",
 });

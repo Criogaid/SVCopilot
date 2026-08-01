@@ -568,12 +568,6 @@ const PLAN_EXECUTION_PROPERTIES = {
       "Optional execution-only overrides. Unsupported options are rejected for the referenced target tool.",
   },
 };
-const USE_PLAN_REF_SCHEMA = {
-  type: "boolean",
-  default: true,
-  description:
-    "Seal mutation payloads as immutable artifacts and return short planRef apply arguments. Set false only when inline payloads are required.",
-};
 
 // 内部 handler 目录。这些名字不出现在 tools/list 里（facade 是唯一 surface），
 // 它们的 inputSchema 通过 sv_describe 按需提供。
@@ -1442,7 +1436,6 @@ export const TOOLS = [
           },
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
-        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId"],
     },
@@ -1451,7 +1444,7 @@ export const TOOLS = [
   {
     name: "sv_align_lyrics",
     description:
-      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects inferred "+" continuation notes); an explicit +/- chain is authoritative and is never expanded again. Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review. Exact ASCII "+", "-", and "br", plus an ASCII apostrophe prefix, use the official Synthesizer V Studio 2 special-lyric semantics; similar spellings such as "BR" remain lexical and emit a warning. Tokens and per-note units expose semanticRole/semanticEvidence, and orphan continuations or an uncalibrated standalone apostrophe require human review. Returns per-note planned lyrics/languageOverride plus a unified apply envelope. By default apply.arguments carries a sealed planRef (the bare artifactId) and apply.expiresAt reports its lease; if the original snapshot TTL has elapsed the executor reads the bounded context capsule sealed in the plan instead, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 200-patch per-call cap return the first 200 plus a continuation block. G2P parity with the host is not guaranteed.',
+      'Side-effect-free lyric alignment planner over a range context (include ["notes"]): tokenizes mixed-language lyric text and maps units onto notes without touching the host. Japanese kana use deterministic mora rules (one kana per beat; small kana merge into the previous mora; sokuon/moraic-n/chouon each take one note); English words use a heuristic vowel-group syllable count (~85-90% literature accuracy, only affects inferred "+" continuation notes); an explicit +/- chain is authoritative and is never expanded again. Mandarin/Cantonese map one character per note; kanji readings are unavailable (no G2P) so each kanji is planned as one note flagged needs_review. Exact ASCII "+", "-", and "br", plus an ASCII apostrophe prefix, use the official Synthesizer V Studio 2 special-lyric semantics; similar spellings such as "BR" remain lexical and emit a warning. Tokens and per-note units expose semanticRole/semanticEvidence, and orphan continuations or an uncalibrated standalone apostrophe require human review. Returns per-note planned lyrics/languageOverride plus a unified apply envelope. By default apply.arguments carries a sealed planRef (the bare artifactId) and apply.expiresAt reports its lease; if the original snapshot TTL has elapsed the executor reads the bounded context capsule sealed in the plan instead, then performs live target/precondition validation. Plans above the 200-patch per-call cap return the first 200 plus a continuation block. G2P parity with the host is not guaranteed.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1491,7 +1484,6 @@ export const TOOLS = [
           description: "Also plan per-note languageOverride values where the token language is known.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
-        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "lyrics"],
     },
@@ -1767,7 +1759,6 @@ export const TOOLS = [
           description: "Also snap durations to whole grid steps and trim overlaps.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
-        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "grid"],
     },
@@ -1776,7 +1767,7 @@ export const TOOLS = [
   {
     name: "sv_generate_harmony",
     description:
-      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) using an explicit key or Krumhansl-Schmuckler detection. Existing exact target notes are skipped; overlapping different notes become TARGET_NOTE_CONFLICT and are never overwritten. Returns a unified apply envelope targeting sv_restructure_notes. By default apply.arguments carries a sealed planRef (the bare artifactId) and apply.expiresAt reports its lease; if the original snapshot TTL has elapsed the executor reads the bounded context capsule sealed in the plan instead, then performs live target/precondition validation. Set usePlanRef:false only for inline diagnostics. Plans above the 64-operation cap return the first 64 plus a continuation block. Whether the harmony sounds good is human-only.',
+      'Side-effect-free diatonic harmony planner over a range context (in-memory only, never touches the host, never creates tracks or groups — prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target occurrences share ONE range context). Maps melodic source notes (breaths "br" are skipped) using an explicit key or Krumhansl-Schmuckler detection. Existing exact target notes are skipped; overlapping different notes become TARGET_NOTE_CONFLICT and are never overwritten. Returns a unified apply envelope targeting sv_restructure_notes. By default apply.arguments carries a sealed planRef (the bare artifactId) and apply.expiresAt reports its lease; if the original snapshot TTL has elapsed the executor reads the bounded context capsule sealed in the plan instead, then performs live target/precondition validation. Plans above the 64-operation cap return the first 64 plus a continuation block. Whether the harmony sounds good is human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1873,7 +1864,6 @@ export const TOOLS = [
             "Optional source-note subset, as 0-based indexes within the source NoteGroup.",
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
-        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "targetOccurrence", "harmony"],
     },
@@ -2262,7 +2252,6 @@ export const TOOLS = [
           },
         },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
-        usePlanRef: USE_PLAN_REF_SCHEMA,
       },
       required: ["contextId", "gestures"],
       definitions: {

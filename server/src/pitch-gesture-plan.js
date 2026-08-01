@@ -741,7 +741,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
 
   let planArtifactRef = null;
   let planExpiresAt = null;
-  if (input.usePlanRef && artifactStore && sessionId && hasOperations) {
+  if (artifactStore && sessionId && hasOperations) {
     try {
       const { payload } = buildPlanArtifact({
           targetTool: "sv_patch_pitch_controls",
@@ -838,7 +838,6 @@ function normalizePlanRequest(request) {
       "constraints",
       "sampling",
       "responseMode",
-      "usePlanRef",
     ],
     "request"
   );
@@ -878,7 +877,6 @@ function normalizePlanRequest(request) {
     constraints: normalizeConstraints(request.constraints),
     sampling: normalizeSampling(request.sampling),
     responseMode,
-    usePlanRef: request.usePlanRef !== false,
   };
 }
 

@@ -1271,7 +1271,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
   const planArtifactRefs = [];
   // 租期：K 次调用各自封存一个 artifact，最早到期的那个决定整份交接还能用多久。
   let planExpiresAt = null;
-  if (input.usePlanRef && artifactStore && sessionId && applyRequests.length > 0) {
+  if (artifactStore && sessionId && applyRequests.length > 0) {
     try {
       for (const request of applyRequests) {
         const { payload } = buildPlanArtifact({
@@ -1379,7 +1379,7 @@ function normalizePlanRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrence", "defaults", "gestures", "intent", "constraints", "sampling", "responseMode", "usePlanRef"],
+    ["contextId", "occurrence", "defaults", "gestures", "intent", "constraints", "sampling", "responseMode"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -1428,7 +1428,6 @@ function normalizePlanRequest(request) {
     sampling,
     intentDefaults: EXPRESSION_PLAN_DEFAULTS.intent,
     responseMode,
-    usePlanRef: request.usePlanRef !== false,
   };
 }
 

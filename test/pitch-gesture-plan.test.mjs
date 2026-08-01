@@ -26,10 +26,8 @@ function createFixture(options = {}) {
   const snapshots = new RangeSnapshotService(session, { now: () => 1000, store, artifactStore, sessionId });
   const snapshotService = new SnapshotService(session, { store, now: () => 1000 });
   const planService = new PitchGesturePlanService({ store, now: () => 1000, artifactStore, sessionId });
-  // 既有形状断言显式走 inline；planRef 专项用例自行传 usePlanRef:true。
-  const planner = {
-    plan: (request) => planService.plan({ usePlanRef: false, ...request }),
-  };
+  // planRef 是唯一交接方式（inline apply 已删除），因此 planner 就是 service 本身。
+  const planner = planService;
   const patch = new PitchControlPatchService(session, snapshotService, {
     sleepFn: async () => {},
     now: () => 1000,
@@ -37,7 +35,16 @@ function createFixture(options = {}) {
     artifactStore,
     sessionId,
   });
-  return { model, snapshots, planner, patch, store, artifactStore };
+  // planRef 是唯一交接方式，因此"计划的内容"只能从封存的 artifact 读回。
+  // 断言必须看真正会被提交的那份 mutationRequest，而不是响应里的某个副本——
+  // 后者一旦与封存内容漂移，测试反而会为漂移背书。
+  const sealedRequest = (plan) =>
+    artifactStore.resolve({
+      artifactId: plan.apply.arguments.planRef,
+      expectedKind: "plan",
+      sessionId,
+    }).payload.mutationRequest;
+  return { model, snapshots, planner, patch, store, artifactStore, sealedRequest };
 }
 
 async function snapshotNotes(snapshots) {
@@ -51,7 +58,7 @@ async function snapshotNotes(snapshots) {
 const nid = (_snapshot, index) => index;
 
 test("a full gesture set compiles to bounded group-local add curves with a unified apply envelope", async () => {
-  const { snapshots, planner } = createFixture();
+  const { snapshots, planner, sealedRequest } = createFixture();
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
@@ -67,7 +74,7 @@ test("a full gesture set compiles to bounded group-local add curves with a unifi
   assert.equal(result.effects, "none");
   assert.equal(result.apply.tool, "sv_patch_pitch_controls");
   assert.equal(result.summary.expectedUserUndoSteps, 1);
-  const ops = result.apply.arguments.operations;
+  const ops = sealedRequest(result).operations;
   assert.equal(ops.length, 4);
   for (const op of ops) {
     assert.equal(op.op, "add");
@@ -87,9 +94,10 @@ test("a full gesture set compiles to bounded group-local add curves with a unifi
   const attack = result.gestures.find((g) => g.type === "attack");
   assert.equal(attack.anchor.groupRelativeSemitone, 60);
   // apply.arguments 携带 expectedNotes/expectedTimeOffsetBlick 漂移守卫。
-  assert.ok(Array.isArray(result.apply.arguments.target.expectedNotes));
-  assert.equal(result.apply.arguments.target.expectedTimeOffsetBlick, 0);
-  assert.equal(result.apply.arguments.occurrence, 0);
+  const sealed = sealedRequest(result);
+  assert.ok(Array.isArray(sealed.target.expectedNotes));
+  assert.equal(sealed.target.expectedTimeOffsetBlick, 0);
+  assert.equal(sealed.occurrence, 0);
 });
 
 test("planner output is schema-valid and plannable against the live host (dry-run, zero writes)", async () => {
@@ -119,8 +127,8 @@ test("planner output is schema-valid and plannable against the live host (dry-ru
   assert.ok(state.every((c) => c.scriptData["svcopilot.owner"] === "svcopilot"));
 });
 
-test("identical input produces a byte-stable plan id and apply arguments", async () => {
-  const { snapshots, planner } = createFixture();
+test("identical input produces a byte-stable plan id and sealed mutation request", async () => {
+  const { snapshots, planner, sealedRequest } = createFixture();
   const snapshot = await snapshotNotes(snapshots);
   const request = {
     contextId: snapshot.contextId,
@@ -132,11 +140,17 @@ test("identical input produces a byte-stable plan id and apply arguments", async
   const first = await planner.plan(request);
   const second = await planner.plan(request);
   assert.equal(first.planId, second.planId);
-  assert.equal(JSON.stringify(first.apply.arguments), JSON.stringify(second.apply.arguments));
+  // apply.arguments 现在只承载 planRef，而 artifactId 每次封存都是新的随机 ID，
+  // 因此逐字节比它是在断言"随机数相等"。确定性真正落在被封存的 mutation request 上——
+  // 那才是提交时会作用到宿主的东西。
+  assert.equal(
+    JSON.stringify(sealedRequest(first)),
+    JSON.stringify(sealedRequest(second))
+  );
 });
 
 test("transition follows the source and target pitches without overshooting", async () => {
-  const { snapshots, planner } = createFixture();
+  const { snapshots, planner, sealedRequest } = createFixture();
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
@@ -144,7 +158,7 @@ test("transition follows the source and target pitches without overshooting", as
       { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 1 } },
     ],
   });
-  const control = result.apply.arguments.operations[0].control;
+  const control = sealedRequest(result).operations[0].control;
   const points = control.points;
   // 音程 +2 半音、anchor 位于目标音 62：相对值必须从 -2 到 0，
   // 展开后的绝对音高才是 60 -> 62，而不是错误的 61 -> 63。
@@ -160,13 +174,13 @@ test("transition follows the source and target pitches without overshooting", as
 });
 
 test("vibrato stays within depth and reports its sampling", async () => {
-  const { snapshots, planner } = createFixture();
+  const { snapshots, planner, sealedRequest } = createFixture();
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
     gestures: [{ type: "vibrato", note: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5 }],
   });
-  const points = result.apply.arguments.operations[0].control.points;
+  const points = sealedRequest(result).operations[0].control.points;
   assert.ok(points.length > 4);
   for (const point of points) {
     assert.ok(Math.abs(point.pitchFromAnchorSemitone) <= 0.3 + 1e-9);
@@ -198,7 +212,7 @@ test("vibrato on a too-short note is rejected", async () => {
 });
 
 test("seconds-based durations convert through the tempo map", async () => {
-  const { snapshots, planner } = createFixture();
+  const { snapshots, planner, sealedRequest } = createFixture();
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
@@ -207,13 +221,13 @@ test("seconds-based durations convert through the tempo map", async () => {
     ],
   });
   // 120bpm 下 0.25s = 0.5 quarter = Q/2。
-  const op = result.apply.arguments.operations[0].control;
+  const op = sealedRequest(result).operations[0].control;
   const span = Math.max(...op.points.map((p) => p.timeFromAnchorBlick));
   assert.ok(span > 0 && span <= Q / 2 + 1);
 });
 
 test("depth clamping to constraints is reported as a warning", async () => {
-  const { snapshots, planner } = createFixture();
+  const { snapshots, planner, sealedRequest } = createFixture();
   const snapshot = await snapshotNotes(snapshots);
   const result = await planner.plan({
     contextId: snapshot.contextId,
@@ -221,7 +235,7 @@ test("depth clamping to constraints is reported as a warning", async () => {
     gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 2 }],
   });
   assert.ok(result.warnings.some((w) => w.code === "CONSTRAINT_CLAMPED"));
-  const points = result.apply.arguments.operations[0].control.points;
+  const points = sealedRequest(result).operations[0].control.points;
   for (const point of points) assert.ok(Math.abs(point.pitchFromAnchorSemitone) <= 0.5 + 1e-9);
 });
 
@@ -355,7 +369,6 @@ test("planRef path: planner returns short planRef and executor resolves it", asy
   const plan = await planner.plan({
     contextId: snapshot.contextId,
     gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
-    usePlanRef: true,
   });
   assert.equal(plan.status, "planned");
   assert.ok(plan.apply.arguments.planRef, "apply.arguments should carry planRef");
