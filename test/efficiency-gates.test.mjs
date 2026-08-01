@@ -217,6 +217,24 @@ test("no request in the served surface carries a context-prefixed note identity"
   assert.deepEqual(offenders, [], `string note identities remain in: ${offenders.join(", ")}`);
 });
 
+test("no served description promises a field the surface no longer returns", () => {
+  // §14 只数了请求侧的长身份，但描述同样是契约的一部分——本轮没有 outputSchema，
+  // 因此工具描述是模型唯一能读到的输出形状说明。三份分析器描述曾在 input schema
+  // 清空 noteId 之后仍写着"结果含 noteIds"，那会直接把使用者引向一个不存在的字段。
+  const offenders = [];
+  for (const tool of TOOLS) {
+    const description = tool.description ?? "";
+    for (const banned of ["noteId", "noteIds", "startNoteId", "fromNoteId", "toNoteId"]) {
+      if (description.includes(banned)) offenders.push(`${tool.name}: ${banned}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `descriptions still promise removed identity fields: ${offenders.join(", ")}`
+  );
+});
+
 test("tools/list and every describe response stay inside their byte budgets", () => {
   // §14：默认 tools/list < 12 KiB；单次 sv_describe < 16 KiB。
   const listBytes = utf8(TOOLS.map((tool) => ({
