@@ -639,7 +639,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
   const target = {
     contextId: loaded.stored.contextId,
-    occurrenceId: loaded.occurrence.occurrenceId,
+    occurrence: loaded.scope.occurrenceOrdinal,
     ...(loaded.occurrence.targetGroupUuid ? { expectedGroupUuid: loaded.occurrence.targetGroupUuid } : {}),
     // 曲线是 group-local 坐标；整个 reference 被 setTimeOffset/setPitchOffset 移动时快照偏移即
     // 过期——交给事务核锁住，偏移变化即 STALE_CONTEXT。
@@ -673,7 +673,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   const applyArguments = hasOperations
     ? {
         contextId: loaded.stored.contextId,
-        occurrenceId: loaded.occurrence.occurrenceId,
+        occurrence: loaded.scope.occurrenceOrdinal,
         target: {
           expectedGroupUuid: target.expectedGroupUuid,
           expectedTimeOffsetBlick: target.expectedTimeOffsetBlick,
@@ -691,7 +691,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
     ? [{ tool: "sv_patch_pitch_controls", arguments: applyArguments }]
     : [];
   const planId = `plan_${canonicalHashHex({
-    occurrenceId: loaded.occurrence.occurrenceId,
+    occurrence: loaded.scope.occurrenceOrdinal,
     targetGroupUuid: loaded.occurrence.targetGroupUuid,
     specialEventPolicy: input.specialEventPolicy,
     requestedGestures: input.gestures,
@@ -747,7 +747,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
           targetTool: "sv_patch_pitch_controls",
           mutationRequest: applyRequests[0].arguments,
           targetGroupUuid: loaded.occurrence.targetGroupUuid,
-          occurrenceId: loaded.occurrence.occurrenceId,
+          occurrence: loaded.scope.occurrenceOrdinal,
           expectedTimeOffsetBlick: loaded.timeOffsetBlick,
           fingerprints: { expectedNotes: applyRequests[0].arguments.target?.expectedNotes ?? [] },
           contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
@@ -791,7 +791,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
     planId,
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.scope.occurrenceOrdinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -833,7 +833,7 @@ function normalizePlanRequest(request) {
     request,
     [
       "contextId",
-      "occurrenceId",
+      "occurrence",
       "gestures",
       "specialEventPolicy",
       "constraints",
@@ -846,8 +846,11 @@ function normalizePlanRequest(request) {
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
-  if (request.occurrenceId !== undefined && (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+  if (
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer");
   }
   if (!Array.isArray(request.gestures) || request.gestures.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "gestures must be a non-empty array");
@@ -871,7 +874,6 @@ function normalizePlanRequest(request) {
   return {
     contextId: request.contextId,
     occurrence: request.occurrence,
-    occurrenceId: request.occurrenceId,
     gestures,
     specialEventPolicy,
     constraints: normalizeConstraints(request.constraints),

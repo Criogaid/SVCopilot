@@ -56,7 +56,7 @@ const CALLS = [
     "generate_harmony",
     {
       contextId: MISSING_CONTEXT,
-      targetOccurrenceId: `${MISSING_CONTEXT}:t:1:r:0`,
+      targetOccurrence: 1,
       harmony: { interval: "third_above" },
     },
   ],

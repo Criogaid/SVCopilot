@@ -1,6 +1,7 @@
 import { getStoredComputedPitch } from "./musical-range.js";
 import { codedError, isRecord } from "./pitch-control.js";
 import { ServiceTiming } from "./service-timing.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 // sv_bake_computed_pitch —— 把宿主 computed pitch 显式固化为一条 SVCopilot 自有的
 // PitchControlCurve（主计划 P1-C Phase 4）。
@@ -52,7 +53,7 @@ export class BakeComputedPitchService {
     // 写面：把整个 operation 集合一次提交给事务核（一个 Undo、读回、补偿），不用循环伪装。
     const patchResult = await this.patchService.patch({
       contextId: input.contextId,
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.occurrenceOrdinal,
       target: {
         ...(loaded.occurrence.targetGroupUuid ? { expectedGroupUuid: loaded.occurrence.targetGroupUuid } : {}),
         ...(loaded.groupFingerprint ? { expectedPitchControlFingerprint: loaded.groupFingerprint } : {}),
@@ -75,53 +76,38 @@ export class BakeComputedPitchService {
     if (input.sampling) {
       return this.session.withExclusive(async (host) => {
         const stored = this.snapshotService.getContext(input.contextId, host.epoch());
-        const occurrence = resolveOccurrence(stored, input.occurrenceId);
+        const { occurrence, ordinal } = resolveOccurrence(stored, input.occurrence);
         const series = await readLiveComputedPitch(host, occurrence, input.sampling);
-        return { stored, occurrence, series, samplingSource: "live", groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null };
+        return { stored, occurrence, occurrenceOrdinal: ordinal, series, samplingSource: "live", groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null };
       });
     }
     // 继承路径不需要持锁：stored context 已有 computed pitch 与 occurrence 指纹。
     const epoch = this.session.getStatus?.().epoch ?? 0;
     const stored = this.snapshotService.getContext(input.contextId, epoch);
-    const occurrence = resolveOccurrence(stored, input.occurrenceId);
-    const series = getStoredComputedPitch(stored, occurrence.occurrenceId);
+    const { occurrence, ordinal } = resolveOccurrence(stored, input.occurrence);
+    const series = getStoredComputedPitch(stored, ordinal);
     if (!series) {
       throw codedError(
         "COMPUTED_PITCH_NOT_CAPTURED",
         'the occurrence has no stored computed pitch; re-run sv_snapshot_range with include ["computedPitch"], or pass explicit sampling'
       );
     }
-    return { stored, occurrence, series, samplingSource: "snapshot", groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null };
+    return { stored, occurrence, occurrenceOrdinal: ordinal, series, samplingSource: "snapshot", groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null };
   }
 }
 
-function resolveOccurrence(stored, occurrenceId) {
-  const occurrences = Array.isArray(stored?.context?.occurrences) ? stored.context.occurrences : [];
-  let occurrence = null;
-  if (occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
-    }
-  } else {
-    const vocal = occurrences.filter((item) => typeof item.targetGroupUuid === "string" && item.targetGroupUuid);
-    if (vocal.length === 1) occurrence = vocal[0];
-    else if (vocal.length === 0) {
-      throw codedError("INVALID_CONTEXT", "range context contains no vocal occurrence to bake");
-    } else {
-      const error = codedError(
-        "AMBIGUOUS_CONTEXT",
-        "range context has multiple vocal occurrences; provide occurrenceId"
-      );
-      error.candidateOccurrences = vocal.map((item) => item.occurrenceId);
-      error.details = { candidateOccurrences: error.candidateOccurrences };
-      throw error;
-    }
-  }
-  if (typeof occurrence.targetGroupUuid !== "string" || !occurrence.targetGroupUuid) {
-    throw codedError("INVALID_TARGET", "instrumental occurrences cannot be baked");
-  }
-  return occurrence;
+function resolveOccurrence(stored, requestedOrdinal) {
+  // 与其它 range-scoped operation 共用同一个选择器：显式 ordinal 索引**完整**数组，
+  // 省略时唯一 vocal occurrence 自动选中，其余情况给出 ordinal 候选。手写第二份
+  // 选择逻辑会让错误码与候选形状随时间漂移——那正是迁移前的状态。
+  return selectOccurrenceByOrdinal(stored?.context?.occurrences, requestedOrdinal, {
+    eligible: (item) => typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
+    noneCode: "INVALID_CONTEXT",
+    noneMessage: "range context contains no vocal occurrence to bake",
+    ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
+    ineligibleCode: "INVALID_TARGET",
+    ineligibleMessage: "instrumental occurrences cannot be baked",
+  });
 }
 
 async function readLiveComputedPitch(host, occurrence, sampling) {
@@ -248,13 +234,13 @@ function resolveOwnedTargets(loaded, fromBlick, toBlickFrames) {
   const toBlick = toBlickFrames[toBlickFrames.length - 1].localBlick;
   const stored = loaded.stored;
   const byOccurrence = stored?.context?.pitchControlsByOccurrence;
-  if (!byOccurrence || !Object.hasOwn(byOccurrence, loaded.occurrence.occurrenceId)) {
+  if (!byOccurrence || !Object.hasOwn(byOccurrence, loaded.occurrenceOrdinal)) {
     throw codedError(
       "PITCH_CONTROLS_NOT_CAPTURED",
       'replace_owned needs the snapshot to capture pitch controls; re-run sv_snapshot_range with include ["pitchControls","computedPitch"]'
     );
   }
-  const list = byOccurrence[loaded.occurrence.occurrenceId] ?? [];
+  const list = byOccurrence[loaded.occurrenceOrdinal] ?? [];
   return list
     .filter((control) => control.ownership?.owner === "svcopilot")
     .filter((control) => {
@@ -355,7 +341,7 @@ function formatBakeResponse(loaded, input, plan, patchResult, timings) {
   const base = {
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.occurrenceOrdinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -433,7 +419,7 @@ function normalizeBakeRequest(request) {
     request,
     [
       "contextId",
-      "occurrenceId",
+      "occurrence",
       "sampling",
       "strategy",
       "explicitTargets",
@@ -450,8 +436,14 @@ function normalizeBakeRequest(request) {
   if (typeof request.contextId !== "string" || !request.contextId) {
     throw codedError("INVALID_ARGUMENTS", "contextId is required; take it from sv_snapshot_range");
   }
-  if (request.occurrenceId !== undefined && (typeof request.occurrenceId !== "string" || !request.occurrenceId)) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+  if (
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
+  ) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence must be a non-negative occurrence ordinal when provided"
+    );
   }
   const strategy = request.strategy ?? "preserve_existing";
   if (!BAKE_STRATEGIES.includes(strategy)) {
@@ -502,7 +494,7 @@ function normalizeBakeRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     sampling,
     strategy,
     explicitTargets,

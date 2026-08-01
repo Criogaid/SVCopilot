@@ -14,6 +14,7 @@ import {
 } from "./pitch-control.js";
 import { waitForProcessing } from "./processing.js";
 import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { createHostScope } from "./snapshot.js";
 
@@ -321,14 +322,21 @@ async function resolvePitchTarget(scope, stored, input) {
   if (stored?.context?.kind !== "range") {
     throw codedError("INVALID_CONTEXT", "contextId does not identify a range snapshot");
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const occurrence = occurrences.find((item) => item.occurrenceId === input.occurrenceId);
-  if (!occurrence) {
-    throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
-  }
-  if (typeof occurrence.targetGroupUuid !== "string" || !occurrence.targetGroupUuid) {
-    throw codedError("INVALID_TARGET", "instrumental occurrences have no pitch controls to edit");
-  }
+  // occurrence 必填（见 normalizeRequest）：PitchControl 编辑没有"唯一候选自动选择"
+  // 语义，因此这里把 ordinal 直接交给共享选择器，越界与 instrumental 各自成码。
+  const { occurrence } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    input.occurrence,
+    {
+      eligible: (item) =>
+        typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
+      noneCode: "INVALID_CONTEXT",
+      noneMessage: "range context contains no editable vocal occurrence",
+      ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
+      ineligibleCode: "INVALID_TARGET",
+      ineligibleMessage: "instrumental occurrences have no pitch controls to edit",
+    }
+  );
 
   const roots = await scope.roots();
   const track = await scope.call(roots.project, "getTrack", [occurrence.trackIndex + 1], {
@@ -989,19 +997,21 @@ function formatTarget(target, input) {
   if (!target) {
     return {
       contextId: input.contextId,
-      occurrenceId: input.occurrenceId,
+      occurrence: input.occurrence,
       ...(input.target.expectedGroupUuid ? { expectedGroupUuid: input.target.expectedGroupUuid } : {}),
     };
   }
   return {
     contextId: input.contextId,
-    occurrenceId: input.occurrenceId,
+    occurrence: input.occurrence,
     trackIndex: target.occurrence.trackIndex,
     groupIndex: target.occurrence.groupIndex,
     targetGroupUuid: target.groupUuid,
+    // shared-target 清单描述"还有哪些 occurrence 指向同一个 NoteGroup"，一律是
+    // ordinal——与调用方传入的 occurrence 同一种身份，可以直接回传。
     affectedOccurrences: target.sharedTargetOccurrences.length > 0
       ? target.sharedTargetOccurrences
-      : [input.occurrenceId],
+      : [target.occurrence.occurrence],
     ...(target.projectTargetOccurrences?.length > 1
       ? { projectTargetOccurrences: target.projectTargetOccurrences }
       : {}),
@@ -1135,8 +1145,11 @@ function normalizeRequest(request) {
   if (typeof request.contextId !== "string" || !request.contextId) {
     throw codedError("INVALID_ARGUMENTS", "contextId is required; take it from sv_snapshot_range");
   }
-  if (typeof request.occurrenceId !== "string" || !request.occurrenceId) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId is required; take it from sv_snapshot_range");
+  if (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence is required: the 0-based occurrence ordinal from sv_snapshot_range"
+    );
   }
   if (!Array.isArray(request.operations) || request.operations.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "operations must be a non-empty array");
@@ -1160,7 +1173,7 @@ function normalizeRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     target: normalizeTarget(request.target),
     operations: request.operations.map((operation, index) => normalizeOperation(operation, index)),
     atomic: true,

@@ -61,7 +61,7 @@ export class NoteStructureService {
         resolved = await resolveContextTarget(host, stored, {
           verify: true,
           acceptRange: true,
-          occurrenceId: input.occurrenceId,
+          occurrence: input.occurrence,
           noteIndicesInGroup: operationNoteIndexList(input),
         });
         const scope = resolved.scope;
@@ -671,10 +671,13 @@ function normalizeRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence must be a non-negative occurrence ordinal when provided"
+    );
   }
   if (
     request.allowSharedTargetMutation !== undefined &&
@@ -685,7 +688,7 @@ function normalizeRequest(request) {
   return {
     contextId: request.contextId,
     operations,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
     dryRun: request.dryRun === true,
     atomic: request.atomic !== false,

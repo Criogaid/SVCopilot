@@ -398,12 +398,9 @@ function createRangeFixture({
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${entry.contextId}:t:0:r:0`;
-  const secondOccurrenceId = `${entry.contextId}:t:1:r:0`;
   const noteFingerprints = model.groupNotes.map((id, index) => {
     const state = model.states.get(id);
     return {
-      noteId: `${occurrenceId}:n:${index}`,
       indexInGroup: index,
       onsetBlick: state.onset,
       durationBlick: state.duration,
@@ -415,17 +412,17 @@ function createRangeFixture({
     };
   });
   entry.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "group-1",
     timeOffsetBlick: 0,
-    sharedTargetOccurrences: shared ? [occurrenceId, secondOccurrenceId] : [occurrenceId],
+    sharedTargetOccurrences: shared ? [0, 1] : [0],
     noteFingerprints,
   });
   if (extraOccurrence) {
     entry.context.occurrences.push({
-      occurrenceId: secondOccurrenceId,
+      occurrence: 1,
       trackIndex: 1,
       groupIndex: 0,
       targetGroupUuid: "group-1",
@@ -434,13 +431,13 @@ function createRangeFixture({
       noteFingerprints: [],
     });
   }
-  return { model, snapshots, service, entry, contextId: entry.contextId, occurrenceId };
+  return { model, snapshots, service, entry, contextId: entry.contextId };
 }
 
 test("sv_restructure_notes expands a planRef through its capsule without touching the store", async () => {
   const sessionId = "sess_structure_plan";
   const artifactStore = new ArtifactStore({ now: () => 1000 });
-  const { model, snapshots, service, entry, contextId, occurrenceId } = createRangeFixture({
+  const { model, snapshots, service, entry, contextId } = createRangeFixture({
     artifactStore,
     sessionId,
   });
@@ -449,7 +446,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
     targetTool: "sv_restructure_notes",
     mutationRequest: {
       contextId,
-      occurrenceId,
+      occurrence: 0,
       operations: [
         {
           op: "insert",
@@ -460,7 +457,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
       atomic: true,
     },
     targetGroupUuid: occurrence.targetGroupUuid,
-    occurrenceId,
+    occurrence: 0,
     contextSnapshot: buildPlanContextSnapshot(entry, occurrence),
   });
   const reference = planReference(
@@ -487,7 +484,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
 });
 
 test("sv_restructure_notes accepts a range context and resolves notes by group index", async () => {
-  const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();
+  const { model, snapshots, service, contextId } = createRangeFixture();
   const result = await service.restructureNotes({
     contextId,
     operations: [
@@ -506,8 +503,8 @@ test("sv_restructure_notes accepts a range context and resolves notes by group i
   assert.equal(snapshots.store.get(contextId), null);
 });
 
-test("sv_restructure_notes insert-only on a multi-occurrence range needs occurrenceId", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture({
+test("sv_restructure_notes insert-only on a multi-occurrence range needs an occurrence ordinal", async () => {
+  const { model, service, contextId } = createRangeFixture({
     extraOccurrence: true,
   });
   const ambiguous = await service.restructureNotes({
@@ -517,15 +514,12 @@ test("sv_restructure_notes insert-only on a multi-occurrence range needs occurre
   });
   assert.equal(ambiguous.ok, false);
   assert.equal(ambiguous.error.code, "AMBIGUOUS_CONTEXT");
-  assert.deepEqual(ambiguous.error.details.candidateOccurrences, [
-    occurrenceId,
-    `${contextId}:t:1:r:0`,
-  ]);
+  assert.deepEqual(ambiguous.error.details.candidates, [0, 1]);
   assert.equal(model.groupNotes.length, 3);
 
   const explicit = await service.restructureNotes({
     contextId,
-    occurrenceId,
+    occurrence: 0,
     operations: [{ op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67, lyrics: "go" } }],
     allowSharedTargetMutation: true,
     waitFor: "none",
@@ -535,7 +529,7 @@ test("sv_restructure_notes insert-only on a multi-occurrence range needs occurre
 });
 
 test("sv_restructure_notes range context enforces shared-target confirmation", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
+  const { model, service, contextId } = createRangeFixture({ shared: true });
   const refused = await service.restructureNotes({
     contextId,
     operations: [{ op: "delete", noteIndex: 0 }],

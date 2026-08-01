@@ -105,7 +105,7 @@ test("a deduped schema accepts and rejects exactly what the expanded one does", 
   const deduped = compile(curves.inputSchema);
   const plain = compile(expand(body, $defs));
 
-  const target = { contextId: "c_x", occurrenceId: "c_x:t:0:r:0" };
+  const target = { contextId: "c_x", occurrence: 0 };
   const payloads = [
     // 合法：BLICK 范围 + 显式点。
     {

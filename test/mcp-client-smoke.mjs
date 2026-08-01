@@ -275,7 +275,8 @@ try {
   const auditionTool = served.get("sv_start_audition");
   const restoreAuditionTool = served.get("sv_restore_audition");
   assert.equal(waitTool.inputSchema.properties.requireNonEmpty.default, false);
-  assert.equal(waitTool.inputSchema.properties.occurrenceId.type, "string");
+  assert.equal(waitTool.inputSchema.properties.occurrence.type, "integer");
+  assert.equal(waitTool.inputSchema.properties.occurrenceId, undefined);
   assert.equal(waitTool.inputSchema.additionalProperties, false);
   assert.equal(waitTool.inputSchema.properties.expectedNotes.maximum, 100_000);
   assert.equal(waitTool.inputSchema.properties.frames.maximum, 2_000);
@@ -290,7 +291,8 @@ try {
   assert.ok(curveTarget.properties.trackIndex);
   assert.ok(curveTarget.properties.expectedGroupUuid);
   assert.ok(curveTarget.properties.contextId);
-  assert.ok(curveTarget.properties.occurrenceId);
+  assert.ok(curveTarget.properties.occurrence);
+  assert.equal(curveTarget.properties.occurrenceId, undefined);
   assert.ok(curveTarget.properties.allowSharedTargetMutation);
   assert.ok(phraseTool);
   assert.ok(phraseTool.inputSchema.properties.notePatches);
@@ -331,7 +333,7 @@ try {
     await facadeCall({
       name: "sv_edit_phrase",
       arguments: {
-        target: { contextId: "ctx_schema", occurrenceId: "occ_schema" },
+        target: { contextId: "ctx_schema", occurrence: 0 },
         structureOperations: [{ op: "splitt" }],
       },
     })
@@ -708,7 +710,7 @@ try {
       name: "sv_generate_harmony",
       arguments: {
         contextId: "ctx_smoke_missing",
-        targetOccurrenceId: "ctx_smoke_missing:t:1:r:0",
+        targetOccurrence: 1,
         harmony: { interval: "third_below" },
       },
     })
@@ -719,7 +721,7 @@ try {
       name: "sv_generate_harmony",
       arguments: {
         contextId: "ctx_smoke",
-        targetOccurrenceId: "ctx_smoke:t:1:r:0",
+        targetOccurrence: 1,
         harmony: { interval: "fifth_below" },
       },
     })
@@ -1090,7 +1092,6 @@ try {
   assert.equal(rangeSnapshot.data.meterMap[0].numerator, 4);
   assert.equal(rangeSnapshot.data.tracks[0].mixer.muted, false);
   assert.ok(rangeSnapshot.warnings.some((warning) => warning.code === "UNSUPPORTED_INCLUDE"));
-  assert.match(rangeSnapshot.data.tracks[0].groups[0].occurrenceId, /^c_/);
   // §3.1/§8.1 的稳定身份：ordinal 索引完整 occurrences 数组；groupNoteCount 是宿主里
   // 该 NoteGroup 的真实总数，capturedNotes 是本次 range 捕获到的数量。两者分开，
   // 因为「index 越界」与「index 未捕获」需要不同的补救动作。
@@ -1139,7 +1140,7 @@ try {
       name: "sv_wait_for_processing",
       arguments: {
         contextId: rangeSnapshot.contextId,
-        occurrenceId: rangeSnapshot.data.tracks[0].groups[0].occurrenceId,
+        occurrence: rangeSnapshot.data.tracks[0].groups[0].occurrence,
         kind: "phonemes",
         timeoutMs: 0,
       },
@@ -1149,19 +1150,19 @@ try {
   assert.equal(rangeProcessing.data.state, "ready");
   assert.equal(rangeProcessing.data.evidence.expectedNotes, 2);
   assert.equal(
-    rangeProcessing.target.occurrenceId,
-    rangeSnapshot.data.tracks[0].groups[0].occurrenceId
+    rangeProcessing.target.occurrence,
+    rangeSnapshot.data.tracks[0].groups[0].occurrence
   );
 
   // range context 必须穿过 MCP schema 和 dispatch，不能只在 service 单测中成立。
-  const rangeOccurrenceId = rangeSnapshot.data.tracks[0].groups[0].occurrenceId;
+  const rangeOccurrence = rangeSnapshot.data.tracks[0].groups[0].occurrence;
   const rangeNote = rangeSnapshot.data.notes[0];
   const rangePatchPlan = parseToolResult(
     await facadeCall({
       name: "sv_patch_notes",
       arguments: {
         contextId: rangeSnapshot.contextId,
-        occurrenceId: rangeOccurrenceId,
+        occurrence: rangeOccurrence,
         allowSharedTargetMutation: true,
         patches: [
           {
@@ -1185,7 +1186,7 @@ try {
       name: "sv_restructure_notes",
       arguments: {
         contextId: rangeSnapshot.contextId,
-        occurrenceId: rangeOccurrenceId,
+        occurrence: rangeOccurrence,
         allowSharedTargetMutation: true,
         operations: [
           {
@@ -1225,7 +1226,7 @@ try {
       arguments: {
         target: {
           contextId: rangeSnapshot.contextId,
-          occurrenceId: rangeSnapshot.data.tracks[0].groups[0].occurrenceId,
+          occurrence: rangeSnapshot.data.tracks[0].groups[0].occurrence,
         },
         curves: [
           {

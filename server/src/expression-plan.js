@@ -1141,7 +1141,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
   const target = {
     contextId: loaded.stored.contextId,
-    occurrenceId: loaded.occurrence.occurrenceId,
+    occurrence: loaded.scope.occurrenceOrdinal,
     ...(loaded.occurrence.targetGroupUuid
       ? { expectedGroupUuid: loaded.occurrence.targetGroupUuid }
       : {}),
@@ -1194,7 +1194,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     points: operation.points.map((point) => ({ blick: point.blick, value: point.value })),
   });
   const planId = `plan_${canonicalHashHex({
-    occurrenceId: loaded.occurrence.occurrenceId,
+    occurrence: loaded.scope.occurrenceOrdinal,
     targetGroupUuid: loaded.occurrence.targetGroupUuid,
     curves: compiled.operations.map(curveOf),
   }).slice(0, 16)}`;
@@ -1278,7 +1278,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
           targetTool: "sv_patch_parameter_curves",
           mutationRequest: request.arguments,
           targetGroupUuid: loaded.occurrence.targetGroupUuid,
-          occurrenceId: loaded.occurrence.occurrenceId,
+          occurrence: loaded.scope.occurrenceOrdinal,
           expectedTimeOffsetBlick: loaded.timeOffsetBlick,
           fingerprints: { expectedNotes: request.arguments.target?.expectedNotes ?? [] },
           contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
@@ -1336,7 +1336,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     planId,
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.scope.occurrenceOrdinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,

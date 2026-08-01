@@ -5,6 +5,7 @@ import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js
 import { MAX_OPERATIONS } from "./note-structure.js";
 import { analyzeKey } from "./phrase-analysis.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { isBreathEventLyrics } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
@@ -119,8 +120,6 @@ export class HarmonyPlanService {
 
 // ---------- 上下文解析 ----------
 
-const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
-
 function resolveHarmonySource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
   if (!stored) {
@@ -133,48 +132,58 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
     );
   }
   const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const target = resolveOccurrenceSelector(
+  const targetSelection = resolveOccurrenceSelector(
     occurrences,
-    input.targetOccurrenceId,
-    "targetOccurrenceId",
+    input.targetOccurrence,
+    "targetOccurrence",
     warnings,
-    continuationIdentities
+    continuationIdentities,
+    { requireNotes: false, contextId: input.contextId }
   );
+  const target = targetSelection.occurrence;
+  const targetOrdinal = targetSelection.ordinal;
   let source;
-  if (input.sourceOccurrenceId !== undefined) {
-    source = resolveOccurrenceSelector(
+  let sourceOrdinal;
+  if (input.sourceOccurrence !== undefined) {
+    const sourceSelection = resolveOccurrenceSelector(
       occurrences,
-      input.sourceOccurrenceId,
-      "sourceOccurrenceId",
+      input.sourceOccurrence,
+      "sourceOccurrence",
       warnings,
-      continuationIdentities
+      continuationIdentities,
+      { requireNotes: true, contextId: input.contextId }
     );
+    source = sourceSelection.occurrence;
+    sourceOrdinal = sourceSelection.ordinal;
   } else {
     // 自动选择：唯一一个"有音符且不是目标"的 occurrence。
-    const candidates = occurrences.filter(
-      (item) =>
-        item.occurrenceId !== target.occurrenceId &&
+    const candidates = occurrences.flatMap((item, ordinal) =>
+      item !== target &&
+        typeof item.targetGroupUuid === "string" &&
         Array.isArray(item.noteFingerprints) &&
         item.noteFingerprints.length > 0
+        ? [{ occurrence: item, ordinal }]
+        : []
     );
     if (candidates.length === 1) {
-      source = candidates[0];
+      source = candidates[0].occurrence;
+      sourceOrdinal = candidates[0].ordinal;
     } else if (candidates.length === 0) {
       throw codedError(
         "NOTES_NOT_CAPTURED",
-        "no melodic source occurrence with notes found besides the target; provide sourceOccurrenceId"
+        "no melodic source occurrence with notes found besides the target; pass sourceOccurrence"
       );
     } else {
       const error = codedError(
         "AMBIGUOUS_CONTEXT",
-        "range context has multiple candidate source occurrences; provide sourceOccurrenceId"
+        "range context has multiple candidate source occurrences; pass sourceOccurrence"
       );
-      error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-      error.details = { candidateOccurrences: error.candidateOccurrences };
+      error.details = { candidates: candidates.map((item) => item.ordinal) };
+      error.candidateOrdinals = error.details.candidates;
       throw error;
     }
   }
-  if (source.occurrenceId === target.occurrenceId) {
+  if (sourceOrdinal === targetOrdinal) {
     throw codedError(
       "INVALID_ARGUMENTS",
       "source and target must be different occurrences; harmony inserted into the melody group would collide with it"
@@ -241,7 +250,9 @@ function resolveHarmonySource(store, input, warnings, continuationIdentities) {
   return {
     stored,
     source,
+    sourceOrdinal,
     target,
+    targetOrdinal,
     melodicNotes,
     skippedBreathCount: selected.length - melodicNotes.length,
     targetNotes,
@@ -263,40 +274,55 @@ function occurrencePitchOffset(occurrence, label) {
   return pitchOffset;
 }
 
-// selector 解析 + continuation 重锚定（与 quantize 同模式：位置后缀寻找候选，
-// 短期身份记录校验 target UUID；结构会被插入改变，不做结构摘要）。
-function resolveOccurrenceSelector(occurrences, selectorId, label, warnings, continuationIdentities) {
-  let occurrence = occurrences.find((item) => item.occurrenceId === selectorId) ?? null;
-  if (!occurrence) {
-    const identity = continuationIdentities.get(selectorId);
-    const position = identity ? OCCURRENCE_POSITION_PATTERN.exec(selectorId) : null;
-    if (position) {
-      const matches = occurrences.filter((item) => {
-        const own = OCCURRENCE_POSITION_PATTERN.exec(item.occurrenceId);
-        return own !== null && own[1] === position[1] && own[2] === position[2];
-      });
-      if (matches.length === 1) {
-        if (matches[0].targetGroupUuid !== identity.targetGroupUuid) {
-          const error = codedError(
-            "STALE_CONTEXT",
-            `${label} continuation selector target changed: expected group UUID ${identity.targetGroupUuid}, observed ${matches[0].targetGroupUuid}; re-snapshot and re-plan`
-          );
-          error.expectedGroupUuid = identity.targetGroupUuid;
-          error.observedGroupUuid = matches[0].targetGroupUuid;
-          throw error;
-        }
-        occurrence = matches[0];
-        warnings.push({
-          code: "STALE_SELECTOR_REANCHORED",
-          message: `${label} references a consumed context; verified target identity, then re-anchored by position (track ${position[1]}, reference ${position[2]}) onto ${occurrence.occurrenceId}.`,
-        });
-      }
+// ordinal 选择先遵守完整 occurrences 数组的稳定编号，再用短期 UUID 记录保护续跑。
+function resolveOccurrenceSelector(
+  occurrences,
+  selector,
+  label,
+  warnings,
+  continuationIdentities,
+  { requireNotes, contextId }
+) {
+  const selection = selectOccurrenceByOrdinal(occurrences, selector, {
+    eligible: (occurrence) =>
+      typeof occurrence?.targetGroupUuid === "string" &&
+      (!requireNotes ||
+        (Array.isArray(occurrence.noteFingerprints) && occurrence.noteFingerprints.length > 0)),
+    noneCode: requireNotes ? "NOTES_NOT_CAPTURED" : "OCCURRENCE_NOT_CAPTURED",
+    noneMessage: requireNotes
+      ? `${label} requires an occurrence with captured notes`
+      : `${label} requires a captured vocal occurrence`,
+    ambiguousMessage: `context has multiple candidates for ${label}; pass its 0-based ordinal`,
+    ineligibleCode: requireNotes ? "NOTES_NOT_CAPTURED" : "OCCURRENCE_NOT_CAPTURED",
+    ineligibleMessage: requireNotes
+      ? `${label} does not contain captured notes`
+      : `${label} is not a captured vocal occurrence`,
+  });
+  const key = continuationIdentityKey(label, selection.occurrence);
+  const identity = key ? continuationIdentities.get(key) : null;
+  if (identity && identity.contextId !== contextId) {
+    if (selection.occurrence.targetGroupUuid !== identity.targetGroupUuid) {
+      const error = codedError(
+        "STALE_CONTEXT",
+        `${label} continuation target changed: expected group UUID ${identity.targetGroupUuid}, observed ${selection.occurrence.targetGroupUuid}; re-snapshot and re-plan`
+      );
+      error.expectedGroupUuid = identity.targetGroupUuid;
+      error.observedGroupUuid = selection.occurrence.targetGroupUuid;
+      throw error;
     }
+    warnings.push({
+      code: "CONTINUATION_IDENTITY_VERIFIED",
+      message: `${label} uses a fresh context; verified track/reference position and target group UUID before continuing.`,
+    });
   }
-  if (!occurrence) {
-    throw codedError("UNKNOWN_OCCURRENCE", `${label} is not part of the supplied contextId`);
+  return selection;
+}
+
+function continuationIdentityKey(label, occurrence) {
+  if (!Number.isSafeInteger(occurrence?.trackIndex) || !Number.isSafeInteger(occurrence?.groupIndex)) {
+    return null;
   }
-  return occurrence;
+  return `${label}:t:${occurrence.trackIndex}:r:${occurrence.groupIndex}`;
 }
 
 function pruneContinuationIdentities(identities, now) {
@@ -305,19 +331,17 @@ function pruneContinuationIdentities(identities, now) {
   }
 }
 
-function rememberContinuationIdentities(identities, loaded, input, now) {
+function rememberContinuationIdentities(identities, loaded, _input, now) {
   const expiresAt = loaded.stored.expiresAt;
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return;
   const entries = [
-    [input.targetOccurrenceId, loaded.target.targetGroupUuid],
-    ...(input.sourceOccurrenceId !== undefined
-      ? [[input.sourceOccurrenceId, loaded.source.targetGroupUuid]]
-      : []),
+    [continuationIdentityKey("targetOccurrence", loaded.target), loaded.target.targetGroupUuid],
+    [continuationIdentityKey("sourceOccurrence", loaded.source), loaded.source.targetGroupUuid],
   ];
-  for (const [selector, uuid] of entries) {
-    if (typeof selector !== "string" || typeof uuid !== "string") continue;
-    identities.delete(selector);
-    identities.set(selector, { targetGroupUuid: uuid, expiresAt });
+  for (const [key, uuid] of entries) {
+    if (typeof key !== "string" || typeof uuid !== "string") continue;
+    identities.delete(key);
+    identities.set(key, { contextId: loaded.stored.contextId, targetGroupUuid: uuid, expiresAt });
   }
   while (identities.size > MAX_CONTINUATION_IDENTITIES) {
     identities.delete(identities.keys().next().value);
@@ -558,7 +582,7 @@ function buildHarmonyResponse(
           tool: "sv_restructure_notes",
           arguments: {
             contextId: loaded.stored.contextId,
-            occurrenceId: loaded.target.occurrenceId,
+            occurrence: loaded.targetOrdinal,
             operations: submittable,
             dryRun: true,
             atomic: true,
@@ -574,7 +598,7 @@ function buildHarmonyResponse(
           workflow: [
             "Submit apply.arguments with action dry_run, then commit.",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
-            "Re-run sv_generate_harmony with the same harmony/register/lyricsMode options against the fresh contextId: already-inserted harmony notes match exactly and are skipped as already_applied, so the next round plans the remaining inserts. Explicit occurrence selectors are re-anchored only while their short-lived continuation identities prove the same target group UUIDs (warned as STALE_SELECTOR_REANCHORED).",
+            "Re-run sv_generate_harmony with the same harmony/register/lyricsMode options and fresh occurrence ordinals: already-inserted harmony notes match exactly and are skipped as already_applied, so the next round plans the remaining inserts. Short-lived continuation identities verify that each track/reference position still targets the same group UUID.",
             "Repeat until the response carries no continuation (or reports status no_change).",
           ],
         }
@@ -588,8 +612,8 @@ function buildHarmonyResponse(
   const sharedTargetOccurrences = loaded.target.sharedTargetOccurrences ?? [];
   const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
   const planId = `hrm_${canonicalHashHex({
-    sourceOccurrenceId: loaded.source.occurrenceId,
-    targetOccurrenceId: loaded.target.occurrenceId,
+    sourceOccurrence: loaded.sourceOrdinal,
+    targetOccurrence: loaded.targetOrdinal,
     harmony: input.harmony,
     ...(input.register !== undefined ? { register: input.register } : {}),
     lyricsMode: input.lyricsMode,
@@ -645,7 +669,7 @@ function buildHarmonyResponse(
         targetTool: "sv_restructure_notes",
         mutationRequest: restructureRequest.arguments,
         targetGroupUuid: loaded.target.targetGroupUuid,
-        occurrenceId: loaded.target.occurrenceId,
+        occurrence: loaded.targetOrdinal,
         contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.target, {
           // harmony 往空目标里插音符，因此不引用目标组的任何既有音符。
           noteIndexes: [],
@@ -684,14 +708,14 @@ function buildHarmonyResponse(
     planId,
     contextId: loaded.stored.contextId,
     source: {
-      occurrenceId: loaded.source.occurrenceId,
+      occurrence: loaded.sourceOrdinal,
       trackIndex: loaded.source.trackIndex,
       groupIndex: loaded.source.groupIndex,
       targetGroupUuid: loaded.source.targetGroupUuid,
       pitchOffsetSemitone: loaded.sourcePitchOffset,
     },
     target: {
-      occurrenceId: loaded.target.occurrenceId,
+      occurrence: loaded.targetOrdinal,
       trackIndex: loaded.target.trackIndex,
       groupIndex: loaded.target.groupIndex,
       targetGroupUuid: loaded.target.targetGroupUuid,
@@ -758,8 +782,8 @@ function normalizeHarmonyRequest(request) {
     request,
     [
       "contextId",
-      "sourceOccurrenceId",
-      "targetOccurrenceId",
+      "sourceOccurrence",
+      "targetOccurrence",
       "harmony",
       "register",
       "lyricsMode",
@@ -773,15 +797,15 @@ function normalizeHarmonyRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
   if (
-    request.sourceOccurrenceId !== undefined &&
-    (typeof request.sourceOccurrenceId !== "string" || request.sourceOccurrenceId.length === 0)
+    request.sourceOccurrence !== undefined &&
+    (!Number.isSafeInteger(request.sourceOccurrence) || request.sourceOccurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "sourceOccurrenceId must be a non-empty string when provided");
+    throw codedError("INVALID_ARGUMENTS", "sourceOccurrence must be a non-negative safe integer when provided");
   }
-  if (typeof request.targetOccurrenceId !== "string" || request.targetOccurrenceId.length === 0) {
+  if (!Number.isSafeInteger(request.targetOccurrence) || request.targetOccurrence < 0) {
     throw codedError(
       "INVALID_ARGUMENTS",
-      "targetOccurrenceId is required (prepare the destination group first, e.g. via sv_clone_track_from_template, then re-snapshot so source and target share one range context)"
+      "targetOccurrence is required and must be a non-negative safe integer (prepare the destination group first, then re-snapshot so source and target share one range context)"
     );
   }
   if (!isRecord(request.harmony)) throw codedError("INVALID_ARGUMENTS", "harmony must be an object");
@@ -857,8 +881,8 @@ function normalizeHarmonyRequest(request) {
   }
   return {
     contextId: request.contextId,
-    sourceOccurrenceId: request.sourceOccurrenceId,
-    targetOccurrenceId: request.targetOccurrenceId,
+    sourceOccurrence: request.sourceOccurrence,
+    targetOccurrence: request.targetOccurrence,
     harmony: { interval: request.harmony.interval, ...(key ? { key } : {}) },
     intervalSpec,
     register,

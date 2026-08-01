@@ -48,14 +48,12 @@ async function snapshotAll(snapshots, options = {}) {
   });
 }
 
-const occurrenceId = (snapshot) => `${snapshot.contextId}:t:0:r:0`;
-
 test("a valid computed pitch bakes into one owned curve with coverage and fit evidence", async () => {
   const { model, snapshots, bake } = createFixture({ computedPitchValues: smoothContour(FRAMES) });
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
   });
   assert.equal(result.ok, true);
   assert.equal(result.status, "succeeded");
@@ -68,6 +66,7 @@ test("a valid computed pitch bakes into one owned curve with coverage and fit ev
   assert.equal(result.pitchDeltaHandling, "preserve");
   assert.equal(result.undo.expectedUserUndoSteps, 1);
   assert.equal(result.verification.passed, true);
+  assert.equal(result.occurrence.occurrence, 0);
   // RDP 把 160 帧简化成少量点，且 anchor 取首个有效帧。
   assert.ok(result.bakedCurve.pointCount < FRAMES);
   assert.ok(result.bakedCurve.pointCount >= 2);
@@ -90,7 +89,7 @@ test("nonzero pitch offset converts absolute computed pitch to group-relative", 
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
   });
   assert.equal(result.ok, true);
   // anchor 音高 = 首帧绝对 MIDI - pitchOffset = 65 - 3 = 62。
@@ -103,7 +102,7 @@ test("all-null computed pitch writes nothing and reports INSUFFICIENT_COMPUTED_P
   });
   const snapshot = await snapshotAll(snapshots);
   await assert.rejects(
-    bake.bake({ contextId: snapshot.contextId, occurrenceId: occurrenceId(snapshot) }),
+    bake.bake({ contextId: snapshot.contextId, occurrence: 0 }),
     (error) => {
       assert.equal(error.code, "INSUFFICIENT_COMPUTED_PITCH");
       assert.equal(error.details.finiteFrames, 0);
@@ -119,7 +118,7 @@ test("coverage below the threshold writes nothing", async () => {
   const { model, snapshots, bake } = createFixture({ computedPitchValues: partial });
   const snapshot = await snapshotAll(snapshots);
   await assert.rejects(
-    bake.bake({ contextId: snapshot.contextId, occurrenceId: occurrenceId(snapshot) }),
+    bake.bake({ contextId: snapshot.contextId, occurrence: 0 }),
     (error) => error.code === "INSUFFICIENT_COMPUTED_PITCH"
   );
   assert.equal(model.controls.length, 0);
@@ -131,7 +130,7 @@ test("dry-run reports the planned curve and coverage with zero writes", async ()
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     dryRun: true,
   });
   assert.equal(result.ok, true);
@@ -152,7 +151,7 @@ test("a point budget cannot silently relax the requested fit tolerance", async (
   await assert.rejects(
     bake.bake({
       contextId: snapshot.contextId,
-      occurrenceId: occurrenceId(snapshot),
+      occurrence: 0,
       dryRun: true,
       toleranceSemitone: 0.001,
       maxPoints: 8,
@@ -189,7 +188,7 @@ test("replace_owned deletes the previous owned curve in range and adds the new o
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     strategy: "replace_owned",
   });
   assert.equal(result.ok, true);
@@ -216,7 +215,7 @@ test("replace_owned preserves external controls while replacing owned ones", asy
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     strategy: "replace_owned",
   });
   assert.equal(result.ok, true);
@@ -237,7 +236,7 @@ test("replace_explicit deletes only the caller-confirmed control", async () => {
   const dropControl = snapshot.data.pitchControls.find((c) => c.ownership.scriptDataKeys.includes("mm_Flag") && c.pitch?.groupRelativeSemitone === 62);
   const result = await bake.bake({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     strategy: "replace_explicit",
     explicitTargets: [{ controlId: dropControl.controlId, expectedFingerprint: dropControl.fingerprint }],
   });
@@ -253,7 +252,7 @@ test("pitchDeltaHandling clear is rejected explicitly, not silently ignored", as
   await assert.rejects(
     bake.bake({
       contextId: snapshot.contextId,
-      occurrenceId: occurrenceId(snapshot),
+      occurrence: 0,
       pitchDeltaHandling: "clear",
     }),
     (error) => error.code === "PITCH_DELTA_CLEAR_UNSUPPORTED"
@@ -267,7 +266,7 @@ test("missing computed pitch capture fails with COMPUTED_PITCH_NOT_CAPTURED", as
     include: ["notes"],
   });
   await assert.rejects(
-    bake.bake({ contextId: snapshot.contextId, occurrenceId: occurrenceId(snapshot) }),
+    bake.bake({ contextId: snapshot.contextId, occurrence: 0 }),
     (error) => error.code === "COMPUTED_PITCH_NOT_CAPTURED"
   );
 });

@@ -25,7 +25,6 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -35,38 +34,33 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: uuid,
     timeOffsetBlick,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints,
   });
   if (extraOccurrenceWithNotes) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
-      occurrenceId: secondId,
+      occurrence: 1,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: uuid,
       timeOffsetBlick,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [occurrenceId, secondId],
-      noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
-        ...fingerprint,
-        noteId: `${secondId}:n:${index}`,
-      })),
+      sharedTargetOccurrences: [0, 1],
+      noteFingerprints: noteFingerprints.map((fingerprint) => ({ ...fingerprint })),
     });
   }
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = meterMarks;
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {
@@ -75,7 +69,7 @@ function createService(store) {
 
 test("full-strength 1/8 quantization snaps offsets and emits expected preconditions", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: Q / 8, durationBlick: Q }, // → 0
       { onsetBlick: Q + Q / 5, durationBlick: Q }, // → Q
@@ -99,6 +93,7 @@ test("full-strength 1/8 quantization snaps offsets and emits expected preconditi
   const patch = result.patchRequest;
   assert.equal(patch.tool, "sv_patch_notes");
   assert.equal(patch.arguments.contextId, stored.contextId);
+  assert.equal(patch.arguments.occurrence, 0);
   assert.equal(patch.arguments.patches.length, 3);
   const first = patch.arguments.patches[0];
   assert.equal(first.note, 0);
@@ -323,7 +318,7 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   const round1 = createStoredContext(store, { notes: buildNotes(0) });
   const first = await service.plan({
     contextId: round1.stored.contextId,
-    occurrenceId: round1.occurrenceId,
+    occurrence: 0,
     ...options,
   });
   assert.equal(first.patchRequest.arguments.patches.length, 200);
@@ -332,13 +327,13 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   // 模拟提交：前 200 项已应用，context 失效，重拍快照产生新 contextId。
   store.delete(round1.stored.contextId);
   const round2 = createStoredContext(store, { notes: buildNotes(200) });
-  // 同参重跑（携带旧 occurrenceId）：短期身份记录证明同一 target UUID 后按位置重锚定。
+  // 同参重跑：短期身份记录证明 fresh context 的同一位置仍指向原 target UUID。
   const second = await service.plan({
     contextId: round2.stored.contextId,
-    occurrenceId: round1.occurrenceId,
+    occurrence: 0,
     ...options,
   });
-  assert.ok(second.warnings.some((warning) => warning.code === "STALE_SELECTOR_REANCHORED"));
+  assert.ok(second.warnings.some((warning) => warning.code === "CONTINUATION_IDENTITY_VERIFIED"));
   assert.equal(second.patchRequest.arguments.patches.length, 1);
   // 续轮 patch 落在新 occurrence 的组内 index 上（预烤批次不可能提前知道）。
   assert.ok(
@@ -350,7 +345,7 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   const round3 = createStoredContext(store, { notes: buildNotes(201) });
   const third = await service.plan({
     contextId: round3.stored.contextId,
-    occurrenceId: round3.occurrenceId,
+    occurrence: 0,
     ...options,
   });
   assert.equal(third.status, "no_change");
@@ -367,7 +362,7 @@ test("a reanchored selector is rejected when the target group UUID changed", asy
   const round1 = createStoredContext(store, { notes, uuid: "uuid-original" });
   await service.plan({
     contextId: round1.stored.contextId,
-    occurrenceId: round1.occurrenceId,
+    occurrence: 0,
     grid: { division: "1/4" },
   });
   store.delete(round1.stored.contextId);
@@ -375,19 +370,19 @@ test("a reanchored selector is rejected when the target group UUID changed", asy
   await assert.rejects(
     service.plan({
       contextId: round2.stored.contextId,
-      occurrenceId: round1.occurrenceId,
+      occurrence: 0,
       grid: { division: "1/4" },
     }),
     (error) => error.code === "STALE_CONTEXT"
   );
-  // 无身份记录的伪造 selector 直接 UNKNOWN_OCCURRENCE。
+  // ordinal 越界与 target 身份变化是不同错误，便于调用方选择补救动作。
   await assert.rejects(
     service.plan({
       contextId: round2.stored.contextId,
-      occurrenceId: "ctx_forged:t:0:r:0",
+      occurrence: 9,
       grid: { division: "1/4" },
     }),
-    (error) => error.code === "UNKNOWN_OCCURRENCE"
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
 });
 
@@ -398,7 +393,7 @@ test("notes select a subset and responseMode governs perNote size", async () => 
     onsetBlick: index * Q + Q / 8,
     durationBlick: Q / 2,
   }));
-  const { stored, occurrenceId } = createStoredContext(store, { notes });
+  const { stored } = createStoredContext(store, { notes });
   const service = createService(store);
   const subset = await service.plan({
     contextId: stored.contextId,

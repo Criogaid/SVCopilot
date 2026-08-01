@@ -285,12 +285,10 @@ function createPhraseModel({
   };
 
   const contextId = "ctx_phrase";
-  const occurrenceId = `${contextId}:t:0:r:0`;
   const originalState = states.get(originalGroup.__handle__);
   const fingerprints = originalState.notes.map((note, index) => {
     const data = states.get(note.__handle__).data;
     return {
-      noteId: `${occurrenceId}:n:${index}`,
       indexInGroup: index,
       ...structuredClone(data),
       attributes: undefined,
@@ -308,12 +306,12 @@ function createPhraseModel({
       meterMarks: [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }],
       occurrences: [
         {
-          occurrenceId,
+          occurrence: 0,
           trackIndex: 0,
           groupIndex: 0,
           targetGroupUuid: "phrase-original",
           timeOffsetBlick: 4 * Q,
-          sharedTargetOccurrences: shared ? [occurrenceId, `${contextId}:t:0:r:1`] : [occurrenceId],
+          sharedTargetOccurrences: shared ? [0, 1] : [0],
           noteFingerprints: capturedFingerprints,
         },
       ],
@@ -337,12 +335,12 @@ function createPhraseModel({
     snapshotService,
     { now: () => 1_000 }
   );
-  return { model, service, contextId, occurrenceId, fingerprints, snapshotService };
+  return { model, service, contextId, fingerprints, snapshotService };
 }
 
-function fullRequest(contextId, occurrenceId, overrides = {}) {
+function fullRequest(contextId, overrides = {}) {
   return {
-    target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
+    target: { contextId, occurrence: 0, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
         note: 0,
@@ -370,8 +368,8 @@ function fullRequest(contextId, occurrenceId, overrides = {}) {
 }
 
 test("sv_edit_phrase dry-run verifies a detached clone without project mutations", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
-  const result = await service.edit(fullRequest(contextId, occurrenceId, { dryRun: true }));
+  const { model, service, contextId } = createPhraseModel();
+  const result = await service.edit(fullRequest(contextId, { dryRun: true }));
   assert.equal(result.ok, true);
   assert.equal(result.status, "dry_run");
   assert.equal(result.effects, "none");
@@ -384,9 +382,9 @@ test("sv_edit_phrase dry-run verifies a detached clone without project mutations
 });
 
 test("sv_edit_phrase returns no_change without creating an empty Undo", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel({ capturedNoteCount: 1 });
+  const { model, service, contextId } = createPhraseModel({ capturedNoteCount: 1 });
   const result = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     curves: [
       {
         parameter: "loudness",
@@ -412,9 +410,9 @@ test("sv_edit_phrase returns no_change without creating an empty Undo", async ()
 });
 
 test("sv_edit_phrase keeps simplify on detached preflight because its effect is host-defined", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     curves: [
       {
         parameter: "loudness",
@@ -434,10 +432,10 @@ test("sv_edit_phrase keeps simplify on detached preflight because its effect is 
 });
 
 test("sv_edit_phrase commits note, structure, curve, and voice changes in one Undo", async () => {
-  const { model, service, contextId, occurrenceId, snapshotService } = createPhraseModel({ shared: true });
+  const { model, service, contextId, snapshotService } = createPhraseModel({ shared: true });
   const result = await service.edit(
-    fullRequest(contextId, occurrenceId, {
-      target: { contextId, occurrenceId, allowSharedTargetMutation: true },
+    fullRequest(contextId, {
+      target: { contextId, occurrence: 0, allowSharedTargetMutation: true },
     })
   );
   assert.equal(result.ok, true);
@@ -461,9 +459,9 @@ test("sv_edit_phrase commits note, structure, curve, and voice changes in one Un
 });
 
 test("sv_edit_phrase keeps note bindings stable when an onset patch reorders notes", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
-    target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
+    target: { contextId, occurrence: 0, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
         note: 0,
@@ -483,9 +481,9 @@ test("sv_edit_phrase keeps note bindings stable when an onset patch reorders not
 });
 
 test("sv_edit_phrase validates merge adjacency after earlier structure operations", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     structureOperations: [
       {
         op: "insert",
@@ -508,7 +506,7 @@ test("sv_edit_phrase validates merge adjacency after earlier structure operation
 test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mismatches", async () => {
   const quantized = createPhraseModel({ quantizeVoice: true });
   const succeeded = await quantized.service.edit({
-    target: { contextId: quantized.contextId, occurrenceId: quantized.occurrenceId },
+    target: { contextId: quantized.contextId, occurrence: 0 },
     voicePatch: { paramTension: 0.3 },
   });
   assert.equal(succeeded.ok, true, JSON.stringify(succeeded));
@@ -522,7 +520,7 @@ test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mis
 
   const invalid = createPhraseModel();
   const rejected = await invalid.service.edit({
-    target: { contextId: invalid.contextId, occurrenceId: invalid.occurrenceId },
+    target: { contextId: invalid.contextId, occurrence: 0 },
     voicePatch: { paramTension: "high" },
   });
   assert.equal(rejected.ok, false);
@@ -533,7 +531,7 @@ test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mis
 test("sv_edit_phrase voice-only commit skips shared-target scanning and detached clones", async () => {
   const shared = createPhraseModel({ shared: true });
   const result = await shared.service.edit({
-    target: { contextId: shared.contextId, occurrenceId: shared.occurrenceId },
+    target: { contextId: shared.contextId, occurrence: 0 },
     voicePatch: { paramTension: 0.4 },
   });
 
@@ -549,7 +547,7 @@ test("sv_edit_phrase fast curve and voice path rolls journals back without a clo
   const fixture = createPhraseModel();
   fixture.model.failSetVoiceOnce = true;
   const result = await fixture.service.edit({
-    target: { contextId: fixture.contextId, occurrenceId: fixture.occurrenceId },
+    target: { contextId: fixture.contextId, occurrence: 0 },
     curves: [
       {
         parameter: "loudness",
@@ -571,9 +569,9 @@ test("sv_edit_phrase fast curve and voice path rolls journals back without a clo
 });
 
 test("sv_edit_phrase does not roll back a verified commit when processing observation fails", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel({ failProcessing: true });
+  const { model, service, contextId } = createPhraseModel({ failProcessing: true });
   const result = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     notePatches: [{ note: 0, set: { lyrics: "where" } }],
     waitFor: "phonemes",
   });
@@ -588,15 +586,15 @@ test("sv_edit_phrase does not roll back a verified commit when processing observ
 });
 
 test("sv_edit_phrase requires confirmation before mutating a shared project target", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel({ shared: true });
+  const { model, service, contextId } = createPhraseModel({ shared: true });
   const preview = await service.edit(
-    fullRequest(contextId, occurrenceId, { dryRun: true })
+    fullRequest(contextId, { dryRun: true })
   );
   assert.equal(preview.ok, true);
   assert.ok(preview.warnings.some((warning) => warning.code === "SHARED_TARGET_DRY_RUN"));
   assert.equal(model.undoCount, 0);
 
-  const result = await service.edit(fullRequest(contextId, occurrenceId));
+  const result = await service.edit(fullRequest(contextId));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "SHARED_TARGET_REQUIRES_CONFIRMATION");
   assert.equal(result.effects, "none");
@@ -605,9 +603,9 @@ test("sv_edit_phrase requires confirmation before mutating a shared project targ
 });
 
 test("sv_edit_phrase restores original target and voice when commit fails", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   model.failSetVoiceOnce = true;
-  const result = await service.edit(fullRequest(contextId, occurrenceId));
+  const result = await service.edit(fullRequest(contextId));
   assert.equal(result.ok, false);
   assert.equal(result.status, "rolled_back");
   assert.equal(result.effects, "reverted");
@@ -618,10 +616,10 @@ test("sv_edit_phrase restores original target and voice when commit fails", asyn
 });
 
 test("sv_edit_phrase reports atomicity none and leaves partial effects when atomic is false", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   model.failSetVoiceOnce = true;
   const result = await service.edit(
-    fullRequest(contextId, occurrenceId, { atomic: false })
+    fullRequest(contextId, { atomic: false })
   );
 
   assert.equal(result.ok, false);
@@ -633,9 +631,9 @@ test("sv_edit_phrase reports atomicity none and leaves partial effects when atom
 });
 
 test("sv_edit_phrase rolls back when committed curve read-back differs from the detached plan", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   model.corruptCurveAfterCommit = true;
-  const result = await service.edit(fullRequest(contextId, occurrenceId));
+  const result = await service.edit(fullRequest(contextId));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "POSTCONDITION_FAILED");
   assert.equal(result.status, "rolled_back");
@@ -644,10 +642,10 @@ test("sv_edit_phrase rolls back when committed curve read-back differs from the 
 });
 
 test("sv_edit_phrase rejects overlapping or duplicate note edits before host access", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const note = 0;
   const overlapping = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     notePatches: [{ note, set: { lyrics: "where" } }],
     structureOperations: [{ op: "delete", noteIndex: note }],
   });
@@ -655,7 +653,7 @@ test("sv_edit_phrase rejects overlapping or duplicate note edits before host acc
   assert.equal(model.undoCount, 0);
 
   const duplicate = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     notePatches: [
       { note, set: { lyrics: "where" } },
       { note, set: { pitch: 61 } },
@@ -666,10 +664,10 @@ test("sv_edit_phrase rejects overlapping or duplicate note edits before host acc
 });
 
 test("sv_edit_phrase rejects stale range fingerprints before Undo or live mutation", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const originalState = model.states.get(model.originalGroup.__handle__);
   model.states.get(originalState.notes[0].__handle__).data.pitch = 65;
-  const result = await service.edit(fullRequest(contextId, occurrenceId));
+  const result = await service.edit(fullRequest(contextId));
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "STALE_CONTEXT");
   assert.equal(result.effects, "none");
@@ -678,9 +676,9 @@ test("sv_edit_phrase rejects stale range fingerprints before Undo or live mutati
 });
 
 test("sv_edit_phrase rejects unobservable voice fields without project effects", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     voicePatch: { singerName: "Not Observable" },
   });
   assert.equal(result.ok, false);
@@ -690,7 +688,7 @@ test("sv_edit_phrase rejects unobservable voice fields without project effects",
 });
 
 test("sv_edit_phrase sends only requested attributes when old values contain typed sentinels", async () => {
-  const { model, service, contextId, occurrenceId } = createPhraseModel();
+  const { model, service, contextId } = createPhraseModel();
   const originalState = model.states.get(model.originalGroup.__handle__);
   model.states.get(originalState.notes[0].__handle__).data.attributes.tF0Offset = {
     $sv: "number",
@@ -704,7 +702,7 @@ test("sv_edit_phrase sends only requested attributes when old values contain typ
   };
 
   const result = await service.edit({
-    target: { contextId, occurrenceId, expectedGroupUuid: "phrase-original" },
+    target: { contextId, occurrence: 0, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
         note: 0,

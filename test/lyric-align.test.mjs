@@ -22,7 +22,6 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -32,46 +31,37 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: "",
     languageOverride: note.languageOverride ?? "",
     detuneCents: 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-lyric-test",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints,
   });
   if (extraOccurrenceWithNotes) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
-      occurrenceId: secondId,
+      occurrence: 1,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: "uuid-lyric-test",
       timeOffsetBlick: 0,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [occurrenceId, secondId],
-      noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
-        ...fingerprint,
-        noteId: `${secondId}:n:${index}`,
-      })),
+      sharedTargetOccurrences: [0, 1],
+      noteFingerprints: noteFingerprints.map((fingerprint) => ({ ...fingerprint })),
     });
   }
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {
   return new LyricAlignService({ store, now: () => 2000 });
-}
-
-function noteId(occurrenceId, index) {
-  return `${occurrenceId}:n:${index}`;
 }
 
 function uniformNotes(lyricsList, options = {}) {
@@ -152,7 +142,7 @@ test("fixture lyrics align 1:1 and an identical plan reports no_change", async (
 
 test("a single lyric change produces one guarded patch", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: uniformNotes(FIXTURE_LYRICS, { languageOverrides: FIXTURE_LANGUAGES }),
   });
   const result = await createService(store).align({
@@ -172,6 +162,7 @@ test("a single lyric change produces one guarded patch", async () => {
   assert.equal(result.patchRequest.arguments.dryRun, true);
   assert.equal(result.patchRequest.arguments.atomic, true);
   assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
+  assert.equal(result.patchRequest.arguments.occurrence, 0);
 });
 
 function mandarinLyrics(count) {
@@ -182,7 +173,7 @@ function mandarinLyrics(count) {
 // 像 sv_patch_notes 成功提交那样把 patch 应用到音符数据（该行为由 note-patch 自己的测试覆盖），
 // 返回下一轮快照用的音符数组。提交成功即消费 contextId，续轮必须用新 context——这正是
 // continuation 工作流的形状：commit → re-snapshot → re-align。
-function applyPatchesToNotes(notes, occurrenceId, patches) {
+function applyPatchesToNotes(notes, patches) {
   const updated = notes.map((note) => ({ ...note }));
   for (const patch of patches) {
     const index = patch.note;
@@ -234,7 +225,7 @@ test("continuation rounds converge: commit, re-snapshot, re-align until no_chang
   const round1 = await service.align({ contextId: round1Context.stored.contextId, lyrics, language: "mandarin" });
   assert.equal(round1.patchRequest.arguments.patches.length, 200);
   assert.equal(round1.continuation.remainingChangedCount, 1);
-  notes = applyPatchesToNotes(notes, round1Context.occurrenceId, round1.patchRequest.arguments.patches);
+  notes = applyPatchesToNotes(notes, round1.patchRequest.arguments.patches);
 
   // 第 2 轮：新快照新 contextId；已应用的 200 项自动 no-change，恰好只剩 1 个 patch。
   const round2Context = createStoredContext(store, { notes });
@@ -245,7 +236,7 @@ test("continuation rounds converge: commit, re-snapshot, re-align until no_chang
   assert.equal(round2.continuation, undefined);
   // 续轮 patch 落在新 occurrence 的组内 index 上——这正是预烤批次不可能提前知道的部分。
   assert.equal(round2.patchRequest.arguments.patches[0].note, 200);
-  notes = applyPatchesToNotes(notes, round2Context.occurrenceId, round2.patchRequest.arguments.patches);
+  notes = applyPatchesToNotes(notes, round2.patchRequest.arguments.patches);
 
   // 第 3 轮：全部就位 → no_change，循环终止。
   const round3Context = createStoredContext(store, { notes });
@@ -255,7 +246,7 @@ test("continuation rounds converge: commit, re-snapshot, re-align until no_chang
   assert.equal(round3.continuation, undefined);
 });
 
-test("PATCH_CAP continuation can replay explicit occurrenceId/startNote against a fresh context", async () => {
+test("PATCH_CAP continuation can replay an explicit occurrence ordinal and startNote against a fresh context", async () => {
   const store = createStore();
   const lyrics = mandarinLyrics(201);
   let notes = uniformNotes(new Array(202).fill(""));
@@ -265,7 +256,7 @@ test("PATCH_CAP continuation can replay explicit occurrenceId/startNote against 
     extraOccurrenceWithNotes: true,
   });
   const originalOptions = {
-    occurrenceId: round1Context.occurrenceId,
+    occurrence: 0,
     startNote: 1,
     lyrics,
     language: "mandarin",
@@ -276,11 +267,7 @@ test("PATCH_CAP continuation can replay explicit occurrenceId/startNote against 
   });
   assert.equal(round1.patchRequest.arguments.patches.length, 200);
   assert.equal(round1.continuation.remainingChangedCount, 1);
-  notes = applyPatchesToNotes(
-    notes,
-    round1Context.occurrenceId,
-    round1.patchRequest.arguments.patches
-  );
+  notes = applyPatchesToNotes(notes, round1.patchRequest.arguments.patches);
   // 模拟提交成功消费旧上下文；continuation 明确承诺新快照后可用同一组 options 重跑。
   store.delete(round1Context.stored.contextId);
   const round2Context = createStoredContext(store, {
@@ -312,7 +299,7 @@ test("PATCH_CAP continuation refuses positional re-anchor when target or start-n
     extraOccurrenceWithNotes: true,
   });
   const originalOptions = {
-    occurrenceId: round1Context.occurrenceId,
+    occurrence: 0,
     startNote: 1,
     lyrics,
     language: "mandarin",
@@ -321,11 +308,7 @@ test("PATCH_CAP continuation refuses positional re-anchor when target or start-n
     contextId: round1Context.stored.contextId,
     ...originalOptions,
   });
-  notes = applyPatchesToNotes(
-    notes,
-    round1Context.occurrenceId,
-    round1.patchRequest.arguments.patches
-  );
+  notes = applyPatchesToNotes(notes, round1.patchRequest.arguments.patches);
   store.delete(round1Context.stored.contextId);
   const round2Context = createStoredContext(store, {
     notes,
@@ -426,7 +409,7 @@ test("explicit continuation chains override inferred English syllable expansion"
 
   for (const fixture of cases) {
     const store = createStore();
-    const { stored, occurrenceId } = createStoredContext(store, {
+    const { stored } = createStoredContext(store, {
       notes: uniformNotes(new Array(fixture.plannedLyrics.length).fill("")),
     });
     const result = await createService(store).align({
@@ -612,18 +595,18 @@ test("kanji and ambiguous CJK are flagged instead of guessed", async () => {
 
 test("startNote fills from the middle; it no longer implies an occurrence", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: uniformNotes(["a", "b", "c", "d"]),
     extraOccurrenceWithNotes: true,
   });
   // index 不携带 occurrence 前缀，因此多 occurrence 时必须显式点名。
   const result = await createService(store).align({
     contextId: stored.contextId,
-    occurrenceId,
+    occurrence: 0,
     lyrics: "あさ",
     startNote: 2,
   });
-  assert.equal(result.occurrence.occurrenceId, occurrenceId);
+  assert.equal(result.occurrence.occurrence, 0);
   assert.equal(result.summary.startIndex, 2);
   assert.deepEqual(
     result.perNote.map((item) => item.plannedLyrics),
@@ -650,14 +633,15 @@ test("align resolves contexts honestly across error paths", async () => {
   await assert.rejects(
     service.align({
       contextId: ambiguous.stored.contextId,
-      occurrenceId: "forged:t:0:r:0",
+      occurrence: 9,
       lyrics: "あ",
     }),
-    (error) => error.code === "UNKNOWN_OCCURRENCE"
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
   await assert.rejects(
     service.align({ contextId: ambiguous.stored.contextId, lyrics: "あ" }),
-    (error) => error.code === "AMBIGUOUS_CONTEXT"
+    (error) => error.code === "AMBIGUOUS_CONTEXT" &&
+      JSON.stringify(error.details?.candidates) === JSON.stringify([0, 1])
   );
   const single = createStoredContext(store, { notes: uniformNotes(["a"]) });
   await assert.rejects(

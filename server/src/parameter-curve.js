@@ -9,6 +9,7 @@ import {
 } from "./musical-time.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { decodeDense } from "./dense-codec.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
@@ -861,7 +862,7 @@ function findAnchorFingerprint(target, noteIndex) {
     }
     throw codedError(
       "NOTE_NOT_IN_CONTEXT",
-      `note ${noteIndex} exists but was not captured in occurrence ${target.contextOccurrence.occurrenceId}`,
+      `note ${noteIndex} exists but was not captured in this occurrence`,
       { got: noteIndex }
     );
   }
@@ -1120,15 +1121,21 @@ async function resolveCurveTarget(capture, target, context = {}) {
     if (storedContext.context?.kind !== "range") {
       throw codedError("INVALID_CONTEXT", "contextId does not identify a range snapshot");
     }
-    contextOccurrence = storedContext.context.occurrences.find(
-      (occurrence) => occurrence.occurrenceId === target.occurrenceId
-    );
-    if (!contextOccurrence) {
-      throw codedError(
-        "UNKNOWN_OCCURRENCE",
-        `occurrenceId is not part of context ${target.contextId}`
-      );
-    }
+    // occurrence 必填（见 normalizeTarget）：曲线锚定在特定 occurrence 的音符上，
+    // 因此没有"唯一候选自动选择"语义。
+    contextOccurrence = selectOccurrenceByOrdinal(
+      storedContext.context.occurrences,
+      target.occurrence,
+      {
+        eligible: (item) =>
+          typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
+        noneCode: "INVALID_CONTEXT",
+        noneMessage: `context ${target.contextId} contains no editable vocal occurrence`,
+        ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
+        ineligibleCode: "INVALID_TARGET",
+        ineligibleMessage: "instrumental occurrences have no automation to edit",
+      }
+    ).occurrence;
     if (
       contextOccurrence.sharedTargetOccurrences.length > 1 &&
       context.readOnly !== true &&
@@ -1652,8 +1659,8 @@ function formatBatchValidationFailure(request, error, { elapsedMs }) {
         ...(typeof request.target.contextId === "string"
           ? { contextId: request.target.contextId }
           : {}),
-        ...(typeof request.target.occurrenceId === "string"
-          ? { occurrenceId: request.target.occurrenceId }
+        ...(Number.isSafeInteger(request.target.occurrence)
+          ? { occurrence: request.target.occurrence }
           : {}),
         ...(Number.isSafeInteger(request.target.trackIndex)
           ? { trackIndex: request.target.trackIndex }
@@ -1743,7 +1750,9 @@ function formatBatchTransaction(transaction, input) {
     responseMode: input.responseMode,
     target: {
       ...(input.target.contextId ? { contextId: input.target.contextId } : {}),
-      ...(input.target.occurrenceId ? { occurrenceId: input.target.occurrenceId } : {}),
+      ...(Number.isSafeInteger(input.target.occurrence)
+        ? { occurrence: input.target.occurrence }
+        : {}),
       ...(transaction.target
         ? {
             trackIndex: transaction.target.trackIndex,
@@ -2227,17 +2236,17 @@ export function normalizeTarget(target) {
   const expectedTimeOffsetBlick = isRecord(target) ? target.expectedTimeOffsetBlick : undefined;
   if (
     isRecord(target) &&
-    (target.contextId !== undefined || target.occurrenceId !== undefined)
+    (target.contextId !== undefined || target.occurrence !== undefined)
   ) {
     if (
       typeof target.contextId !== "string" ||
       target.contextId.length === 0 ||
-      typeof target.occurrenceId !== "string" ||
-      target.occurrenceId.length === 0
+      !Number.isSafeInteger(target.occurrence) ||
+      target.occurrence < 0
     ) {
       throw codedError(
         "INVALID_ARGUMENTS",
-        "context targets require non-empty contextId and occurrenceId"
+        "context targets require a non-empty contextId and a non-negative occurrence ordinal"
       );
     }
     if (
@@ -2254,7 +2263,7 @@ export function normalizeTarget(target) {
     }
     return {
       contextId: target.contextId,
-      occurrenceId: target.occurrenceId,
+      occurrence: target.occurrence,
       allowSharedTargetMutation: target.allowSharedTargetMutation === true,
       ...(target.expectedGroupUuid !== undefined
         ? { expectedGroupUuid: target.expectedGroupUuid }

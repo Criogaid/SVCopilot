@@ -135,23 +135,22 @@ function createGroupContext(store, indices) {
   return stored;
 }
 
-function createRangeContext(store, indices, occurrenceSuffix = ":t:0:r:0") {
+function createRangeContext(store, indices) {
   const stored = store.create({
     epoch: 1,
     scope: { kind: "range" },
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}${occurrenceSuffix}`;
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-selection",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [occurrenceId],
-    noteFingerprints: indices.map((indexInGroup, position) => ({
+    sharedTargetOccurrences: [0],
+    noteFingerprints: indices.map((indexInGroup) => ({
       indexInGroup,
       onsetBlick: indexInGroup * Q,
       durationBlick: Q,
@@ -160,11 +159,10 @@ function createRangeContext(store, indices, occurrenceSuffix = ":t:0:r:0") {
       phonemesOverride: "",
       languageOverride: "",
       detuneCents: 0,
-      noteId: `${occurrenceId}:n:${position}`,
     })),
   });
   stored.context.quarterBlick = Q;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 test("changed comes from read-back even when the host boolean lies", async () => {
@@ -260,16 +258,16 @@ test("group-context notes resolve through the stored indexInGroup", async () => 
   );
 });
 
-test("range-context notes resolve and can be narrowed by occurrenceId", async () => {
+test("range-context notes resolve and can be narrowed by occurrence ordinal", async () => {
   const model = createModel({ selected: [] });
   const store = new SnapshotStore({ now: () => 1000 });
   const { service } = createService(model, store);
-  const { stored, occurrenceId } = createRangeContext(store, [1, 3, 4]);
+  const { stored } = createRangeContext(store, [1, 3, 4]);
 
   const result = await service.setSelection({
     operation: "select",
     contextId: stored.contextId,
-    occurrenceId,
+    occurrence: 0,
     notes: [1, 4],
   });
 
@@ -281,24 +279,24 @@ test("range-context notes resolve and can be narrowed by occurrenceId", async ()
       service.setSelection({
         operation: "select",
         contextId: stored.contextId,
-        occurrenceId: `${stored.contextId}:t:9:r:9`,
+        occurrence: 9,
         notes: [1],
       }),
-    (error) => error.code === "NOTE_NOT_IN_CONTEXT"
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
 });
 
 test("context notes reject a different current editor group before selection changes", async () => {
   const model = createModel({ selected: [1], groupUuid: "uuid-current-editor" });
   const { service, store } = createService(model);
-  const { stored, occurrenceId } = createRangeContext(store, [1, 2]);
+  const { stored } = createRangeContext(store, [1, 2]);
 
   await assert.rejects(
     () =>
       service.setSelection({
         operation: "select",
         contextId: stored.contextId,
-        occurrenceId,
+        occurrence: 0,
         notes: [1],
       }),
     (error) =>

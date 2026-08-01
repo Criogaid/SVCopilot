@@ -35,17 +35,15 @@ function createRangeContext(store, noteCount) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   stored.context.occurrences.push({
     occurrence: 0,
-    occurrenceId,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-gate",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
     groupNoteCount: noteCount,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints: Array.from({ length: noteCount }, (_, index) => ({
       indexInGroup: index,
       onsetBlick: index * 2 * Q,
@@ -61,7 +59,7 @@ function createRangeContext(store, noteCount) {
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
   stored.snapshotToken = `snap_${stored.contextId}`;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 // §3.4 的示例请求，逐字段照抄计划。它同时是 grouped schema 的可执行文档：
@@ -224,7 +222,16 @@ test("no served description promises a field the surface no longer returns", () 
   const offenders = [];
   for (const tool of TOOLS) {
     const description = tool.description ?? "";
-    for (const banned of ["noteId", "noteIds", "startNoteId", "fromNoteId", "toNoteId"]) {
+    for (const banned of [
+      "noteId",
+      "noteIds",
+      "startNoteId",
+      "fromNoteId",
+      "toNoteId",
+      "occurrenceId",
+      "sourceOccurrenceId",
+      "targetOccurrenceId",
+    ]) {
       if (description.includes(banned)) offenders.push(`${tool.name}: ${banned}`);
     }
   }
@@ -304,6 +311,51 @@ test("a planner success envelope fits the compact budget without its detail payl
   assert.equal(typeof result.apply.arguments.planRef, "string");
   assert.equal(result.applyRequests, undefined);
 });
+
+test("no response echoes a context-prefixed occurrence identity", async () => {
+  // 请求侧的门禁（surface-io-policy 的 BANNED_REQUEST_FIELDS）只看 input schema，
+  // 因此挡不住"请求收 ordinal、响应仍回字符串"这种半迁移状态——而那恰恰是最坏的
+  // 形态：模型从响应里读到一个它无法回传的身份，只能自己拆字符串。
+  //
+  // 本轮没有 outputSchema，所以响应形状唯一可机械检查的方式就是真跑一次并扫描
+  // 序列化结果。`:t:<n>:r:<n>` 是被删掉的那个形状，它内嵌一个已经失效的 contextId。
+  const store = new SnapshotStore({ now: () => 1000 });
+  const { stored } = createRangeContext(store, 373);
+  const result = await new ExpressionPlanService({
+    store,
+    now: () => 2000,
+    artifactStore: new ArtifactStore({ now: () => 2000 }),
+    sessionId: "sess_ordinal_gate",
+  }).plan({
+    contextId: stored.contextId,
+    ...groupedExpressionRequest(stored.contextId),
+  });
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(":r:"), false, "response still carries an occurrence ID string");
+  assert.equal(serialized.includes(":n:"), false, "response still carries a note ID string");
+  const names = new Set();
+  collectKeyNames(result, names);
+  const offenders = ["occurrenceId", "sourceOccurrenceId", "targetOccurrenceId", "noteId", "noteIds"]
+    .filter((field) => names.has(field));
+  assert.deepEqual(offenders, [], `response fields must be ordinals: ${offenders.join(", ")}`);
+  // 正向证据：ordinal 确实在响应里，否则上面三条断言在"什么都不回"时也会通过。
+  // planner 的 occurrence 是个描述符对象，其内层 occurrence 才是可回传的 ordinal。
+  assert.equal(result.occurrence.occurrence, 0);
+  assert.deepEqual(result.occurrence.sharedTargetOccurrences, [0]);
+});
+
+// 递归收集一个响应值里出现过的所有对象键名。
+function collectKeyNames(value, into) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectKeyNames(item, into);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value)) {
+    into.add(key);
+    collectKeyNames(child, into);
+  }
+}
 
 test("a planner failure envelope stays inside the smaller error budget", async () => {
   // §14：error envelope ≤ 8 KiB，且不得回显调用方刚发过的大型请求。

@@ -701,9 +701,8 @@ test("ProcessingService resolves single and explicit range occurrences", async (
     epoch: 1,
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "group-1",
@@ -719,7 +718,7 @@ test("ProcessingService resolves single and explicit range occurrences", async (
     timeoutMs: 0,
   });
   assert.equal(automatic.ok, true);
-  assert.equal(automatic.target.occurrenceId, occurrenceId);
+  assert.equal(automatic.target.occurrence, 0);
   assert.equal(automatic.target.groupUuid, "group-1");
   assert.equal(automatic.data.evidence.expectedNotes, 2);
 
@@ -736,7 +735,7 @@ test("ProcessingService resolves single and explicit range occurrences", async (
   assert.equal(computedPitchCalls.length, 0);
 
   stored.context.computedPitchByOccurrence = {
-    [occurrenceId]: {
+    0: {
       startBlick: 705_600,
       intervalBlick: 176_400,
       frames: 4,
@@ -755,9 +754,8 @@ test("ProcessingService resolves single and explicit range occurrences", async (
     observedFrames: 4,
   });
 
-  const secondOccurrenceId = `${stored.contextId}:t:0:r:1`;
   stored.context.occurrences.push({
-    occurrenceId: secondOccurrenceId,
+    occurrence: 1,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "group-1",
@@ -766,22 +764,19 @@ test("ProcessingService resolves single and explicit range occurrences", async (
     processing.wait({ contextId: stored.contextId, kind: "phonemes", timeoutMs: 0 }),
     (error) => {
       assert.equal(error.code, "AMBIGUOUS_CONTEXT");
-      assert.deepEqual(
-        error.details.candidateOccurrences.map((candidate) => candidate.occurrenceId),
-        [occurrenceId, secondOccurrenceId]
-      );
+      assert.deepEqual(error.details.candidates, [0, 1]);
       return true;
     }
   );
 
   const explicit = await processing.wait({
     contextId: stored.contextId,
-    occurrenceId: secondOccurrenceId,
+    occurrence: 1,
     kind: "phonemes",
     timeoutMs: 0,
   });
   assert.equal(explicit.ok, true);
-  assert.equal(explicit.target.occurrenceId, secondOccurrenceId);
+  assert.equal(explicit.target.occurrence, 1);
   assert.equal(explicit.data.evidence.computedItems, 2);
   assert.equal(noteGetterCalls, 0);
 });

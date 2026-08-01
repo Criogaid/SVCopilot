@@ -34,7 +34,6 @@ function createStoredContext(store, options) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -44,21 +43,20 @@ function createStoredContext(store, options) {
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: note.detuneCents ?? 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-compare-test",
     timeOffsetBlick,
     pitchOffsetSemitone,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints,
   });
   const map = Object.create(null);
   if (withComputedPitch) {
-    map[occurrenceId] = {
+    map[0] = {
       startBlick,
       intervalBlick,
       frames: values.length,
@@ -73,25 +71,24 @@ function createStoredContext(store, options) {
     };
   }
   if (extraOccurrenceWithPitch) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
-      occurrenceId: secondId,
+      occurrence: 1,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: "uuid-compare-test",
       timeOffsetBlick,
       pitchOffsetSemitone,
-      sharedTargetOccurrences: [occurrenceId, secondId],
+      sharedTargetOccurrences: [0, 1],
       noteFingerprints: [],
     });
-    map[secondId] = { ...map[occurrenceId] };
+    map[1] = { ...map[0] };
   }
   stored.context.computedPitchByOccurrence = map;
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm }];
   stored.snapshotToken = `snap_${stored.contextId}`;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {

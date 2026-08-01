@@ -64,7 +64,7 @@ test("a 373-note group resolves scoped targets without reading every note", asyn
   const fixture = createBenchFixture({ noteCount: 373, bulk: true });
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
-    occurrenceId: fixture.occurrenceId,
+    occurrence: 0,
     patches: [
       { note: 0, set: { lyrics: "x" } },
       { note: 372, set: { lyrics: "y" } },

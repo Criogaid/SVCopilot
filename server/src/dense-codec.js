@@ -39,7 +39,7 @@ export const NOTE_DENSE_PROFILE = Object.freeze({
   maxRows: 2_000,
   columns: Object.freeze(
     [
-      { name: "occurrenceId", type: "string" },
+      { name: "occurrence", type: "integer" },
       { name: "trackIndex", type: "integer", encoding: "delta" },
       { name: "groupIndex", type: "integer", encoding: "delta" },
       { name: "groupUuid", type: "string", nullable: true },

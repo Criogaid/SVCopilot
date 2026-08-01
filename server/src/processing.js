@@ -1,5 +1,6 @@
 import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { getStoredComputedPitch, RANGE_REQUEST_LIMITS } from "./musical-range.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
 
@@ -33,7 +34,7 @@ export class ProcessingService {
               host,
               stored,
               options.contextId,
-              options.occurrenceId
+              options.occurrence
             );
             scope = resolved.scope;
             options.expectedNotes ??= resolved.expectedNotes;
@@ -233,13 +234,13 @@ function normalizeRequest(request) {
     throw codedError("INVALID_TARGET", "contextId or group handle is required");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string");
+    throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative occurrence ordinal");
   }
-  if (request.occurrenceId !== undefined && typeof request.contextId !== "string") {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId requires contextId");
+  if (request.occurrence !== undefined && typeof request.contextId !== "string") {
+    throw codedError("INVALID_ARGUMENTS", "occurrence requires contextId");
   }
   if (kind === "computedPitch") {
     validateComputedPitchSampling(request, { allowMissing: true });
@@ -277,7 +278,7 @@ function normalizeRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     group: request.group,
     kind,
     expectedNotes: request.expectedNotes,
@@ -292,9 +293,9 @@ function normalizeRequest(request) {
   };
 }
 
-async function resolveProcessingContext(host, stored, contextId, requestedOccurrenceId) {
-  const selected = selectContextOccurrence(stored, contextId, requestedOccurrenceId);
-  const capturedPitch = getStoredComputedPitch(stored, selected.occurrenceId);
+async function resolveProcessingContext(host, stored, contextId, requestedOccurrence) {
+  const selected = selectContextOccurrence(stored, contextId, requestedOccurrence);
+  const capturedPitch = getStoredComputedPitch(stored, selected.occurrence);
   const scope = createHostScope(host);
   try {
     const roots = await scope.roots();
@@ -327,7 +328,7 @@ async function resolveProcessingContext(host, stored, contextId, requestedOccurr
         : null,
       target: {
         contextId,
-        ...(selected.occurrenceId ? { occurrenceId: selected.occurrenceId } : {}),
+        ...(Number.isSafeInteger(selected.occurrence) ? { occurrence: selected.occurrence } : {}),
         trackIndex: selected.trackIndex,
         groupIndex: selected.groupIndex,
         groupUuid: observedGroupUuid,
@@ -386,45 +387,27 @@ function validateComputedPitchSampling(values, { allowMissing }) {
   }
 }
 
-function selectContextOccurrence(stored, contextId, requestedOccurrenceId) {
+function selectContextOccurrence(stored, contextId, requestedOrdinal) {
   if (stored?.context?.kind === "range") {
-    const occurrences = Array.isArray(stored.context.occurrences)
-      ? stored.context.occurrences
-      : [];
-    if (requestedOccurrenceId) {
-      const selected = occurrences.find(
-        (occurrence) => occurrence.occurrenceId === requestedOccurrenceId
-      );
-      if (!selected) {
-        throw codedError(
-          "UNKNOWN_OCCURRENCE",
-          `occurrenceId is not part of context ${contextId}`
-        );
+    const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+      stored.context.occurrences,
+      requestedOrdinal,
+      {
+        eligible: (item) => typeof item.targetGroupUuid === "string",
+        noneCode: "INVALID_CONTEXT",
+        noneMessage: "range context has no editable vocal occurrence",
+        ambiguousMessage:
+          "range context identifies multiple vocal occurrences; pass one occurrence ordinal",
+        ineligibleCode: "INVALID_TARGET",
+        ineligibleMessage: "selected occurrence is not an editable vocal group",
       }
-      return rangeOccurrenceTarget(selected);
-    }
-    const candidates = occurrences.filter(
-      (occurrence) => typeof occurrence.targetGroupUuid === "string"
     );
-    if (candidates.length === 0) {
-      throw codedError("INVALID_CONTEXT", "range context has no editable vocal occurrence");
-    }
-    if (candidates.length > 1) {
-      throw codedError(
-        "AMBIGUOUS_CONTEXT",
-        "range context identifies multiple vocal occurrences; provide occurrenceId",
-        {
-          contextId,
-          candidateOccurrences: candidates.map(occurrenceSummary),
-        }
-      );
-    }
-    return rangeOccurrenceTarget(candidates[0]);
+    return rangeOccurrenceTarget(occurrence, ordinal);
   }
-  if (requestedOccurrenceId !== undefined) {
+  if (requestedOrdinal !== undefined) {
     throw codedError(
       "INVALID_CONTEXT",
-      "occurrenceId is only valid with a range snapshot context"
+      "occurrence is only valid with a range snapshot context"
     );
   }
   if (!stored?.context || !["selection", "group"].includes(stored.context.kind)) {
@@ -438,26 +421,18 @@ function selectContextOccurrence(stored, contextId, requestedOccurrenceId) {
   };
 }
 
-function rangeOccurrenceTarget(occurrence) {
+function rangeOccurrenceTarget(occurrence, ordinal) {
   if (typeof occurrence.targetGroupUuid !== "string") {
     throw codedError("INVALID_TARGET", "selected occurrence is not an editable vocal group");
   }
   return {
-    occurrenceId: occurrence.occurrenceId,
+    occurrence: ordinal,
     trackIndex: occurrence.trackIndex,
     groupIndex: occurrence.groupIndex,
     expectedGroupUuid: occurrence.targetGroupUuid,
   };
 }
 
-function occurrenceSummary(occurrence) {
-  return {
-    occurrenceId: occurrence.occurrenceId,
-    trackIndex: occurrence.trackIndex,
-    groupIndex: occurrence.groupIndex,
-    targetGroupUuid: occurrence.targetGroupUuid,
-  };
-}
 
 function clampInteger(value, minimum, maximum, fallback) {
   if (value === undefined) return fallback;

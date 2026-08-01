@@ -165,14 +165,14 @@ function resolveCompareSource(store, contextId, requestedOrdinal, label) {
   // 不同，因此判据由调用方给出而不是写进选择器。显式点名一个没有 computed pitch 的
   // occurrence 与越界是两回事：前者存在但这项分析用不了。
   const { occurrence, ordinal } = selectOccurrenceByOrdinal(occurrences, requestedOrdinal, {
-    eligible: (item) => Object.hasOwn(map, item.occurrenceId),
+    eligible: (item) => Object.hasOwn(map, item.occurrence),
     noneCode: "COMPUTED_PITCH_NOT_CAPTURED",
     noneMessage: `${label} context captured no computed pitch for any occurrence`,
     ambiguousMessage: `${label} context has multiple occurrences with computed pitch; pass one occurrence ordinal`,
     ineligibleCode: "COMPUTED_PITCH_NOT_CAPTURED",
     ineligibleMessage: `${label} occurrence exists but captured no computed pitch; re-run sv_snapshot_range with include ["computedPitch"]`,
   });
-  const series = getStoredComputedPitch(stored, occurrence.occurrenceId);
+  const series = getStoredComputedPitch(stored, ordinal);
   if (!series) {
     throw codedError(
       "COMPUTED_PITCH_NOT_CAPTURED",

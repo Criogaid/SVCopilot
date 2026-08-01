@@ -33,7 +33,6 @@ async function snapshotWithControls(service) {
 }
 
 const byKind = (snapshot, kind) => snapshot.data.pitchControls.find((c) => c.kind === kind);
-const occurrenceId = (snapshot) => `${snapshot.contextId}:t:0:r:0`;
 
 test("dry-run plans add/update/delete with zero host writes and zero Undo", async () => {
   const { model, snapshots, service } = createFixture({
@@ -47,7 +46,7 @@ test("dry-run plans add/update/delete with zero host writes and zero Undo", asyn
   const curve = byKind(snapshot, "curve");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     dryRun: true,
     operations: [
       { op: "add", control: { kind: "point", positionBlick: 3 * Q, pitchSemitone: 65 } },
@@ -76,7 +75,7 @@ test("add/update/delete commits in one Undo with read-back verification and cont
   const curve = byKind(snapshot, "curve");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "add", control: { kind: "point", positionBlick: 3 * Q, pitchSemitone: 65 } },
       { op: "update", controlId: point.controlId, expectedFingerprint: point.fingerprint, set: { pitchSemitone: 61 } },
@@ -114,7 +113,7 @@ test("a no-op update reports no_change with zero Undo and zero host writes", asy
   const point = byKind(snapshot, "point");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "update", controlId: point.controlId, expectedFingerprint: point.fingerprint, set: { pitchSemitone: 60 } },
     ],
@@ -136,7 +135,7 @@ test("operations cannot target a control added earlier in the same request", asy
   const snapshot = await snapshotWithControls(snapshots);
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "add", control: { kind: "point", positionBlick: Q, pitchSemitone: 60 } },
       { op: "delete", controlId: "pc_new_1", expectedFingerprint: "sha256:not-yet-known" },
@@ -155,9 +154,9 @@ test("stale expectedFingerprint fails with zero writes", async () => {
   const snapshot = await snapshotWithControls(snapshots);
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
-      { op: "delete", controlId: `${occurrenceId(snapshot)}:pc:0`, expectedFingerprint: "sha256:stale" },
+      { op: "delete", controlId: "o:0:pc:0", expectedFingerprint: "sha256:stale" },
     ],
   });
   assert.equal(result.ok, false);
@@ -177,7 +176,7 @@ test("identical duplicates are reported ambiguous, never first-matched", async (
   const point = byKind(snapshot, "point");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
   });
   assert.equal(result.ok, false);
@@ -195,7 +194,7 @@ test("a changed group fingerprint conflicts before any write", async () => {
   const groupFingerprint = snapshot.data.tracks[0].groups[0].pitchControlGroupFingerprint;
   const ok = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     target: { expectedPitchControlFingerprint: groupFingerprint },
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
   });
@@ -205,7 +204,7 @@ test("a changed group fingerprint conflicts before any write", async () => {
   const snapshot2 = await snapshotWithControls(snapshots);
   const result = await service.patch({
     contextId: snapshot2.contextId,
-    occurrenceId: occurrenceId(snapshot2),
+    occurrence: 0,
     target: { expectedPitchControlFingerprint: groupFingerprint },
     operations: [{ op: "add", control: { kind: "point", positionBlick: 2 * Q, pitchSemitone: 62 } }],
   });
@@ -224,7 +223,7 @@ test("a moved group reference fails STALE_CONTEXT via expectedTimeOffsetBlick", 
   const point = byKind(snapshot, "point");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     target: { expectedTimeOffsetBlick: 2 * BAR },
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
   });
@@ -240,12 +239,10 @@ test("shared target requires explicit confirmation before any write", async () =
     controls: [{ kind: "point", position: Q, pitch: 60 }],
   });
   const snapshot = await snapshotWithControls(snapshots);
-  const point = snapshot.data.pitchControls.find(
-    (c) => c.occurrenceId === occurrenceId(snapshot)
-  );
+  const point = snapshot.data.pitchControls.find((c) => c.occurrence === 0);
   const refused = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
   });
   assert.equal(refused.ok, false);
@@ -255,7 +252,7 @@ test("shared target requires explicit confirmation before any write", async () =
 
   const confirmed = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     target: { allowSharedTargetMutation: true },
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
   });
@@ -276,7 +273,7 @@ test("atomic rollback restores the full set and scriptData after a mid-delete fa
   model.failures.push({ method: "removePitchControl", remainingSkips: 0, code: "ARGUMENT_MISMATCH" });
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "add", control: { kind: "point", positionBlick: 3 * Q, pitchSemitone: 65 } },
       { op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint },
@@ -306,7 +303,7 @@ test("a multi-field update journals its inverse before the first setter", async 
 
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       {
         op: "update",
@@ -337,7 +334,7 @@ test("journal capture failure happens before opening an Undo record", async () =
 
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       {
         op: "update",
@@ -365,7 +362,7 @@ test("a silently-ignored setter is caught by read-back and rolled back", async (
   model.ignoreSetters.add("setPitch");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "update", controlId: point.controlId, expectedFingerprint: point.fingerprint, set: { pitchSemitone: 62 } },
     ],
@@ -390,7 +387,7 @@ test("a host timeout during write reports outcome_unknown and never auto-retries
   });
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "add", control: { kind: "point", positionBlick: 2 * Q, pitchSemitone: 62 } },
     ],
@@ -410,7 +407,7 @@ test("a curve round-trips its anchor and points through an update", async () => 
   const curve = byKind(snapshot, "curve");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       {
         op: "update",
@@ -442,7 +439,7 @@ test("cross-kind update fields are rejected, not silently ignored", async () => 
   const point = byKind(snapshot, "point");
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "update", controlId: point.controlId, expectedFingerprint: point.fingerprint, set: { anchorPitchSemitone: 61 } },
     ],
@@ -458,7 +455,7 @@ test("atomic:false is rejected explicitly rather than silently ignored", async (
   const snapshot = await snapshotWithControls(snapshots);
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     atomic: false,
     operations: [{ op: "add", control: { kind: "point", positionBlick: Q, pitchSemitone: 60 } }],
   });
@@ -474,7 +471,6 @@ test("a moved anchored note fails STALE_CONTEXT via expectedNotes before any wri
   const point = byKind(snapshot, "point");
   const anchor = model.notes[0].state;
   const expectedNote = {
-    noteId: `${occurrenceId(snapshot)}:n:0`,
     indexInGroup: 0,
     onsetBlick: anchor.onset,
     durationBlick: anchor.duration,
@@ -486,7 +482,7 @@ test("a moved anchored note fails STALE_CONTEXT via expectedNotes before any wri
   };
   const ok = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     target: { expectedNotes: [expectedNote] },
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
   });
@@ -499,7 +495,7 @@ test("a moved anchored note fails STALE_CONTEXT via expectedNotes before any wri
   const point2 = snapshot2.data.pitchControls.find((c) => c.kind === "point");
   const result = await service.patch({
     contextId: snapshot2.contextId,
-    occurrenceId: occurrenceId(snapshot2),
+    occurrence: 0,
     target: { expectedNotes: [expectedNote] },
     operations: [
       { op: "add", control: { kind: "point", positionBlick: 2 * Q, pitchSemitone: 62 } },
@@ -526,7 +522,7 @@ test("a verified write keeps effects:verified when post-commit processing observ
   });
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     waitFor: "computedPitch",
     operations: [{ op: "add", control: { kind: "point", positionBlick: Q, pitchSemitone: 60 } }],
   });
@@ -552,7 +548,7 @@ test("reorder during rollback restores the full pre-transaction set", async () =
   model.failures.push({ method: "removePitchControl", remainingSkips: 0, code: "ARGUMENT_MISMATCH" });
   const result = await service.patch({
     contextId: snapshot.contextId,
-    occurrenceId: occurrenceId(snapshot),
+    occurrence: 0,
     operations: [
       { op: "add", control: { kind: "point", positionBlick: Q, pitchSemitone: 60 } },
       { op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint },

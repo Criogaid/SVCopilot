@@ -25,15 +25,14 @@ function createContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
-  const build = (id, trackIndex, uuid, list) => ({
-    occurrenceId: id,
+  const build = (ordinal, trackIndex, uuid, list) => ({
+    occurrence: ordinal,
     trackIndex,
     groupIndex: 0,
     targetGroupUuid: uuid,
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [id],
+    sharedTargetOccurrences: [ordinal],
     noteFingerprints: list.map((note, index) => ({
       indexInGroup: index,
       onsetBlick: note.onsetBlick,
@@ -43,18 +42,16 @@ function createContext(store, options = {}) {
       phonemesOverride: note.phonemesOverride ?? "",
       languageOverride: note.languageOverride ?? "",
       detuneCents: 0,
-      noteId: `${id}:n:${index}`,
     })),
   });
-  stored.context.occurrences.push(build(occurrenceId, 0, "uuid-a", notes));
+  stored.context.occurrences.push(build(0, 0, "uuid-a", notes));
   if (extraOccurrenceNotes) {
-    const second = `${stored.contextId}:t:1:r:0`;
-    stored.context.occurrences.push(build(second, 1, "uuid-b", extraOccurrenceNotes));
+    stored.context.occurrences.push(build(1, 1, "uuid-b", extraOccurrenceNotes));
   }
   if (computedPitchValues) {
     // computed pitch 存在 context 级 map 上（与 sv_snapshot_range 的实际存储一致）。
     stored.context.computedPitchByOccurrence = {
-      [occurrenceId]: {
+      0: {
         startBlick: 0,
         intervalBlick: Q / 16,
         frames: computedPitchValues.length,
@@ -77,7 +74,7 @@ function createContext(store, options = {}) {
     to: { bar: 2, beat: 1, tickInBeatBlick: 0, blick: 4 * Q },
   };
   stored.snapshotToken = `snap_${stored.contextId}`;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 const MELODY = [
@@ -139,7 +136,7 @@ test("composite style summary preserves the standalone style evidence", async ()
     { onsetBlick: 2 * Q, durationBlick: Q, pitch: 72, lyrics: "り" },
     { onsetBlick: 3 * Q, durationBlick: Q, pitch: 60, lyrics: "br" },
   ];
-  const { stored, occurrenceId } = createContext(store, { notes });
+  const { stored } = createContext(store, { notes });
   const service = analyzer(store);
   const standalone = await service.style.profile({
     targets: [{ contextId: stored.contextId, occurrence: 0 }],
@@ -231,7 +228,7 @@ test("missing computed pitch is reported as not-enough-data, never as zero error
 
 test("every section carries a stateless detail pointer instead of a cursor", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createContext(store, { notes: MELODY });
+  const { stored } = createContext(store, { notes: MELODY });
   const result = await analyzer(store).analyze({ contextId: stored.contextId });
 
   for (const [name, section] of Object.entries(result.sections)) {
@@ -293,7 +290,7 @@ test("prosody issues surface as ranked findings with an actionable next step", a
 
 test("composite preserves special-lyric gap evidence and does not call it clean", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createContext(store, {
+  const { stored } = createContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 69, lyrics: "glory" },
       { onsetBlick: Q + 1, durationBlick: Q, pitch: 69, lyrics: "+" },

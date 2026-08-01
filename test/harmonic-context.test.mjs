@@ -26,15 +26,15 @@ function createContext(store, notes, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
+
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-harmonic",
     timeOffsetBlick: 0,
     pitchOffsetSemitone,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints: notes.map((note, index) => ({
       indexInGroup: index,
       onsetBlick: note.onsetBlick,
@@ -44,14 +44,13 @@ function createContext(store, notes, options = {}) {
       phonemesOverride: "",
       languageOverride: "",
       detuneCents: 0,
-      noteId: `${occurrenceId}:n:${index}`,
     })),
   });
   stored.context.quarterBlick = Q;
   if (meterMarks) stored.context.meterMarks = meterMarks;
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
   stored.snapshotToken = `snap_${stored.contextId}`;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function analyzer(store) {

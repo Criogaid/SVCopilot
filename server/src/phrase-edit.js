@@ -13,6 +13,7 @@ import { ServiceTiming } from "./service-timing.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 
 const MAX_CURVES = 16;
@@ -433,12 +434,21 @@ async function resolveTarget(
   if (stored.context?.kind !== "range") {
     throw codedError("INVALID_CONTEXT", "sv_edit_phrase requires a range snapshot context");
   }
-  const occurrence = stored.context.occurrences.find(
-    (item) => item.occurrenceId === targetInput.occurrenceId
+  // occurrence 必填（见 normalizeRequest）：组合事务必须明确目标，因此这里不引入
+  // "唯一候选自动选择"语义，只把身份换成 ordinal。
+  const { occurrence } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    targetInput.occurrence,
+    {
+      eligible: (item) =>
+        typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
+      noneCode: "INVALID_CONTEXT",
+      noneMessage: "range context contains no editable vocal occurrence",
+      ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
+      ineligibleCode: "INVALID_TARGET",
+      ineligibleMessage: "instrumental occurrences cannot be edited as note groups",
+    }
   );
-  if (!occurrence) {
-    throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
-  }
   const roots = await capture.roots();
   const track = await capture.call(roots.project, "getTrack", [occurrence.trackIndex + 1], {
     inferredType: "Track",
@@ -1159,7 +1169,7 @@ function phraseSuccess(options) {
     preflightMode: prepared.preflightMode,
     target: {
       contextId: input.target.contextId,
-      occurrenceId: input.target.occurrenceId,
+      occurrence: input.target.occurrence,
       trackIndex: resolved.occurrence.trackIndex,
       groupIndex: resolved.occurrence.groupIndex,
       groupUuid: resolved.originalTargetUuid,
@@ -1294,10 +1304,13 @@ function normalizeRequest(request) {
     !isRecord(target) ||
     typeof target.contextId !== "string" ||
     !target.contextId ||
-    typeof target.occurrenceId !== "string" ||
-    !target.occurrenceId
+    !Number.isSafeInteger(target.occurrence) ||
+    target.occurrence < 0
   ) {
-    throw codedError("INVALID_ARGUMENTS", "target requires contextId and occurrenceId");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "target requires contextId and a non-negative occurrence ordinal"
+    );
   }
   if (
     target.expectedGroupUuid !== undefined &&
@@ -1345,7 +1358,7 @@ function normalizeRequest(request) {
   return {
     target: {
       contextId: target.contextId,
-      occurrenceId: target.occurrenceId,
+      occurrence: target.occurrence,
       expectedGroupUuid: target.expectedGroupUuid,
       allowSharedTargetMutation: target.allowSharedTargetMutation === true,
     },

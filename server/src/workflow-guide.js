@@ -27,10 +27,8 @@ const EXAMPLE = {
   contextId: "c_EXAMPLE",
   beforeContextId: "c_EXAMPLE_BEFORE",
   afterContextId: "c_EXAMPLE_AFTER",
-  occurrenceId: "c_EXAMPLE:t:0:r:0",
-  // 已迁移到 ordinal 身份的 operation 用 0-based occurrence 序号（§3.1）。
   occurrence: 0,
-  targetOccurrenceId: "c_EXAMPLE:t:1:r:0",
+  targetOccurrence: 1,
   // 已迁移到 fingerprint 身份的 operation 用组内 index 引用音符（§3.1）。
   noteIndex: 0,
   secondNoteIndex: 1,
@@ -87,7 +85,7 @@ function projectNeed(entry) {
 const GLOBAL_RULES = {
   identity: [
     "All indices are 0-based. Bars and beats in sv_snapshot_range scope are 1-based.",
-    "Note indexes and occurrenceId are only valid inside the contextId that issued them. Never carry them across contexts.",
+    "Note indexes and 0-based occurrence ordinals are only valid inside the contextId that issued them. Never carry them across contexts.",
     "snapshotToken is a content hash, not a host revision. sinceToken still reads the host before answering no_change.",
   ],
   contextLifecycle: [
@@ -270,7 +268,7 @@ const RECIPES = [
         arguments: { contextId: EXAMPLE.contextId, occurrence: EXAMPLE.occurrence },
         acceptable: ["succeeded (read summary.evidence for how complete it is)"],
         nonRetryable: [
-          "AMBIGUOUS_CONTEXT — pass occurrenceId; do not guess which occurrence was meant",
+          "AMBIGUOUS_CONTEXT — pass the returned 0-based occurrence candidate; do not guess which occurrence was meant",
           "UNKNOWN_CONTEXT / INVALID_CONTEXT — re-snapshot, do not retry",
         ],
         readingRules: [
@@ -289,7 +287,7 @@ const RECIPES = [
           "Only when the computedPitch section reported not_captured or insufficient_evidence: let the host finish computing, then re-snapshot and re-analyze.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.occurrenceId,
+          occurrence: EXAMPLE.occurrence,
           kind: "computedPitch",
         },
         optional: true,
@@ -505,7 +503,7 @@ const RECIPES = [
         tool: "sv_patch_parameter_curves",
         purpose: "Dry-run the planned curves; read the diff summary before writing.",
         arguments: {
-          target: { contextId: EXAMPLE.contextId, occurrenceId: EXAMPLE.occurrenceId },
+          target: { contextId: EXAMPLE.contextId, occurrence: EXAMPLE.occurrence },
           curves: [
             {
               parameter: "pitchDelta",
@@ -527,7 +525,7 @@ const RECIPES = [
         tool: "sv_patch_parameter_curves",
         purpose: "Commit the identical arguments with dryRun removed. One Undo interval for all curves.",
         arguments: {
-          target: { contextId: EXAMPLE.contextId, occurrenceId: EXAMPLE.occurrenceId },
+          target: { contextId: EXAMPLE.contextId, occurrence: EXAMPLE.occurrence },
           curves: [
             {
               parameter: "loudness",
@@ -594,6 +592,7 @@ const RECIPES = [
           "Compile an explicit gesture into a bounded apply envelope. Pure in-memory; writes nothing.",
         arguments: {
           contextId: EXAMPLE.contextId,
+          occurrence: EXAMPLE.occurrence,
           gestures: [
             { type: "attack", note: EXAMPLE.noteIndex, depthSemitone: 0.3, direction: "up" },
           ],
@@ -611,7 +610,7 @@ const RECIPES = [
         purpose: "Dry-run the planned operations; read the planned operations before writing.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.occurrenceId,
+          occurrence: EXAMPLE.occurrence,
           operations: [
             {
               op: "add",
@@ -637,7 +636,7 @@ const RECIPES = [
         purpose: "Commit the identical arguments with dryRun removed. One Undo interval for all operations.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.occurrenceId,
+          occurrence: EXAMPLE.occurrence,
           operations: [
             {
               op: "add",
@@ -671,7 +670,7 @@ const RECIPES = [
           "Optional: freeze the host's computed pitch into ONE owned curve when coverage is sufficient (all-null or below-threshold writes nothing).",
         arguments: {
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.occurrenceId,
+          occurrence: EXAMPLE.occurrence,
           dryRun: true,
         },
         optional: true,
@@ -820,7 +819,7 @@ const RECIPES = [
         requiredInclude: ["notes"],
         acceptable: ["status captured"],
         readingRules: [
-          "Both occurrenceIds must come from THIS context. A source in one context and a target in another is rejected.",
+          "Both occurrence ordinals must come from THIS context. A source ordinal from one context and a target ordinal from another must never be mixed.",
         ],
       },
       {
@@ -829,8 +828,8 @@ const RECIPES = [
         purpose: "Plan diatonic harmony notes in target-local coordinates. Pure in-memory.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          sourceOccurrenceId: EXAMPLE.occurrenceId,
-          targetOccurrenceId: EXAMPLE.targetOccurrenceId,
+          sourceOccurrence: EXAMPLE.occurrence,
+          targetOccurrence: EXAMPLE.targetOccurrence,
           harmony: { interval: "third_below", key: { tonic: "A", mode: "minor" } },
           register: { minPitch: 48, maxPitch: 72 },
           lyricsMode: "copy",
@@ -853,7 +852,7 @@ const RECIPES = [
         purpose: "Dry-run the planned inserts.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.targetOccurrenceId,
+          occurrence: EXAMPLE.targetOccurrence,
           operations: [
             {
               op: "insert",
@@ -871,7 +870,7 @@ const RECIPES = [
         purpose: "Commit the inserts inside one Undo interval.",
         arguments: {
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.targetOccurrenceId,
+          occurrence: EXAMPLE.targetOccurrence,
           operations: [
             {
               op: "insert",
@@ -918,7 +917,7 @@ const RECIPES = [
           "Let the host finish recomputing pitch after the edit. Read-only polling; it never changes a verified write outcome.",
         arguments: {
           contextId: EXAMPLE.beforeContextId,
-          occurrenceId: EXAMPLE.occurrenceId,
+          occurrence: EXAMPLE.occurrence,
           kind: "computedPitch",
         },
         acceptable: ["ready", "timeout (reports the last observation, never a fake success)"],

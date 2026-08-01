@@ -29,7 +29,6 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -39,36 +38,29 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: note.detuneCents ?? 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
     occurrence: 0,
-    occurrenceId,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-plan-test",
     timeOffsetBlick,
     pitchOffsetSemitone: 0,
     groupNoteCount: noteFingerprints.length,
-    sharedTargetOccurrences: sharedTargetOccurrences ?? [occurrenceId],
+    sharedTargetOccurrences: sharedTargetOccurrences ?? [0],
     noteFingerprints,
   });
   if (extraOccurrenceWithNotes) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
       occurrence: 1,
-      occurrenceId: secondId,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: "uuid-plan-test",
       timeOffsetBlick,
       pitchOffsetSemitone: 0,
       groupNoteCount: noteFingerprints.length,
-      sharedTargetOccurrences: [occurrenceId, secondId],
-      noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
-        ...fingerprint,
-        noteId: `${secondId}:n:${index}`,
-      })),
+      sharedTargetOccurrences: [0, 1],
+      noteFingerprints: noteFingerprints.map((fingerprint) => ({ ...fingerprint })),
     });
   }
   stored.context.computedPitchByOccurrence = Object.create(null);
@@ -76,15 +68,11 @@ function createStoredContext(store, options = {}) {
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm }];
   stored.snapshotToken = `snap_${stored.contextId}`;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {
   return new ExpressionPlanService({ store, now: () => 2000 });
-}
-
-function noteId(occurrenceId, index) {
-  return `${occurrenceId}:n:${index}`;
 }
 
 function approx(actual, expected, tolerance = 1e-6) {
@@ -103,7 +91,7 @@ function assertApplyRequestsWellFormed(result) {
     assert.equal(request.arguments.dryRun, true);
     assert.equal(request.arguments.atomic, true);
     assert.ok(request.arguments.target.contextId);
-    assert.ok(request.arguments.target.occurrenceId);
+    assert.equal(request.arguments.target.occurrence, 0);
     assert.equal(request.arguments.target.expectedGroupUuid, "uuid-plan-test");
     // F1/R2：target 必须携带锚点音符指纹与快照时 reference 偏移，并能通过 parameter-curve 的
     // 真实 target 归一化（apply 前逐条核对；reference 被 setTimeOffset 移动即 STALE_CONTEXT）。
@@ -135,7 +123,7 @@ function assertApplyRequestsWellFormed(result) {
 
 test("explicit scoop compiles to a guarded pitchDelta replace operation", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 2 * Q, durationBlick: 2 * Q, pitch: 60 }],
   });
   const result = await createService(store).plan({
@@ -172,7 +160,7 @@ test("explicit scoop compiles to a guarded pitchDelta replace operation", async 
 
 test("explicit fall ends at -depth with a trailing baseline guard", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 2 * Q, pitch: 60 }],
   });
   const result = await createService(store).plan({
@@ -189,7 +177,7 @@ test("explicit fall ends at -depth with a trailing baseline guard", async () => 
 
 test("portamento bends symmetrically so perceived pitch stays continuous", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60 },
       { onsetBlick: Q, durationBlick: Q, pitch: 62 },
@@ -217,7 +205,7 @@ test("portamento bends symmetrically so perceived pitch stays continuous", async
 
 test("portamento rejects non-adjacent notes and equal pitches", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60 },
       { onsetBlick: 2 * Q, durationBlick: Q, pitch: 62 }, // 有休止
@@ -247,7 +235,7 @@ test("portamento rejects non-adjacent notes and equal pitches", async () => {
 
 test("vibrato renders a bounded sine with envelope and honest stacking warning", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 4 * Q, pitch: 65 }], // 120bpm → 2 s 长音
   });
   const result = await createService(store).plan({
@@ -265,7 +253,7 @@ test("vibrato renders a bounded sine with envelope and honest stacking warning",
 
 test("vibrato respects avoidExcessiveVibrato and minimum sustain", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: Q, pitch: 65 }], // 1 quarter，短于 1.5
   });
   const service = createService(store);
@@ -288,7 +276,7 @@ test("vibrato respects avoidExcessiveVibrato and minimum sustain", async () => {
 
 test("vibratoEnv shapes the envelope with baseline-1 guards and conflicts are rejected", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 2 * Q, durationBlick: 4 * Q, pitch: 65 }],
   });
   const service = createService(store);
@@ -326,7 +314,7 @@ test("vibratoEnv shapes the envelope with baseline-1 guards and conflicts are re
 
 test("hairpin peaks at the requested position in the parameter's own unit", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: 2 * Q, pitch: 60 },
       { onsetBlick: 2 * Q, durationBlick: 2 * Q, pitch: 64 },
@@ -356,7 +344,7 @@ test("hairpin peaks at the requested position in the parameter's own unit", asyn
 
 test("overlapping gestures on one parameter merge additively into one operation", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 4 * Q, pitch: 65 }],
   });
   const result = await createService(store).plan({
@@ -377,7 +365,7 @@ test("overlapping gestures on one parameter merge additively into one operation"
 
 test("disjoint clusters of one parameter partition into sequential apply calls", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60 },
       { onsetBlick: 4 * Q, durationBlick: Q, pitch: 62 },
@@ -428,7 +416,7 @@ test("jpop intent derives deterministic per-phrase scoops with heuristic confide
 test("intent-derived gestures skip every non-melodic event with structured warnings", async () => {
   const store = createStore();
   // br / orphan +/- / 单独 apostrophe 均不提供高层旋律证据；后续合法 +/- 链仍保留。
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "br" },
       { onsetBlick: Q, durationBlick: Q, pitch: 61, lyrics: "+" },
@@ -489,7 +477,7 @@ test("intent-derived gestures skip every non-melodic event with structured warni
 
 test("intent treats only exact lowercase br as breath and keeps valid continuations melodic", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "BR" },
       { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "+" },
@@ -625,7 +613,7 @@ test("section + emotion together do not double-drive loudness", async () => {
 
 test("plan attaches referenced note fingerprints to each apply target (F1 drift guard)", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: intentFixtureNotes(),
     timeOffsetBlick: 2 * Q,
   });
@@ -656,7 +644,7 @@ test("plan attaches referenced note fingerprints to each apply target (F1 drift 
 
 test("explicit gestures supersede overlapping intent candidates", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, { notes: intentFixtureNotes() });
+  const { stored } = createStoredContext(store, { notes: intentFixtureNotes() });
   const result = await createService(store).plan({
     contextId: stored.contextId,
     intent: { genre: "jpop" },
@@ -671,7 +659,7 @@ test("explicit gestures supersede overlapping intent candidates", async () => {
 
 test("constraint clamping bounds values and reports honestly", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 2 * Q, pitch: 60 }],
   });
   const result = await createService(store).plan({
@@ -687,7 +675,7 @@ test("constraint clamping bounds values and reports honestly", async () => {
 
 test("plans over the point budget fail with PLAN_TOO_DENSE", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 8 * Q, pitch: 65 }],
   });
   await assert.rejects(
@@ -780,7 +768,7 @@ test("plan validates request shape before touching the store", async () => {
 
 test("compact responses keep summary, applyRequests, and review only", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 2 * Q, pitch: 60 }],
   });
   const result = await createService(store).plan({
@@ -797,7 +785,7 @@ test("compact responses keep summary, applyRequests, and review only", async () 
 
 test("shared targets surface in review and default constraints are exposed", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 2 * Q, pitch: 60 }],
     sharedTargetOccurrences: ["occ-a", "occ-b"],
   });
@@ -884,7 +872,7 @@ test("preset constraint defaults apply but explicit constraints always win", asy
 
 test("spoken_rap_transition seeds vibratoEnv flattening on sustains", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, { notes: presetFixtureNotes() });
+  const { stored } = createStoredContext(store, { notes: presetFixtureNotes() });
   const result = await createService(store).plan({
     contextId: stored.contextId,
     intent: { preset: "spoken_rap_transition" },

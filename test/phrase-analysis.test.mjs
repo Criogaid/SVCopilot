@@ -18,7 +18,6 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -28,38 +27,33 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: note.detuneCents ?? 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-analysis-test",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints,
   });
   if (extraOccurrenceWithNotes) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
-      occurrenceId: secondId,
+      occurrence: 1,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: "uuid-analysis-test",
       timeOffsetBlick: 0,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [occurrenceId, secondId],
-      noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
-        ...fingerprint,
-        noteId: `${secondId}:n:${index}`,
-      })),
+      sharedTargetOccurrences: [0, 1],
+      noteFingerprints: noteFingerprints.map((fingerprint) => ({ ...fingerprint })),
     });
   }
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {
@@ -147,7 +141,7 @@ test("non-diatonic notes are flagged explicitly", async () => {
   const store = createStore();
   const notes = fixtureNotes();
   notes.push({ onsetBlick: 16934400000, durationBlick: Q, pitch: 60, lyrics: "x" }); // C 自然音
-  const { stored, occurrenceId } = createStoredContext(store, { notes });
+  const { stored } = createStoredContext(store, { notes });
   const result = await createService(store).analyze({
     contextId: stored.contextId,
     include: ["key", "scaleDegrees"],

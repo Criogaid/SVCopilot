@@ -4,6 +4,7 @@ import { scanTargetOccurrences } from "./parameter-curve.js";
 import { measureDiagnosticPhase } from "./operation-diagnostics.js";
 import { createBulkStats, readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 export async function resolveContextTarget(
   host,
@@ -11,7 +12,7 @@ export async function resolveContextTarget(
   {
     verify = true,
     acceptRange = false,
-    occurrenceId,
+    occurrence,
     noteIndicesInGroup,
     diagnostics = null,
   } = {}
@@ -25,18 +26,18 @@ export async function resolveContextTarget(
     }
     return resolveRangeContextTarget(host, stored, {
       verify,
-      occurrenceId,
-        noteIndicesInGroup,
+      occurrence,
+      noteIndicesInGroup,
       diagnostics,
     });
   }
   if (!stored?.context || !["selection", "group"].includes(stored.context.kind)) {
     throw codedError("INVALID_CONTEXT", "context does not identify an editable note group");
   }
-  if (occurrenceId !== undefined) {
+  if (occurrence !== undefined) {
     throw codedError(
       "INVALID_ARGUMENTS",
-      "occurrenceId only applies to range contexts from sv_snapshot_range"
+      "occurrence only applies to range contexts from sv_snapshot_range"
     );
   }
   const scope = createHostScope(host);
@@ -118,34 +119,20 @@ export async function resolveContextTarget(
 async function resolveRangeContextTarget(
   host,
   stored,
-  { verify, occurrenceId, noteIndicesInGroup, diagnostics }
+  { verify, occurrence: requestedOrdinal, noteIndicesInGroup, diagnostics }
 ) {
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const vocal = occurrences.filter(
-    (item) => typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0
-  );
-  let occurrence = null;
-  if (occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
-    }
-    if (!vocal.includes(occurrence)) {
-      throw codedError("INVALID_TARGET", "instrumental occurrences cannot be edited as note groups");
-    }
-  } else if (vocal.length === 1) {
-    occurrence = vocal[0];
-  } else if (vocal.length === 0) {
-    throw codedError("INVALID_CONTEXT", "range context contains no editable vocal occurrence");
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple vocal occurrences; provide occurrenceId"
-    );
-    error.candidateOccurrences = vocal.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
-  }
+  // 候选判据是"可编辑的人声 occurrence"：instrumental 的存在但不能当 NoteGroup 编辑，
+  // 因此显式点名它得到 INVALID_TARGET，而不是"越界"或"未捕获"。
+  const { occurrence } = selectOccurrenceByOrdinal(stored.context.occurrences, requestedOrdinal, {
+    eligible: (item) =>
+      typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
+    noneCode: "INVALID_CONTEXT",
+    noneMessage: "range context contains no editable vocal occurrence",
+    ambiguousMessage:
+      "range context has multiple vocal occurrences; pass one occurrence ordinal",
+    ineligibleCode: "INVALID_TARGET",
+    ineligibleMessage: "instrumental occurrences cannot be edited as note groups",
+  });
 
   const scope = createHostScope(host);
   const bulkStats = createBulkStats();

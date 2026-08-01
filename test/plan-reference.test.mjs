@@ -17,7 +17,7 @@ const sessionId = "sess_plan";
     targetTool: "sv_patch_notes",
     mutationRequest: { patches: [{ noteId: "n1", lyrics: "hello" }] },
     targetGroupUuid: "grp_1",
-    occurrenceId: "occ_1",
+    occurrence: 1,
     expectedTimeOffsetBlick: 100,
   });
   const artifact = store.seal({
@@ -58,7 +58,7 @@ const sessionId = "sess_plan";
     context: { kind: "range", occurrences: [] },
   });
   const occurrence = {
-    occurrenceId: `${stored.contextId}:t:0:r:0`,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "grp_restore",
@@ -96,9 +96,12 @@ const sessionId = "sess_plan";
   assert.strictEqual(snapshotStore.get(stored.contextId), null);
   assert.strictEqual(resolved.capsule.epoch, 7);
   assert.strictEqual(resolved.capsule.contextId, stored.contextId);
+  // capsule 只封存一个 occurrence，因此其局部 ordinal 恒为 0——源 Context 里的编号
+  // 不会带进来（否则 scope-source 的一致性检查会正确地拒绝它）。
+  assert.strictEqual(resolved.capsule.context.occurrences[0].occurrence, 0);
   assert.strictEqual(
-    resolved.capsule.context.occurrences[0].occurrenceId,
-    occurrence.occurrenceId
+    resolved.capsule.context.occurrences[0].targetGroupUuid,
+    occurrence.targetGroupUuid
   );
 }
 
@@ -113,7 +116,7 @@ const sessionId = "sess_plan";
     context: { kind: "range", occurrences: [] },
   });
   const occurrence = {
-    occurrenceId: `${stored.contextId}:t:0:r:0`,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "grp_live",
@@ -144,6 +147,81 @@ const sessionId = "sess_plan";
     snapshotStore,
   });
   assert.strictEqual(resolved.capsule, null);
+}
+
+// ordinal 是源 Context 内的坐标；单 occurrence capsule 的局部坐标恒为 0。
+// 只有切换到 capsule 时才重映射，源 Context 尚存时必须保留原 ordinal。
+{
+  let now = 1000;
+  const snapshotStore = new SnapshotStore({ now: () => now, ttlMs: 100 });
+  const stored = snapshotStore.create({
+    epoch: 7,
+    scope: { kind: "range" },
+    observedAt: new Date(now).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrence = {
+    occurrence: 3,
+    trackIndex: 3,
+    groupIndex: 0,
+    targetGroupUuid: "grp_nonzero_ordinal",
+    timeOffsetBlick: 0,
+    sharedTargetOccurrences: [],
+    noteFingerprints: [],
+  };
+  stored.context.occurrences.push(
+    { occurrence: 0 },
+    { occurrence: 1 },
+    { occurrence: 2 },
+    occurrence
+  );
+  const artifactStore = new ArtifactStore({ now: () => now });
+  const sealPlan = (targetTool, mutationRequest) => {
+    const { payload } = buildPlanArtifact({
+      targetTool,
+      mutationRequest,
+      contextSnapshot: buildPlanContextSnapshot(stored, occurrence),
+    });
+    return artifactStore.seal({ kind: "plan", schemaVersion: "1", sessionId, payload });
+  };
+
+  const rootArtifact = sealPlan("sv_patch_notes", {
+    contextId: stored.contextId,
+    occurrence: 3,
+    patches: [],
+  });
+  const live = resolvePlanReference({
+    planRef: rootArtifact.id,
+    action: "dry_run",
+    expectedTargetTool: "sv_patch_notes",
+    sessionId,
+    artifactStore,
+    snapshotStore,
+  });
+  assert.strictEqual(live.capsule, null);
+  assert.strictEqual(live.mutationRequest.occurrence, 3);
+
+  const nestedArtifact = sealPlan("sv_patch_parameter_curves", {
+    target: { contextId: stored.contextId, occurrence: 3 },
+    curves: [],
+  });
+  now += 101;
+  assert.strictEqual(snapshotStore.get(stored.contextId), null);
+  const [rootFromCapsule, nestedFromCapsule] = [
+    [rootArtifact, "sv_patch_notes"],
+    [nestedArtifact, "sv_patch_parameter_curves"],
+  ].map(([artifact, targetTool]) =>
+    resolvePlanReference({
+      planRef: artifact.id,
+      action: "dry_run",
+      expectedTargetTool: targetTool,
+      sessionId,
+      artifactStore,
+      snapshotStore,
+    })
+  );
+  assert.strictEqual(rootFromCapsule.mutationRequest.occurrence, 0);
+  assert.strictEqual(nestedFromCapsule.mutationRequest.target.occurrence, 0);
 }
 
 // 目标工具不匹配报错。

@@ -654,10 +654,7 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${entry.contextId}:t:0:r:0`;
-  const secondOccurrenceId = `${entry.contextId}:t:1:r:0`;
   const noteFingerprints = model.notes.map((note) => ({
-    noteId: `${occurrenceId}:n:${note.index}`,
     indexInGroup: note.index,
     onsetBlick: note.onset,
     durationBlick: note.duration,
@@ -668,17 +665,17 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
     detuneCents: note.detune,
   }));
   entry.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "group-1",
     timeOffsetBlick: 0,
-    sharedTargetOccurrences: shared ? [occurrenceId, secondOccurrenceId] : [occurrenceId],
+    sharedTargetOccurrences: shared ? [0, 1] : [0],
     noteFingerprints,
   });
   if (extraOccurrence) {
     entry.context.occurrences.push({
-      occurrenceId: secondOccurrenceId,
+      occurrence: 1,
       trackIndex: 1,
       groupIndex: 0,
       targetGroupUuid: "group-1",
@@ -687,11 +684,11 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
       noteFingerprints: [],
     });
   }
-  return { model, snapshots, service, contextId: entry.contextId, occurrenceId };
+  return { model, snapshots, service, contextId: entry.contextId };
 }
 
 test("sv_patch_notes accepts a range context and resolves notes by group index", async () => {
-  const { model, snapshots, service, contextId, occurrenceId } = createRangeFixture();
+  const { model, snapshots, service, contextId } = createRangeFixture();
   const result = await service.patchNotes({
     contextId,
     patches: [{ note: 1, set: { lyrics: "ne", pitch: 65 } }],
@@ -712,7 +709,7 @@ test("sv_patch_notes accepts a range context and resolves notes by group index",
 });
 
 test("sv_patch_notes range context enforces shared-target confirmation", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
+  const { model, service, contextId } = createRangeFixture({ shared: true });
   const refused = await service.patchNotes({
     contextId,
     patches: [{ note: 0, set: { lyrics: "x" } }],
@@ -736,7 +733,7 @@ test("sv_patch_notes range context enforces shared-target confirmation", async (
 });
 
 test("sv_patch_notes range context dry-run defers the shared-target scan with warnings", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture({ shared: true });
+  const { model, service, contextId } = createRangeFixture({ shared: true });
   const result = await service.patchNotes({
     contextId,
     patches: [{ note: 0, set: { lyrics: "x" } }],
@@ -768,7 +765,7 @@ test("sv_patch_notes separates an out-of-range index from an uncaptured one", as
 });
 
 test("sv_patch_notes range context detects stale fingerprints before writing", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture();
+  const { model, service, contextId } = createRangeFixture();
   model.notes[0].lyrics = "changed-behind-context";
   const result = await service.patchNotes({
     contextId,
@@ -781,11 +778,11 @@ test("sv_patch_notes range context detects stale fingerprints before writing", a
 });
 
 test("sv_patch_notes range preflight ignores unrelated note drift", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture();
+  const { model, service, contextId } = createRangeFixture();
   model.notes[2].lyrics = "unrelated-change";
   const result = await service.patchNotes({
     contextId,
-    occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, expected: { lyrics: "a" }, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
@@ -797,10 +794,10 @@ test("sv_patch_notes range preflight ignores unrelated note drift", async () => 
 });
 
 test("sv_patch_notes resolves notes by group index and keeps diffs free of redundant identity", async () => {
-  const { model, service, contextId, occurrenceId } = createRangeFixture();
+  const { model, service, contextId } = createRangeFixture();
   const result = await service.patchNotes({
     contextId,
-    occurrenceId,
+    occurrence: 0,
     patches: [{ note: 1, expected: { lyrics: "i" }, set: { lyrics: "ne" } }],
     dryRun: true,
     waitFor: "none",
@@ -822,12 +819,12 @@ test("sv_patch_notes resolves notes by group index and keeps diffs free of redun
 
 test("sv_patch_notes requires the note field in every patch", async () => {
   // 只剩一种引用写法，因此"两种形式混用"不再可构造；要守的是必填与类型。
-  const { service, contextId, occurrenceId } = createRangeFixture();
+  const { service, contextId } = createRangeFixture();
   for (const patch of [{ set: { lyrics: "x" } }, { note: -1, set: { lyrics: "x" } }, { note: "0", set: { lyrics: "x" } }]) {
     await assert.rejects(
       service.patchNotes({
         contextId,
-        occurrenceId,
+        occurrence: 0,
         patches: [patch],
         dryRun: true,
         waitFor: "none",
@@ -882,7 +879,7 @@ test("sv_patch_notes routes scoped preflight through one bulk read", async () =>
   const legacy = createRangeFixture();
   const legacyResult = await legacy.service.patchNotes({
     contextId: legacy.contextId,
-    occurrenceId: legacy.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
@@ -893,7 +890,7 @@ test("sv_patch_notes routes scoped preflight through one bulk read", async () =>
   enableBulkReads(bulk.model);
   const bulkResult = await bulk.service.patchNotes({
     contextId: bulk.contextId,
-    occurrenceId: bulk.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
@@ -937,7 +934,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
   enableBulkReads(mismatch.model);
   const mismatched = await mismatch.service.patchNotes({
     contextId: mismatch.contextId,
-    occurrenceId: mismatch.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, expected: { pitch: 99 }, set: { pitch: 61 } }],
     dryRun: true,
     waitFor: "none",
@@ -962,7 +959,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
   stale.model.notes[0].lyrics = "changed-after-capture";
   const staleResult = await stale.service.patchNotes({
     contextId: stale.contextId,
-    occurrenceId: stale.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
@@ -978,7 +975,7 @@ test("sv_patch_notes diagnostics expose phases and method aggregates only when r
   const plainFixture = createRangeFixture();
   const plain = await plainFixture.service.patchNotes({
     contextId: plainFixture.contextId,
-    occurrenceId: plainFixture.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
@@ -988,7 +985,7 @@ test("sv_patch_notes diagnostics expose phases and method aggregates only when r
   const diagnosticFixture = createRangeFixture();
   const diagnosed = await diagnosticFixture.service.patchNotes({
     contextId: diagnosticFixture.contextId,
-    occurrenceId: diagnosticFixture.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     dryRun: true,
     waitFor: "none",
@@ -1013,7 +1010,7 @@ test("sv_patch_notes reuses verified fingerprints for expected checks", async ()
   const fixture = createRangeFixture();
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
-    occurrenceId: fixture.occurrenceId,
+    occurrence: 0,
     patches: [
       {
         note: 0,
@@ -1034,7 +1031,7 @@ test("sv_patch_notes still reads attributes outside the verified fingerprint", a
   const fixture = createRangeFixture();
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
-    occurrenceId: fixture.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { attributes: { muted: true } } }],
     dryRun: true,
     waitFor: "none",
@@ -1049,7 +1046,7 @@ test("sv_patch_notes keeps post-write read-back after fingerprint reuse", async 
   const fixture = createRangeFixture();
   const result = await fixture.service.patchNotes({
     contextId: fixture.contextId,
-    occurrenceId: fixture.occurrenceId,
+    occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     waitFor: "none",
     diagnostics: true,

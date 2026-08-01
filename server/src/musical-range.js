@@ -490,14 +490,16 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
 function prepareStoredRange(stored, captured, input, snapshotToken, warnings, artifactStore, sessionId) {
   const occurrenceByKey = new Map();
   const occurrencesByTarget = new Map();
-  for (const occurrence of captured.occurrences) {
-    const occurrenceId = `${stored.contextId}:t:${occurrence.trackIndex}:r:${occurrence.groupIndex}`;
-    occurrence.occurrenceId = occurrenceId;
-    occurrence.group.occurrenceId = occurrenceId;
+  // 身份是 ordinal（§3.1）：它索引**完整** occurrences 数组。以前这里还铸造一个
+  // `<contextId>:t:X:r:Y` 字符串，但那不是第二种身份——只是把同一事实拼长，并且把
+  // 一个已死的 contextId 焊进了对外可见的选择器里。
+  for (const [ordinal, occurrence] of captured.occurrences.entries()) {
+    occurrence.occurrence = ordinal;
+    occurrence.group.occurrence = ordinal;
     occurrenceByKey.set(occurrence.occurrenceKey, occurrence);
     if (occurrence.targetGroupUuid) {
       const list = occurrencesByTarget.get(occurrence.targetGroupUuid) ?? [];
-      list.push(occurrenceId);
+      list.push(ordinal);
       occurrencesByTarget.set(occurrence.targetGroupUuid, list);
     }
   }
@@ -506,13 +508,9 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       ? occurrencesByTarget.get(occurrence.targetGroupUuid)
       : [];
     occurrence.group.sharedTargetOccurrences = sharedTargetOccurrences;
-    // 身份就是 fingerprint.indexInGroup（§3.1）；不再铸造 <occurrenceId>:n:<index>
+    // 身份就是 fingerprint.indexInGroup（§3.1）；不再铸造 <ordinal>:n:<index>
     // 这种把同一事实拼长的字符串。
     const noteFingerprints = occurrence.noteFingerprints;
-    // ordinal 是 §3.1 的稳定身份：它索引**完整** occurrences 数组，与"是否捕获到
-    // Note"无关。写在这里而不是让消费方 indexOf，是为了让它随 Context 一起冻结——
-    // 消费方各自推导会在数组被过滤后给出不同编号。
-    occurrence.group.occurrence = ordinal;
     // groupNoteCount 是宿主里该 NoteGroup 的真实音符总数；capturedNotes 是本次
     // range 实际捕获的数量。两者必须分开：range 可以只捕获乐句内的音符，而
     // 「index 越界」与「index 合法但未捕获」是两种不同的失败（§3.2 规则 4/5），
@@ -521,7 +519,6 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
     occurrence.group.capturedNotes = noteFingerprints.length;
     stored.context.occurrences.push({
       occurrence: ordinal,
-      occurrenceId: occurrence.occurrenceId,
       trackIndex: occurrence.trackIndex,
       groupIndex: occurrence.groupIndex,
       targetGroupUuid: occurrence.targetGroupUuid,
@@ -551,7 +548,7 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
   for (const collectionName of ["notes", "attributes", "automation", "computedPitch", "pitchControls"]) {
     for (const item of captured.data[collectionName] ?? []) {
       const occurrence = occurrenceByKey.get(item.occurrenceKey);
-      item.occurrenceId = occurrence.occurrenceId;
+      item.occurrence = occurrence.occurrence;
       if (
         (collectionName === "notes" || collectionName === "attributes") &&
         Number.isSafeInteger(item.indexInGroup)
@@ -560,8 +557,8 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       }
       if (collectionName === "pitchControls") {
         // 最终 controlId：SVCopilot 自有对象用持久 scriptData ID，外部/无标签对象用
-        // context-scoped <occurrenceId>:pc:<index>。fingerprint 才是真正身份，index 只是提示。
-        item.controlId = finalizeControlId(item, occurrence.occurrenceId);
+        // context-scoped <ordinal>:pc:<index>。fingerprint 才是真正身份，index 只是提示。
+        item.controlId = finalizeControlId(item, occurrence.occurrence);
         delete item.ownedControlId;
       }
       delete item.occurrenceKey;
@@ -569,10 +566,11 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
   }
   // 为 sv_compare_computed_pitch 留存未分页的逐 occurrence computed-pitch 序列。
   // values 保留 null（无音高帧），不做插值；引用 captured 中同一数组，仅增引用不复制。
+  // key 是 ordinal（对象键会被强制为字符串，读取方一律走 occurrenceKeyOf）。
   const computedPitchByOccurrence = Object.create(null);
   for (const item of captured.data.computedPitch ?? []) {
-    if (typeof item.occurrenceId !== "string") continue;
-    computedPitchByOccurrence[item.occurrenceId] = {
+    if (!Number.isSafeInteger(item.occurrence)) continue;
+    computedPitchByOccurrence[item.occurrence] = {
       startBlick: item.startBlick,
       intervalBlick: item.intervalBlick,
       frames: item.frames,
@@ -585,8 +583,8 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
   // include 未含 automation 时保持空 map；消费方以 Object.hasOwn 区分"未捕获该 occurrence"。
   const automationByOccurrence = Object.create(null);
   for (const item of captured.data.automation ?? []) {
-    if (typeof item.occurrenceId !== "string") continue;
-    const list = automationByOccurrence[item.occurrenceId] ?? [];
+    if (!Number.isSafeInteger(item.occurrence)) continue;
+    const list = automationByOccurrence[item.occurrence] ?? [];
     list.push({
       requestedParameter: item.requestedParameter,
       resolvedParameter: item.resolvedParameter,
@@ -594,7 +592,7 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       interpolationMethod: item.interpolationMethod,
       points: item.points,
     });
-    automationByOccurrence[item.occurrenceId] = list;
+    automationByOccurrence[item.occurrence] = list;
   }
   stored.context.automationByOccurrence = automationByOccurrence;
   stored.context.automationCaptured = input.include.has("automation");
@@ -602,10 +600,10 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
   // include 未含 pitchControls 时保持空 map；消费方以 Object.hasOwn 区分"未捕获该 occurrence"。
   const pitchControlsByOccurrence = Object.create(null);
   for (const item of captured.data.pitchControls ?? []) {
-    if (typeof item.occurrenceId !== "string") continue;
-    const list = pitchControlsByOccurrence[item.occurrenceId] ?? [];
+    if (!Number.isSafeInteger(item.occurrence)) continue;
+    const list = pitchControlsByOccurrence[item.occurrence] ?? [];
     list.push(item);
-    pitchControlsByOccurrence[item.occurrenceId] = list;
+    pitchControlsByOccurrence[item.occurrence] = list;
   }
   stored.context.pitchControlsByOccurrence = pitchControlsByOccurrence;
   stored.context.pitchControlsCaptured = input.include.has("pitchControls");
@@ -695,7 +693,7 @@ function denseRangeDetail(data) {
 
 function flattenRangeNote(note) {
   return {
-    occurrenceId: note.occurrenceId,
+    occurrence: note.occurrence,
     trackIndex: note.trackIndex,
     groupIndex: note.groupIndex,
     groupUuid: note.groupUuid,
@@ -723,11 +721,11 @@ function flattenRangeNote(note) {
 }
 
 // sv_compare_computed_pitch 读取入口：返回某 occurrence 完整 computed-pitch 序列（含 null）。
-// 只读内存，不访问宿主；未捕获 computedPitch 或 occurrence 不存在时返回 null。
-export function getStoredComputedPitch(stored, occurrenceId) {
+// 只读内存，不访问宿主；未捕获 computedPitch 或 occurrence ordinal 不存在时返回 null。
+export function getStoredComputedPitch(stored, occurrence) {
   const map = stored?.context?.computedPitchByOccurrence;
-  if (!map || typeof occurrenceId !== "string") return null;
-  return Object.hasOwn(map, occurrenceId) ? map[occurrenceId] : null;
+  if (!map || !Number.isSafeInteger(occurrence)) return null;
+  return Object.hasOwn(map, occurrence) ? map[occurrence] : null;
 }
 
 function formatStoredRangePage(stored, page, { changedSinceToken = false, timings } = {}) {

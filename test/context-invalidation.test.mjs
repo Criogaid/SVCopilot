@@ -26,7 +26,7 @@ function rangeContext(targetGroupUuid, { trackIndex = 0 } = {}) {
       kind: "range",
       occurrences: [
         {
-          occurrenceId: `c_x:t:${trackIndex}:r:0`,
+          occurrence: trackIndex,
           trackIndex,
           groupIndex: 0,
           targetGroupUuid,

@@ -225,10 +225,7 @@ function createRangeContextService(model, { shared = false } = {}) {
     return originalCall(request);
   };
   const contextId = "ctx_range";
-  const occurrenceId = `${contextId}:t:0:r:0`;
-  const sharedTargetOccurrences = shared
-    ? [occurrenceId, `${contextId}:t:0:r:1`]
-    : [occurrenceId];
+  const sharedTargetOccurrences = shared ? [0, 1] : [0];
   const stored = {
     epoch: 1,
     contextId,
@@ -239,16 +236,13 @@ function createRangeContextService(model, { shared = false } = {}) {
       range: { from: { blick: 4 * Q }, to: { blick: 8 * Q } },
       occurrences: [
         {
-          occurrenceId,
+          occurrence: 0,
           trackIndex: 0,
           groupIndex: 0,
           targetGroupUuid: "curve-group",
           timeOffsetBlick: model.groupOnset,
           sharedTargetOccurrences,
-          noteFingerprints: noteStates.map((state) => ({
-            ...state,
-            noteId: `${occurrenceId}:n:${state.indexInGroup}`,
-          })),
+          noteFingerprints: noteStates.map((state) => ({ ...state })),
         },
       ],
     },
@@ -264,7 +258,7 @@ function createRangeContextService(model, { shared = false } = {}) {
     { withExclusive: (task) => task(model.host) },
     { now: () => 1000, snapshotService }
   );
-  return { service, contextId, occurrenceId, noteState, noteStates };
+  return { service, contextId, noteState, noteStates };
 }
 
 // 在单曲线宿主模型上追加独立 Automation，用于验证跨曲线事务边界。
@@ -1264,9 +1258,9 @@ test("sv_patch_parameter_curves verbose includes point evidence and rejects dupl
 
 test("range context resolves note anchors and musical positions in batch dry-run", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     dryRun: true,
     responseMode: "standard",
     curves: [
@@ -1305,10 +1299,9 @@ test("range context resolves note anchors and musical positions in batch dry-run
 
 test("range context resolves semantic read bounds without exposing raw BLICK inputs", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
-  const noteId = `${occurrenceId}:n:0`;
+  const { service, contextId } = createRangeContextService(model);
   const result = await service.getCurve({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     parameter: "loudness",
     range: {
       from: { musicalPosition: { bar: 2, beat: 1 } },
@@ -1325,10 +1318,9 @@ test("range context resolves semantic read bounds without exposing raw BLICK inp
 
 test("a one-curve dry-run reports semantic range and resolved point evidence", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
-  const noteId = `${occurrenceId}:n:0`;
+  const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves(oneCurve({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     parameter: "loudness",
     mode: "replace",
     range: {
@@ -1347,9 +1339,9 @@ test("a one-curve dry-run reports semantic range and resolved point evidence", a
 
 test("semantic ranges support snapshot boundaries and adjacent-note gap anchors", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     dryRun: true,
     responseMode: "standard",
     curves: [
@@ -1379,10 +1371,10 @@ test("semantic ranges support snapshot boundaries and adjacent-note gap anchors"
 
 test("musical positions reject a range context whose meter map changed", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   model.meterMarks = [{ position: 0, positionBlick: 0, numerator: 3, denominator: 4 }];
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     dryRun: true,
     curves: [
       {
@@ -1401,9 +1393,9 @@ test("musical positions reject a range context whose meter map changed", async (
 
 test("semantic curve points reject duplicate resolved positions before writing", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     dryRun: true,
     curves: [
       {
@@ -1425,10 +1417,10 @@ test("semantic curve points reject duplicate resolved positions before writing",
 
 test("note anchors reject stale fingerprints", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId, noteState } = createRangeContextService(model);
+  const { service, contextId, noteState } = createRangeContextService(model);
   noteState.pitch = 61;
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     dryRun: true,
     curves: [
       {
@@ -1446,9 +1438,8 @@ test("note anchors reject stale fingerprints", async () => {
   assert.equal(model.undoCount, 0);
 });
 
-function expectedNoteN0(occurrenceId) {
+function expectedNoteN0() {
   return {
-    noteId: `${occurrenceId}:n:0`,
     indexInGroup: 0,
     onsetBlick: 0,
     durationBlick: 2 * Q,
@@ -1462,13 +1453,13 @@ function expectedNoteN0(occurrenceId) {
 
 test("target.expectedNotes passes preflight when the anchor note is unchanged", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
     target: {
       contextId,
-      occurrenceId,
+      occurrence: 0,
       expectedTimeOffsetBlick: model.groupOnset,
-      expectedNotes: [expectedNoteN0(occurrenceId)],
+      expectedNotes: [expectedNoteN0()],
     },
     dryRun: true,
     curves: [
@@ -1490,13 +1481,13 @@ test("target.expectedNotes passes preflight when the anchor note is unchanged", 
 
 test("partial expectedNotes fingerprints fail INVALID_ARGUMENTS, not a false STALE_CONTEXT", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   // verifyAnchoredNote 做 8 字段严格全等：缺字段若放行会与宿主观测必然不等，
   // 把"调用方少给字段"误报成"音符漂移"。归一化阶段必须直接拒绝。
   const result = await service.patchCurves({
     target: {
       contextId,
-      occurrenceId,
+      occurrence: 0,
       expectedNotes: [{ indexInGroup: 0, onsetBlick: 0 }],
     },
     dryRun: true,
@@ -1520,7 +1511,7 @@ test("partial expectedNotes fingerprints fail INVALID_ARGUMENTS, not a false STA
 
 test("target.expectedNotes rejects duplicate note indexes before the fingerprint cache can hide a conflict", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId, noteStates } = createRangeContextService(model);
+  const { service, contextId, noteStates } = createRangeContextService(model);
   const duplicateIdentity = {
     ...noteStates[1],
     indexInGroup: 0,
@@ -1528,8 +1519,8 @@ test("target.expectedNotes rejects duplicate note indexes before the fingerprint
   const result = await service.patchCurves({
     target: {
       contextId,
-      occurrenceId,
-      expectedNotes: [expectedNoteN0(occurrenceId), duplicateIdentity],
+      occurrence: 0,
+      expectedNotes: [expectedNoteN0(), duplicateIdentity],
     },
     dryRun: true,
     curves: [
@@ -1552,7 +1543,7 @@ test("target.expectedNotes rejects duplicate note indexes before the fingerprint
 
 test("expectedTimeOffsetBlick catches a reference move that note fingerprints cannot see", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model);
+  const { service, contextId } = createRangeContextService(model);
   const capturedOffset = model.groupOnset;
   // setTimeOffset 移动整个 reference：UUID 与组内本地音符指纹全部不变，仅 live getTimeOffset 变化。
   model.groupOnset = capturedOffset + Q;
@@ -1569,7 +1560,7 @@ test("expectedTimeOffsetBlick catches a reference move that note fingerprints ca
   ];
   // 只带 expectedNotes（本地指纹）：守卫看不到移动，提交"成功"——这正是被审计指出的漏洞形态。
   const fingerprintsOnly = await service.patchCurves({
-    target: { contextId, occurrenceId, expectedNotes: [expectedNoteN0(occurrenceId)] },
+    target: { contextId, occurrence: 0, expectedNotes: [expectedNoteN0()] },
     dryRun: false,
     curves: absoluteCurves,
   });
@@ -1578,9 +1569,9 @@ test("expectedTimeOffsetBlick catches a reference move that note fingerprints ca
   const guarded = await service.patchCurves({
     target: {
       contextId,
-      occurrenceId,
+      occurrence: 0,
       expectedTimeOffsetBlick: capturedOffset,
-      expectedNotes: [expectedNoteN0(occurrenceId)],
+      expectedNotes: [expectedNoteN0()],
     },
     dryRun: false,
     curves: absoluteCurves,
@@ -1593,11 +1584,11 @@ test("expectedTimeOffsetBlick catches a reference move that note fingerprints ca
 
 test("target.expectedNotes fails STALE_CONTEXT and writes nothing when the anchor note drifts", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId, noteState } = createRangeContextService(model);
+  const { service, contextId, noteState } = createRangeContextService(model);
   // group UUID 不变、contextId 未失效，仅音符被 UI/raw API 从 onset 0 挪到 Q（绝对 BLICK 曲线会落到旧位置）。
   noteState.onsetBlick = Q;
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId, expectedNotes: [expectedNoteN0(occurrenceId)] },
+    target: { contextId, occurrence: 0, expectedNotes: [expectedNoteN0()] },
     dryRun: false,
     curves: [
       {
@@ -1619,9 +1610,9 @@ test("target.expectedNotes fails STALE_CONTEXT and writes nothing when the ancho
 
 test("shared target occurrences require explicit mutation confirmation", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model, { shared: true });
+  const { service, contextId } = createRangeContextService(model, { shared: true });
   const request = {
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     dryRun: true,
     curves: [
       {
@@ -1653,9 +1644,9 @@ test("shared target occurrences require explicit mutation confirmation", async (
 
 test("shared target mathematical no-op does not require mutation confirmation", async () => {
   const model = createCurveModel();
-  const { service, contextId, occurrenceId } = createRangeContextService(model, { shared: true });
+  const { service, contextId } = createRangeContextService(model, { shared: true });
   const result = await service.patchCurves({
-    target: { contextId, occurrenceId },
+    target: { contextId, occurrence: 0 },
     curves: [
       {
         parameter: "loudness",

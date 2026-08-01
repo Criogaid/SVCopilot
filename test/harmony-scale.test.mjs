@@ -22,9 +22,7 @@ function createStoredContext(store, { sourceNotes = [], targetNotes = [] } = {})
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const sourceId = `${stored.contextId}:t:0:r:0`;
-  const targetId = `${stored.contextId}:t:1:r:0`;
-  const fingerprint = (occurrenceId, note, index) => ({
+  const fingerprint = (note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
     durationBlick: note.durationBlick,
@@ -33,32 +31,31 @@ function createStoredContext(store, { sourceNotes = [], targetNotes = [] } = {})
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: 0,
-    noteId: `${occurrenceId}:n:${index}`,
   });
   stored.context.occurrences.push({
-    occurrenceId: sourceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-melody",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [sourceId],
-    noteFingerprints: sourceNotes.map((note, index) => fingerprint(sourceId, note, index)),
+    sharedTargetOccurrences: [0],
+    noteFingerprints: sourceNotes.map((note, index) => fingerprint(note, index)),
   });
   stored.context.occurrences.push({
-    occurrenceId: targetId,
+    occurrence: 1,
     trackIndex: 1,
     groupIndex: 0,
     targetGroupUuid: "uuid-harmony",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [targetId],
-    noteFingerprints: targetNotes.map((note, index) => fingerprint(targetId, note, index)),
+    sharedTargetOccurrences: [1],
+    noteFingerprints: targetNotes.map((note, index) => fingerprint(note, index)),
   });
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, sourceId, targetId };
+  return { stored };
 }
 
 function service(store) {
@@ -112,7 +109,7 @@ test("the 14-scale catalog matches the expected pitch-class sets", () => {
 
 test("legacy interval names are equivalent to their generalized form", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([60, 62, 64, 65, 67]),
   });
   const cases = [
@@ -124,14 +121,14 @@ test("legacy interval names are equivalent to their generalized form", async () 
   for (const [legacy, generalized] of cases) {
     const viaLegacy = await service(store).plan({
       contextId: stored.contextId,
-      sourceOccurrenceId: sourceId,
-      targetOccurrenceId: targetId,
+      sourceOccurrence: 0,
+      targetOccurrence: 1,
       harmony: { interval: legacy, key: { tonic: "C", mode: "major" } },
     });
     const viaGeneralized = await service(store).plan({
       contextId: stored.contextId,
-      sourceOccurrenceId: sourceId,
-      targetOccurrenceId: targetId,
+      sourceOccurrence: 0,
+      targetOccurrence: 1,
       harmony: { interval: generalized, key: { tonic: "C", mode: "major" } },
     });
     const legacyPitches = viaLegacy.perNote.map((item) => item.harmonyPitch);
@@ -142,14 +139,14 @@ test("legacy interval names are equivalent to their generalized form", async () 
 
 test("degree/direction/octaveOffset compose deterministically", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([60]),
   });
   const plan = async (interval, pitch = 60) =>
     (await service(store).plan({
       contextId: stored.contextId,
-      sourceOccurrenceId: sourceId,
-      targetOccurrenceId: targetId,
+      sourceOccurrence: 0,
+      targetOccurrence: 1,
       harmony: { interval, key: { tonic: "C", mode: "major" } },
     })).perNote.find((item) => item.sourcePitch === pitch).harmonyPitch;
   // C ionian：unison 同度=C(60)，三上=E(64)，三上+1 八度=E5(76)，六下=E3(52)，二上=D(62)，
@@ -164,14 +161,14 @@ test("degree/direction/octaveOffset compose deterministically", async () => {
 
 test("above and below are mirror images around the source", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([64]),
   });
   const plan = async (direction) =>
     (await service(store).plan({
       contextId: stored.contextId,
-      sourceOccurrenceId: sourceId,
-      targetOccurrenceId: targetId,
+      sourceOccurrence: 0,
+      targetOccurrence: 1,
       harmony: { interval: { degree: 3, direction }, key: { tonic: "C", mode: "major" } },
     })).perNote[0].harmonyPitch;
   const above = await plan("above");
@@ -184,14 +181,14 @@ test("above and below are mirror images around the source", async () => {
 
 test("dorian maps onto the dorian pitch-class set", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([62, 64, 65, 67, 69]),
   });
   // D dorian：D E F G A B C。三上（+2 级）= F G A B C（A 是第 5 级，+2 → 第 7 级 C）。
   const result = await service(store).plan({
     contextId: stored.contextId,
-    sourceOccurrenceId: sourceId,
-    targetOccurrenceId: targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: { degree: 3, direction: "above" }, key: { tonic: "D", mode: "minor", scale: "dorian" } },
   });
   assert.equal(result.key.scale, "dorian");
@@ -200,14 +197,14 @@ test("dorian maps onto the dorian pitch-class set", async () => {
 
 test("harmonic minor uses its raised seventh", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([69, 71, 72]),
   });
   // A harmonic minor：A B C D E F G#。二上 = B C D（G# 而非 G）。
   const result = await service(store).plan({
     contextId: stored.contextId,
-    sourceOccurrenceId: sourceId,
-    targetOccurrenceId: targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: { degree: 2, direction: "above" }, key: { tonic: "A", mode: "minor", scale: "harmonic_minor" } },
   });
   assert.deepEqual(result.perNote.map((item) => item.harmonyPitch), [71, 72, 74]);
@@ -215,14 +212,14 @@ test("harmonic minor uses its raised seventh", async () => {
 
 test("pentatonic degrees wrap at five, not seven", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([60, 62, 64, 67, 69]),
   });
   // C major pentatonic：C D E G A。三上（+2 级，5 音回绕）= E G A C D（G 第 4 级 +2 → 回绕 C，A 第 5 级 +2 → D）。
   const result = await service(store).plan({
     contextId: stored.contextId,
-    sourceOccurrenceId: sourceId,
-    targetOccurrenceId: targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: { degree: 3, direction: "above" }, key: { tonic: "C", mode: "major", scale: "major_pentatonic" } },
   });
   assert.deepEqual(result.perNote.map((item) => item.harmonyPitch), [64, 67, 69, 72, 74]);
@@ -230,14 +227,14 @@ test("pentatonic degrees wrap at five, not seven", async () => {
 
 test("chromatic maps every note exactly a semitone shift with no approximation", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([60, 61, 66]),
   });
   // chromatic 每音都在调内：二上 = +1 半音，无 needsReview。
   const result = await service(store).plan({
     contextId: stored.contextId,
-    sourceOccurrenceId: sourceId,
-    targetOccurrenceId: targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: { degree: 2, direction: "above" }, key: { tonic: "C", mode: "major", scale: "chromatic" } },
   });
   assert.deepEqual(result.perNote.map((item) => item.harmonyPitch), [61, 62, 67]);
@@ -249,13 +246,13 @@ test("chromatic maps every note exactly a semitone shift with no approximation",
 
 test("out-of-scale source notes produce a review warning, never a taste verdict", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: notesFromPitches([60, 66]), // F# 在 C ionian 调外
   });
   const result = await service(store).plan({
     contextId: stored.contextId,
-    sourceOccurrenceId: sourceId,
-    targetOccurrenceId: targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: { degree: 3, direction: "above" }, key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.summary.outOfScale, 1);
@@ -271,7 +268,7 @@ test("out-of-scale source notes produce a review warning, never a taste verdict"
 
 test("breath notes are excluded even with extended scales", async () => {
   const store = createStore();
-  const { stored, sourceId, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" },
       { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "br" },
@@ -279,8 +276,8 @@ test("breath notes are excluded even with extended scales", async () => {
   });
   const result = await service(store).plan({
     contextId: stored.contextId,
-    sourceOccurrenceId: sourceId,
-    targetOccurrenceId: targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: { degree: 3, direction: "above" }, key: { tonic: "C", mode: "major", scale: "ionian" } },
   });
   assert.equal(result.summary.sourceNotes, 1);

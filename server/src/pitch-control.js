@@ -81,7 +81,7 @@ export function normalizeCurvePoints(raw, { errorFactory = hostDataError } = {})
 }
 
 // 读取一个 group 的全部 PitchControl，返回规范化对象（不含最终 controlId——
-// occurrenceId 要在 prepareStoredRange 才确定）与 group fingerprint。
+// occurrence ordinal 要在 prepareStoredRange 才确定）与 group fingerprint。
 // groupCtx: { group, groupUuid, timeOffsetBlick, pitchOffsetSemitone }
 export async function readPitchControlsForGroup(
   capture,
@@ -271,26 +271,26 @@ export function computeGroupFingerprint(controls, groupUuid) {
   })}`;
 }
 
-// context-scoped controlId：外部/无标签对象用 occurrenceId + 捕获索引。SVCopilot 自有对象
-// 直接暴露其 scriptData 里的持久 controlId（跨 snapshot 稳定）。fingerprint 才是真正身份。
-export function finalizeControlId(control, occurrenceId) {
+// context-scoped controlId：外部/无标签对象用 occurrence ordinal + 捕获索引。SVCopilot
+// 自有对象直接暴露其 scriptData 里的持久 controlId（跨 snapshot 稳定）。fingerprint 才是真正身份。
+export function finalizeControlId(control, occurrence) {
   if (typeof control.ownedControlId === "string" && control.ownedControlId) {
     return control.ownedControlId;
   }
-  return makeContextControlId(occurrenceId, control.indexInGroup);
+  return makeContextControlId(occurrence, control.indexInGroup);
 }
 
-export function makeContextControlId(occurrenceId, indexInGroup) {
-  return `${occurrenceId}:pc:${indexInGroup}`;
+export function makeContextControlId(occurrence, indexInGroup) {
+  return `o:${occurrence}:pc:${indexInGroup}`;
 }
 
-// 解析 context-scoped controlId，取出 occurrenceId 与捕获索引提示。owned controlId
+// 解析 context-scoped controlId，取出 occurrence ordinal 与捕获索引提示。owned controlId
 // （不 match 此格式）返回 null——它不含 occurrence/index 信息。
 export function parseContextControlId(controlId) {
   if (typeof controlId !== "string") return null;
-  const match = controlId.match(/^(.*):pc:(\d+)$/);
+  const match = controlId.match(/^o:(\d+):pc:(\d+)$/);
   if (!match) return null;
-  return { occurrenceId: match[1], indexInGroup: Number(match[2]) };
+  return { occurrence: Number(match[1]), indexInGroup: Number(match[2]) };
 }
 
 // pitch 浮点相等（semitone）：绝对 + 相对 epsilon。用于 read-back 验证，不用于 fingerprint

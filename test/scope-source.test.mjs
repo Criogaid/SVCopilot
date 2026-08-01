@@ -34,7 +34,6 @@ function fingerprint(indexInGroup) {
 
 function occurrenceWith(indices, extra = {}) {
   return {
-    occurrenceId: "c_x:t:0:r:0",
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-1",

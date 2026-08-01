@@ -4,6 +4,7 @@ import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js
 
 import { MAX_PATCHES } from "./note-patch.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { unknownContextError } from "./snapshot.js";
 
@@ -75,7 +76,7 @@ export class QuantizePlanService {
       this.artifactStore,
       this.sessionId
     );
-    if (response.continuation && typeof input.occurrenceId === "string") {
+    if (response.continuation) {
       rememberContinuationIdentity(this.continuationIdentities, loaded, input, this.now());
     }
     return response;
@@ -83,8 +84,6 @@ export class QuantizePlanService {
 }
 
 // ---------- 上下文解析 ----------
-
-const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
 
 function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
@@ -97,64 +96,37 @@ function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
       'sv_quantize_notes needs a range context from sv_snapshot_range with include ["notes"]'
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    input.occurrence,
+    {
+      eligible: (item) =>
+        Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0,
+      noneCode: "NOTES_NOT_CAPTURED",
+      noneMessage:
+        'sv_quantize_notes needs note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+      ambiguousMessage:
+        "range context has multiple occurrences with notes; pass one occurrence ordinal",
+      ineligibleCode: "OCCURRENCE_NOT_CAPTURED",
+      ineligibleMessage:
+        'the selected occurrence has no note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+    }
   );
-  // notes 是组内 index（§3.1），不携带 occurrence 前缀，因此无法也无需从选择器推导
-  // occurrence——单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 覆盖了其余情况。
-  const derivedId = undefined;
-  const wantedId = input.occurrenceId;
-  let occurrence = null;
-  if (wantedId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === wantedId) ?? null;
-    if (!occurrence && input.occurrenceId !== undefined && derivedId === undefined) {
-      // continuation 重锚定：selector 内嵌旧 contextId 时按位置后缀寻找候选，
-      // 但必须通过服务签发的短期身份记录校验 target UUID——量化会改变音符结构，
-      // 结构摘要在这里不可用（与 lyric-align 不同），身份只看组 UUID。
-      const identity = continuationIdentities.get(wantedId);
-      const position = identity ? OCCURRENCE_POSITION_PATTERN.exec(wantedId) : null;
-      if (position) {
-        const matches = occurrences.filter((item) => {
-          const own = OCCURRENCE_POSITION_PATTERN.exec(item.occurrenceId);
-          return own !== null && own[1] === position[1] && own[2] === position[2];
-        });
-        if (matches.length === 1) {
-          if (matches[0].targetGroupUuid !== identity.targetGroupUuid) {
-            const error = codedError(
-              "STALE_CONTEXT",
-              `continuation selector target changed: expected group UUID ${identity.targetGroupUuid}, observed ${matches[0].targetGroupUuid}; re-snapshot and re-plan`
-            );
-            error.expectedGroupUuid = identity.targetGroupUuid;
-            error.observedGroupUuid = matches[0].targetGroupUuid;
-            throw error;
-          }
-          occurrence = matches[0];
-          warnings.push({
-            code: "STALE_SELECTOR_REANCHORED",
-            message: `occurrenceId references a consumed context; verified target identity, then re-anchored by position (track ${position[1]}, reference ${position[2]}) onto ${occurrence.occurrenceId}.`,
-          });
-        }
-      }
+  const identity = continuationIdentities.get(continuationIdentityKey(occurrence));
+  if (identity && identity.contextId !== stored.contextId) {
+    if (occurrence.targetGroupUuid !== identity.targetGroupUuid) {
+      const error = codedError(
+        "STALE_CONTEXT",
+        `continuation target changed: expected group UUID ${identity.targetGroupUuid}, observed ${occurrence.targetGroupUuid}; re-snapshot and re-plan`
+      );
+      error.expectedGroupUuid = identity.targetGroupUuid;
+      error.observedGroupUuid = occurrence.targetGroupUuid;
+      throw error;
     }
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
-    }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'sv_quantize_notes needs note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId"
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
+    warnings.push({
+      code: "CONTINUATION_IDENTITY_VERIFIED",
+      message: `Continuation target was re-captured at occurrence ${ordinal}; target identity still matches.`,
+    });
   }
   const quarterBlick = stored.context.quarterBlick;
   if (!Number.isSafeInteger(quarterBlick) || quarterBlick <= 0) {
@@ -205,7 +177,19 @@ function resolveQuantizeSource(store, input, warnings, continuationIdentities) {
       );
     }
   }
-  return { stored, occurrence, notes, quarterBlick, meterMarks, timeOffsetBlick: timeOffset };
+  return {
+    stored,
+    occurrence,
+    occurrenceOrdinal: ordinal,
+    notes,
+    quarterBlick,
+    meterMarks,
+    timeOffsetBlick: timeOffset,
+  };
+}
+
+function continuationIdentityKey(occurrence) {
+  return JSON.stringify([occurrence?.trackIndex ?? null, occurrence?.groupIndex ?? null]);
 }
 
 function pruneContinuationIdentities(identities, now) {
@@ -218,9 +202,11 @@ function rememberContinuationIdentity(identities, loaded, input, now) {
   if (typeof loaded.occurrence.targetGroupUuid !== "string") return;
   const expiresAt = loaded.stored.expiresAt;
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return;
-  identities.delete(input.occurrenceId);
-  identities.set(input.occurrenceId, {
+  const key = continuationIdentityKey(loaded.occurrence);
+  identities.delete(key);
+  identities.set(key, {
     targetGroupUuid: loaded.occurrence.targetGroupUuid,
+    contextId: loaded.stored.contextId,
     expiresAt,
   });
   while (identities.size > MAX_CONTINUATION_IDENTITIES) {
@@ -384,6 +370,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           tool: "sv_patch_notes",
           arguments: {
             contextId: loaded.stored.contextId,
+            occurrence: loaded.occurrenceOrdinal,
             patches: submittable,
             dryRun: true,
             atomic: true,
@@ -399,7 +386,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           workflow: [
             "Commit the returned patchRequest (dryRun first, then dryRun:false).",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
-            "Re-run sv_quantize_notes with the same grid/strength/swing options against the fresh contextId: already-quantized notes come back unchanged, so the next round plans exactly the remaining patches. An explicit occurrenceId is re-anchored only while its short-lived continuation identity proves the same target group UUID (warned as STALE_SELECTOR_REANCHORED); otherwise the replay is rejected.",
+            "Re-run sv_quantize_notes with the same grid/strength/swing options against the fresh contextId and its current occurrence ordinal: already-quantized notes come back unchanged, so the next round plans exactly the remaining patches. The short-lived continuation identity verifies the target UUID before planning the next slice.",
             "Repeat until the response carries no continuation (or reports status no_change).",
           ],
         }
@@ -411,7 +398,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
     });
   }
   const planId = `qnt_${canonicalHashHex({
-    occurrenceId: loaded.occurrence.occurrenceId,
+    occurrence: loaded.occurrenceOrdinal,
     grid: input.grid,
     strength: input.strength,
     swing: input.swing,
@@ -456,7 +443,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           targetTool: "sv_patch_notes",
           mutationRequest: patchRequest.arguments,
           targetGroupUuid: loaded.occurrence.targetGroupUuid,
-          occurrenceId: loaded.occurrence.occurrenceId,
+          occurrence: loaded.occurrenceOrdinal,
           fingerprints: {},
           contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
             noteIndexes: submittable.map((patch) => patch.note),
@@ -495,7 +482,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
     planId,
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.occurrenceOrdinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -552,17 +539,17 @@ function normalizeQuantizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "notes", "grid", "strength", "swing", "quantizeDurations", "responseMode", "usePlanRef"],
+    ["contextId", "occurrence", "notes", "grid", "strength", "swing", "quantizeDurations", "responseMode", "usePlanRef"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+    throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer");
   }
   if (request.notes !== undefined) {
     if (
@@ -606,7 +593,7 @@ function normalizeQuantizeRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     notes: request.notes,
     grid: { division: request.grid.division },
     strength,

@@ -287,8 +287,8 @@ function buildParameterSection(loaded, input, warnings, targetLabel, profile) {
     return { status: "not_captured" };
   }
   const map = loaded.stored.context.automationByOccurrence ?? Object.create(null);
-  const curves = Object.hasOwn(map, loaded.occurrence.occurrenceId)
-    ? map[loaded.occurrence.occurrenceId]
+  const curves = Object.hasOwn(map, loaded.occurrenceOrdinal)
+    ? map[loaded.occurrenceOrdinal]
     : [];
   const phraseSpans = (profile.pools.phrases ?? []).map((phrase) => ({
     startBlick: phrase.startBlick,

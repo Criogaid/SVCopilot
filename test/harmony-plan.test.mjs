@@ -29,9 +29,7 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const sourceId = `${stored.contextId}:t:0:r:0`;
-  const targetId = `${stored.contextId}:t:1:r:0`;
-  const fingerprint = (occurrenceId, note, index) => ({
+  const fingerprint = (note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
     durationBlick: note.durationBlick,
@@ -40,45 +38,43 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: 0,
-    noteId: `${occurrenceId}:n:${index}`,
   });
   stored.context.occurrences.push({
-    occurrenceId: sourceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: sourceUuid,
     timeOffsetBlick: 0,
     pitchOffsetSemitone: sourcePitchOffsetSemitone,
-    sharedTargetOccurrences: [sourceId],
-    noteFingerprints: sourceNotes.map((note, index) => fingerprint(sourceId, note, index)),
+    sharedTargetOccurrences: [0],
+    noteFingerprints: sourceNotes.map((note, index) => fingerprint(note, index)),
   });
   stored.context.occurrences.push({
-    occurrenceId: targetId,
+    occurrence: 1,
     trackIndex: 1,
     groupIndex: 0,
     targetGroupUuid: targetUuid,
     timeOffsetBlick: targetOffsetBlick,
     pitchOffsetSemitone: targetPitchOffsetSemitone,
-    sharedTargetOccurrences: sharedTargetOccurrences ?? [targetId],
-    noteFingerprints: targetNotes.map((note, index) => fingerprint(targetId, note, index)),
+    sharedTargetOccurrences: sharedTargetOccurrences ?? [1],
+    noteFingerprints: targetNotes.map((note, index) => fingerprint(note, index)),
   });
   if (extraSourceOccurrence) {
-    const thirdId = `${stored.contextId}:t:2:r:0`;
     stored.context.occurrences.push({
-      occurrenceId: thirdId,
+      occurrence: 2,
       trackIndex: 2,
       groupIndex: 0,
       targetGroupUuid: "uuid-third",
       timeOffsetBlick: 0,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [thirdId],
-      noteFingerprints: sourceNotes.map((note, index) => fingerprint(thirdId, note, index)),
+      sharedTargetOccurrences: [2],
+      noteFingerprints: sourceNotes.map((note, index) => fingerprint(note, index)),
     });
   }
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, sourceId, targetId };
+  return { stored };
 }
 
 function createService(store) {
@@ -97,10 +93,10 @@ function cMajorNotes() {
 
 test("third_below maps diatonic scale degrees with an explicit key", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, { sourceNotes: cMajorNotes() });
+  const { stored } = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.ok, true);
@@ -114,9 +110,11 @@ test("third_below maps diatonic scale degrees with an explicit key", async () =>
   );
   assert.ok(result.perNote.every((item) => item.status === "planned"));
   assert.equal(result.summary.needsReview, 0);
+  assert.equal(result.source.occurrence, 0);
+  assert.equal(result.target.occurrence, 1);
   const request = result.restructureRequest;
   assert.equal(request.tool, "sv_restructure_notes");
-  assert.equal(request.arguments.occurrenceId, targetId);
+  assert.equal(request.arguments.occurrence, 1);
   assert.equal(request.arguments.operations.length, 5);
   assert.deepEqual(request.arguments.operations[0], {
     op: "insert",
@@ -133,10 +131,10 @@ test("third_above and sixth variants map in the expected directions", async () =
     ["sixth_above", [69, 71, 72, 74, 76]], // C→A4, D→B4, E→C5, F→D5, G→E5
   ];
   for (const [interval, expected] of cases) {
-    const { stored, targetId } = createStoredContext(store, { sourceNotes: cMajorNotes() });
+    const { stored } = createStoredContext(store, { sourceNotes: cMajorNotes() });
     const result = await service.plan({
       contextId: stored.contextId,
-      targetOccurrenceId: targetId,
+      targetOccurrence: 1,
       harmony: { interval, key: { tonic: "C", mode: "major" } },
     });
     assert.deepEqual(
@@ -151,10 +149,10 @@ test("non-diatonic source notes are approximated and flagged needsReview", async
   const store = createStore();
   const notes = cMajorNotes();
   notes.push({ onsetBlick: 5 * Q, durationBlick: Q, pitch: 66, lyrics: "fis" }); // F#4 调外
-  const { stored, targetId } = createStoredContext(store, { sourceNotes: notes });
+  const { stored } = createStoredContext(store, { sourceNotes: notes });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   const fis = result.perNote[5];
@@ -167,10 +165,10 @@ test("non-diatonic source notes are approximated and flagged needsReview", async
 
 test("auto key detection warns when the K-S margin is thin and reports the runner-up", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, { sourceNotes: cMajorNotes() });
+  const { stored } = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below" },
   });
   assert.equal(result.key.source, "detected");
@@ -186,10 +184,10 @@ test("auto key detection warns when the K-S margin is thin and reports the runne
 
 test("register bounds trigger octave shifts and skip unreachable notes", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, { sourceNotes: cMajorNotes() });
+  const { stored } = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     // 下方三度原始结果 57..64；min 60 迫使 57/59 八度上移 → 69/71 越过源音 → 声部交叉跳过。
     register: { minPitch: 60, maxPitch: 80 },
@@ -204,12 +202,12 @@ test("register bounds trigger octave shifts and skip unreachable notes", async (
 
 test("register windows that cannot host the harmony skip with REGISTER_UNREACHABLE", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     register: { minPitch: 90, maxPitch: 95 }, // A3(57) 八度上移到 69 仍不可达
   });
@@ -223,7 +221,7 @@ test("sustain lyricsMode uses the first melodic lyric then '-' melisma; copy cop
   const first = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const sustained = await createService(store).plan({
     contextId: first.stored.contextId,
-    targetOccurrenceId: first.targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     lyricsMode: "sustain",
   });
@@ -234,7 +232,7 @@ test("sustain lyricsMode uses the first melodic lyric then '-' melisma; copy cop
   const second = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const copied = await createService(store).plan({
     contextId: second.stored.contextId,
-    targetOccurrenceId: second.targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     lyricsMode: "copy",
   });
@@ -250,10 +248,10 @@ test("source breaths are skipped; an all-breath selection fails honestly", async
     { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "br" },
     ...cMajorNotes().map((note) => ({ ...note, onsetBlick: note.onsetBlick + Q })),
   ];
-  const { stored, targetId } = createStoredContext(store, { sourceNotes: notes });
+  const { stored } = createStoredContext(store, { sourceNotes: notes });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.summary.skippedBreaths, 1);
@@ -266,7 +264,7 @@ test("source breaths are skipped; an all-breath selection fails honestly", async
   await assert.rejects(
     createService(store).plan({
       contextId: breathOnly.stored.contextId,
-      targetOccurrenceId: breathOnly.targetId,
+      targetOccurrence: 1,
       harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     }),
     (error) => error.code === "NO_MELODIC_NOTES"
@@ -276,13 +274,13 @@ test("source breaths are skipped; an all-breath selection fails honestly", async
 test("insert onsets are converted to the target's local coordinates", async () => {
   const store = createStore();
   const offset = 2 * Q;
-  const { stored, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: cMajorNotes(),
     targetOffsetBlick: offset,
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   // 源音 0 与 1 落在目标偏移之前，无法插入；其余换算为本地坐标。
@@ -297,7 +295,7 @@ test("insert onsets are converted to the target's local coordinates", async () =
 
 test("existing identical target notes are skipped as already_applied; different content conflicts", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: cMajorNotes(),
     targetNotes: [
       { onsetBlick: 0, durationBlick: Q, pitch: 57, lyrics: "do" }, // 与计划完全一致
@@ -306,7 +304,7 @@ test("existing identical target notes are skipped as already_applied; different 
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.summary.alreadyApplied, 1);
@@ -320,13 +318,13 @@ test("existing identical target notes are skipped as already_applied; different 
 
 test("same pitch and span with different lyrics is a target conflict, not already_applied", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
     targetNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 57, lyrics: "WRONG" }],
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     lyricsMode: "copy",
   });
@@ -346,7 +344,7 @@ test("occurrence pitch offsets are applied in sounding space and converted to ta
   });
   const sourceResult = await createService(store).plan({
     contextId: sourceShifted.stored.contextId,
-    targetOccurrenceId: sourceShifted.targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(sourceResult.restructureRequest.arguments.operations[0].note.pitch, 69);
@@ -358,7 +356,7 @@ test("occurrence pitch offsets are applied in sounding space and converted to ta
   });
   const targetResult = await createService(store).plan({
     contextId: targetShifted.stored.contextId,
-    targetOccurrenceId: targetShifted.targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(targetResult.restructureRequest.arguments.operations[0].note.pitch, 45);
@@ -370,14 +368,14 @@ test("occurrence pitch offsets are applied in sounding space and converted to ta
 
 test("fractional occurrence pitch offsets fail before emitting a non-integer restructure request", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: [{ onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "do" }],
     sourcePitchOffsetSemitone: 0.5,
   });
   await assert.rejects(
     createService(store).plan({
       contextId: stored.contextId,
-      targetOccurrenceId: targetId,
+      targetOccurrence: 1,
       harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     }),
     (error) => error.code === "UNSUPPORTED_PITCH_OFFSET"
@@ -394,10 +392,10 @@ test("plans above the operation cap return the first 64 plus a continuation work
     pitch: scale[index % scale.length],
     lyrics: `n${index}`,
   }));
-  const { stored, targetId } = createStoredContext(store, { sourceNotes });
+  const { stored } = createStoredContext(store, { sourceNotes });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.summary.planned, count);
@@ -433,8 +431,8 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   const round1 = createStoredContext(store, { sourceNotes });
   const first = await service.plan({
     contextId: round1.stored.contextId,
-    sourceOccurrenceId: round1.sourceId,
-    targetOccurrenceId: round1.targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     ...options,
   });
   assert.equal(first.restructureRequest.arguments.operations.length, 64);
@@ -449,14 +447,14 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
     lyrics: note.lyrics,
   }));
   const round2 = createStoredContext(store, { sourceNotes, targetNotes: appliedTargets });
-  // 同参重跑（携带旧 selector）：身份记录证明同一 UUID 后按位置重锚定。
+  // 同参重跑：身份记录证明 fresh context 的对应位置仍指向同一 UUID。
   const second = await service.plan({
     contextId: round2.stored.contextId,
-    sourceOccurrenceId: round1.sourceId,
-    targetOccurrenceId: round1.targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     ...options,
   });
-  assert.ok(second.warnings.some((warning) => warning.code === "STALE_SELECTOR_REANCHORED"));
+  assert.ok(second.warnings.some((warning) => warning.code === "CONTINUATION_IDENTITY_VERIFIED"));
   assert.equal(second.summary.alreadyApplied, 64);
   assert.equal(second.restructureRequest.arguments.operations.length, 1);
   assert.equal(second.continuation, undefined);
@@ -471,8 +469,8 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   const round3 = createStoredContext(store, { sourceNotes, targetNotes: allTargets });
   const third = await service.plan({
     contextId: round3.stored.contextId,
-    sourceOccurrenceId: round3.sourceId,
-    targetOccurrenceId: round3.targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     ...options,
   });
   assert.equal(third.status, "no_change");
@@ -493,7 +491,7 @@ test("a reanchored selector is rejected when the target group UUID changed", asy
   const round1 = createStoredContext(store, { sourceNotes });
   await service.plan({
     contextId: round1.stored.contextId,
-    targetOccurrenceId: round1.targetId,
+    targetOccurrence: 1,
     ...options,
   });
   store.delete(round1.stored.contextId);
@@ -501,31 +499,31 @@ test("a reanchored selector is rejected when the target group UUID changed", asy
   await assert.rejects(
     service.plan({
       contextId: round2.stored.contextId,
-      targetOccurrenceId: round1.targetId,
+      targetOccurrence: 1,
       ...options,
     }),
     (error) => error.code === "STALE_CONTEXT"
   );
-  // 无身份记录的伪造 selector 直接 UNKNOWN_OCCURRENCE。
+  // ordinal 越界与续跑 UUID 冲突保持不同错误码。
   await assert.rejects(
     service.plan({
       contextId: round2.stored.contextId,
-      targetOccurrenceId: "ctx_forged:t:9:r:9",
+      targetOccurrence: 9,
       ...options,
     }),
-    (error) => error.code === "UNKNOWN_OCCURRENCE"
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
 });
 
 test("shared target groups surface the confirmation requirement in review", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     sourceNotes: cMajorNotes(),
     sharedTargetOccurrences: ["occ-a", "occ-b"],
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.review.requiresSharedTargetConfirmation, true);
@@ -534,11 +532,11 @@ test("shared target groups surface the confirmation requirement in review", asyn
 
 test("identical requests produce identical planIds and responseMode governs perNote", async () => {
   const store = createStore();
-  const { stored, targetId } = createStoredContext(store, { sourceNotes: cMajorNotes() });
+  const { stored } = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const service = createService(store);
   const request = {
     contextId: stored.contextId,
-    targetOccurrenceId: targetId,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   };
   const first = await service.plan(request);
@@ -555,7 +553,7 @@ test("harmony resolves contexts honestly across error paths", async () => {
   const service = createService(store);
   const options = { harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } } };
   await assert.rejects(
-    service.plan({ contextId: "ctx_missing", targetOccurrenceId: "x:t:0:r:0", ...options }),
+    service.plan({ contextId: "ctx_missing", targetOccurrence: 1, ...options }),
     (error) => error.code === "UNKNOWN_CONTEXT"
   );
   // 源与目标相同直接拒绝。
@@ -563,8 +561,8 @@ test("harmony resolves contexts honestly across error paths", async () => {
   await assert.rejects(
     service.plan({
       contextId: same.stored.contextId,
-      sourceOccurrenceId: same.sourceId,
-      targetOccurrenceId: same.sourceId,
+      sourceOccurrence: 0,
+      targetOccurrence: 0,
       ...options,
     }),
     (error) => error.code === "INVALID_ARGUMENTS"
@@ -577,12 +575,12 @@ test("harmony resolves contexts honestly across error paths", async () => {
   await assert.rejects(
     service.plan({
       contextId: ambiguous.stored.contextId,
-      targetOccurrenceId: ambiguous.targetId,
+      targetOccurrence: 1,
       ...options,
     }),
     (error) => {
       assert.equal(error.code, "AMBIGUOUS_CONTEXT");
-      assert.equal(error.details.candidateOccurrences.length, 2);
+      assert.deepEqual(error.details.candidates, [0, 2]);
       return true;
     }
   );
@@ -591,7 +589,7 @@ test("harmony resolves contexts honestly across error paths", async () => {
   await assert.rejects(
     service.plan({
       contextId: known.stored.contextId,
-      targetOccurrenceId: known.targetId,
+      targetOccurrence: 1,
       notes: [9],
       ...options,
     }),
@@ -607,7 +605,7 @@ test("harmony resolves contexts honestly across error paths", async () => {
   await assert.rejects(
     service.plan({
       contextId: mono.stored.contextId,
-      targetOccurrenceId: mono.targetId,
+      targetOccurrence: 1,
       harmony: { interval: "third_below" },
     }),
     (error) => error.code === "INSUFFICIENT_PITCH_VARIETY"
@@ -620,37 +618,37 @@ test("harmony rejects malformed requests before touching the store", async () =>
   for (const request of [
     {},
     { contextId: "ctx" },
-    { contextId: "ctx", targetOccurrenceId: "t", harmony: {} },
-    { contextId: "ctx", targetOccurrenceId: "t", harmony: { interval: "fifth_below" } },
+    { contextId: "ctx", targetOccurrence: "t", harmony: {} },
+    { contextId: "ctx", targetOccurrence: "t", harmony: { interval: "fifth_below" } },
     {
       contextId: "ctx",
-      targetOccurrenceId: "t",
+      targetOccurrence: "t",
       harmony: { interval: "third_below", key: { tonic: "H", mode: "major" } },
     },
     {
       contextId: "ctx",
-      targetOccurrenceId: "t",
+      targetOccurrence: "t",
       harmony: { interval: "third_below", key: { tonic: "C", mode: "dorian" } },
     },
     {
       contextId: "ctx",
-      targetOccurrenceId: "t",
+      targetOccurrence: "t",
       harmony: { interval: "third_below" },
       register: { minPitch: 60, maxPitch: 60 },
     },
     {
       contextId: "ctx",
-      targetOccurrenceId: "t",
+      targetOccurrence: "t",
       harmony: { interval: "third_below" },
       lyricsMode: "hum",
     },
     {
       contextId: "ctx",
-      targetOccurrenceId: "t",
+      targetOccurrence: "t",
       harmony: { interval: "third_below" },
       notes: [],
     },
-    { contextId: "ctx", targetOccurrenceId: "t", harmony: { interval: "third_below" }, bogus: 1 },
+    { contextId: "ctx", targetOccurrence: "t", harmony: { interval: "third_below" }, bogus: 1 },
   ]) {
     await assert.rejects(service.plan(request), (error) => error.code === "INVALID_ARGUMENTS");
   }

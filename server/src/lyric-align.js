@@ -9,6 +9,7 @@ import {
   analyzeVocalEventSequence,
   classifyVocalEvent,
 } from "./vocal-event-semantics.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { unknownContextError } from "./snapshot.js";
 
 // sv_align_lyrics：无副作用咬字/铺词规划器（HANDOFF §7 P2 定位）。
@@ -92,10 +93,8 @@ export class LyricAlignService {
 
 // ---------- 上下文解析（纯数据，与 plan/compare 同模式） ----------
 
-// occurrenceId = `${contextId}:t:${track}:r:${ref}`；Note 身份是组内 index（§3.1）。
+// 续跑身份使用轨道/引用位置与目标 UUID；对外 occurrence 仍是当前 Context 的 ordinal。
 // 位置后缀只负责寻找候选；必须再通过服务签发的短期记录校验 target UUID 与音符结构。
-const OCCURRENCE_POSITION_PATTERN = /:t:(\d+):r:(\d+)$/;
-
 function resolveAlignSource(store, input, warnings, continuationIdentities) {
   const stored = store.get(input.contextId);
   if (!stored) {
@@ -107,76 +106,54 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
       'sv_align_lyrics needs a range context from sv_snapshot_range with include ["notes"]'
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    input.occurrence,
+    {
+      eligible: (item) =>
+        Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0,
+      noneCode: "NOTES_NOT_CAPTURED",
+      noneMessage:
+        'sv_align_lyrics needs note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+      ambiguousMessage:
+        "range context has multiple occurrences with notes; pass one occurrence ordinal",
+      ineligibleCode: "OCCURRENCE_NOT_CAPTURED",
+      ineligibleMessage:
+        'the selected occurrence has no note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+    }
   );
-  const wantedId = selectorOccurrenceId(input);
-  let occurrence = null;
   let reanchoredIdentity = null;
-  if (wantedId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === wantedId) ?? null;
-    if (!occurrence) {
-      const identity = continuationIdentities.get(
-        continuationIdentityKey(wantedId, input.startNote)
+  const identity = continuationIdentities.get(
+    continuationIdentityKey(occurrence, input.startNote)
+  );
+  if (identity && identity.contextId !== stored.contextId) {
+    if (occurrence.targetGroupUuid !== identity.targetGroupUuid) {
+      const error = codedError(
+        "STALE_CONTEXT",
+        `continuation target changed: expected group UUID ${identity.targetGroupUuid}, observed ${occurrence.targetGroupUuid}; re-snapshot and re-plan`
       );
-      const position = identity ? OCCURRENCE_POSITION_PATTERN.exec(wantedId) : null;
-      if (position) {
-        const matches = occurrences.filter((item) => {
-          const own = OCCURRENCE_POSITION_PATTERN.exec(item.occurrenceId);
-          return own !== null && own[1] === position[1] && own[2] === position[2];
-        });
-        if (matches.length === 1) {
-          const candidate = matches[0];
-          if (candidate.targetGroupUuid !== identity.targetGroupUuid) {
-            const error = codedError(
-              "STALE_CONTEXT",
-              `continuation selector target changed: expected group UUID ${identity.targetGroupUuid}, observed ${candidate.targetGroupUuid}; re-snapshot and re-plan`
-            );
-            error.expectedGroupUuid = identity.targetGroupUuid;
-            error.observedGroupUuid = candidate.targetGroupUuid;
-            throw error;
-          }
-          const observedStructureDigest = noteStructureDigest(
-            candidate.noteFingerprints,
-            identity.startNoteIndexInGroup
-          );
-          if (observedStructureDigest !== identity.noteStructureDigest) {
-            const error = codedError(
-              "STALE_CONTEXT",
-              "continuation start note or following note-structure fingerprint changed; re-snapshot and re-plan"
-            );
-            error.expectedStructureDigest = identity.noteStructureDigest;
-            error.observedStructureDigest = observedStructureDigest;
-            throw error;
-          }
-          occurrence = candidate;
-          reanchoredIdentity = identity;
-          warnings.push({
-            code: "STALE_SELECTOR_REANCHORED",
-            message: `occurrenceId/startNote reference a consumed context; verified target identity and note structure, then re-anchored by position (track ${position[1]}, reference ${position[2]}) onto ${occurrence.occurrenceId}.`,
-          });
-        }
-      }
+      error.expectedGroupUuid = identity.targetGroupUuid;
+      error.observedGroupUuid = occurrence.targetGroupUuid;
+      throw error;
     }
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
+    const observedStructureDigest = noteStructureDigest(
+      occurrence.noteFingerprints,
+      identity.startNoteIndexInGroup
+    );
+    if (observedStructureDigest !== identity.noteStructureDigest) {
+      const error = codedError(
+        "STALE_CONTEXT",
+        "continuation start note or following note-structure fingerprint changed; re-snapshot and re-plan"
+      );
+      error.expectedStructureDigest = identity.noteStructureDigest;
+      error.observedStructureDigest = observedStructureDigest;
+      throw error;
     }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'sv_align_lyrics needs note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId"
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
+    reanchoredIdentity = identity;
+    warnings.push({
+      code: "CONTINUATION_IDENTITY_VERIFIED",
+      message: `Continuation target was re-captured at occurrence ${ordinal}; target identity and note structure still match.`,
+    });
   }
   const notes = [...(occurrence.noteFingerprints ?? [])]
     .map((fingerprint) => ({
@@ -224,18 +201,15 @@ function resolveAlignSource(store, input, warnings, continuationIdentities) {
       throw codedError("STALE_CONTEXT", "continuation start note no longer exists; re-snapshot and re-plan");
     }
   }
-  return { stored, occurrence, notes, startIndex };
+  return { stored, occurrence, occurrenceOrdinal: ordinal, notes, startIndex };
 }
 
-function selectorOccurrenceId(input) {
-  if (typeof input.occurrenceId === "string") return input.occurrenceId;
-  // startNote 是组内 index（§3.1），不携带 occurrence 前缀，因此无从推导。
-  // 单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 覆盖其余情况。
-  return undefined;
-}
-
-function continuationIdentityKey(occurrenceId, startNote) {
-  return JSON.stringify([occurrenceId, startNote ?? null]);
+function continuationIdentityKey(occurrence, startNote) {
+  return JSON.stringify([
+    occurrence?.trackIndex ?? null,
+    occurrence?.groupIndex ?? null,
+    startNote ?? null,
+  ]);
 }
 
 function pruneContinuationIdentities(identities, now) {
@@ -245,12 +219,11 @@ function pruneContinuationIdentities(identities, now) {
 }
 
 function rememberContinuationIdentity(identities, loaded, input, now) {
-  const occurrenceId = selectorOccurrenceId(input);
-  if (!occurrenceId || typeof loaded.occurrence.targetGroupUuid !== "string") return;
+  if (typeof loaded.occurrence.targetGroupUuid !== "string") return;
   const startNote = loaded.notes[loaded.startIndex];
   const expiresAt = loaded.stored.expiresAt;
   if (!startNote || !Number.isFinite(expiresAt) || expiresAt <= now) return;
-  const key = continuationIdentityKey(occurrenceId, input.startNote);
+  const key = continuationIdentityKey(loaded.occurrence, input.startNote);
   identities.delete(key);
   identities.set(key, {
     targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -259,6 +232,7 @@ function rememberContinuationIdentity(identities, loaded, input, now) {
       loaded.occurrence.noteFingerprints,
       startNote.indexInGroup
     ),
+    contextId: loaded.stored.contextId,
     expiresAt,
   });
   while (identities.size > MAX_CONTINUATION_IDENTITIES) {
@@ -628,6 +602,7 @@ function buildAlignResponse(
           tool: "sv_patch_notes",
           arguments: {
             contextId: loaded.stored.contextId,
+            occurrence: loaded.occurrenceOrdinal,
             patches: submittable,
             dryRun: true,
             atomic: true,
@@ -643,7 +618,7 @@ function buildAlignResponse(
           workflow: [
             "Submit apply.arguments with action dry_run, then commit.",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
-            "Re-run sv_align_lyrics with the same lyrics and options against the fresh contextId: already-applied notes come back unchanged, so the next round plans exactly the remaining patches. Explicit occurrenceId/startNote are re-anchored only when their short-lived continuation identity proves the same target UUID and unchanged note structure (warned as STALE_SELECTOR_REANCHORED); otherwise the replay is rejected.",
+            "Re-run sv_align_lyrics with the same lyrics and options against the fresh contextId and its current occurrence ordinal: already-applied notes come back unchanged, so the next round plans exactly the remaining patches. The short-lived continuation identity verifies the target UUID and note structure before planning the next slice.",
             "Repeat until the response carries no continuation (or reports status no_change).",
           ],
         }
@@ -655,7 +630,7 @@ function buildAlignResponse(
     });
   }
   const planId = `lyr_${canonicalHashHex({
-    occurrenceId: loaded.occurrence.occurrenceId,
+    occurrence: loaded.occurrenceOrdinal,
     patches,
     perNote: mapped.perNote.map((item) => [item.indexInGroup, item.plannedLyrics]),
   }).slice(0, 16)}`;
@@ -696,7 +671,7 @@ function buildAlignResponse(
         targetTool: "sv_patch_notes",
         mutationRequest: patchRequest.arguments,
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
-        occurrenceId: loaded.occurrence.occurrenceId,
+        occurrence: loaded.occurrenceOrdinal,
         contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
           // capsule 只封存被这批 patch 触及的音符；身份是组内 index（§3.1）。
           noteIndexes: submittable.map((patch) => patch.note),
@@ -768,7 +743,7 @@ function buildAlignResponse(
     planId,
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.occurrenceOrdinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -819,7 +794,7 @@ function normalizeAlignRequest(request) {
     request,
     [
       "contextId",
-      "occurrenceId",
+      "occurrence",
       "lyrics",
       "language",
       "startNote",
@@ -833,10 +808,10 @@ function normalizeAlignRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+    throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer");
   }
   if (typeof request.lyrics !== "string" || request.lyrics.trim().length === 0) {
     throw codedError("INVALID_ARGUMENTS", "lyrics must be a non-empty string");
@@ -869,7 +844,7 @@ function normalizeAlignRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     lyrics: request.lyrics,
     language,
     startNote: request.startNote,

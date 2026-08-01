@@ -177,16 +177,14 @@ export function createBenchFixture({ noteCount = 373, bulk = false } = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${entry.contextId}:t:0:r:0`;
   entry.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "bench-group",
     timeOffsetBlick: 0,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints: model.notes.map((note) => ({
-      noteId: `${occurrenceId}:n:${note.index}`,
       indexInGroup: note.index,
       onsetBlick: note.onset,
       durationBlick: note.duration,
@@ -198,7 +196,7 @@ export function createBenchFixture({ noteCount = 373, bulk = false } = {}) {
     })),
   });
 
-  return { ...model, snapshots, service, contextId: entry.contextId, occurrenceId };
+  return { ...model, snapshots, service, contextId: entry.contextId };
 }
 
 export const BENCH_FINGERPRINT_FIELDS = FIELDS;

@@ -1,4 +1,5 @@
 import { createHostScope, unknownContextError } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 // sv_set_selection：高层 selection 操作（主计划 P1-E）。
 //
@@ -156,9 +157,34 @@ async function resolvePositions(service, input, scope, target, warnings) {
     if (!stored) {
       throw unknownContextError(service.snapshotService.store, input.contextId);
     }
+    let rangeOccurrence = null;
+    if (stored.context?.kind === "range") {
+      rangeOccurrence = selectOccurrenceByOrdinal(
+        stored.context.occurrences,
+        input.occurrence,
+        {
+          eligible: (item) =>
+            typeof item.targetGroupUuid === "string" &&
+            item.targetGroupUuid.length > 0 &&
+            Array.isArray(item.noteFingerprints) &&
+            item.noteFingerprints.length > 0,
+          noneCode: "OCCURRENCE_NOT_CAPTURED",
+          noneMessage: "range context contains no captured vocal occurrence",
+          ambiguousMessage:
+            "range context has multiple captured vocal occurrences; pass one occurrence ordinal",
+          ineligibleCode: "OCCURRENCE_NOT_CAPTURED",
+          ineligibleMessage: "the selected occurrence has no captured selectable notes",
+        }
+      ).occurrence;
+    } else if (input.occurrence !== undefined) {
+      throw codedError(
+        "INVALID_CONTEXT",
+        "occurrence is only valid with a range snapshot context"
+      );
+    }
     const expectedGroupUuids = new Set();
     for (const noteIndex of input.notes) {
-      const resolved = resolveContextNotePosition(stored, input, noteIndex);
+      const resolved = resolveContextNotePosition(stored, noteIndex, rangeOccurrence);
       positions.push(resolved.indexInGroup);
       expectedGroupUuids.add(resolved.targetGroupUuid);
     }
@@ -202,29 +228,23 @@ async function resolvePositions(service, input, scope, target, warnings) {
 
 // context 内的引用一律是组内 index（§3.1）。本服务只作用于宿主"当前编辑组"，
 // 因此 occurrence 与当前组不一致时必须明确拒绝（组 UUID 比对在调用方完成）。
-function resolveContextNotePosition(stored, input, noteIndex) {
+function resolveContextNotePosition(stored, noteIndex, rangeOccurrence) {
   if (stored.context?.kind === "range") {
-    const occurrences = Array.isArray(stored.context.occurrences)
-      ? stored.context.occurrences
-      : [];
-    for (const occurrence of occurrences) {
-      if (input.occurrenceId !== undefined && occurrence.occurrenceId !== input.occurrenceId) {
-        continue;
-      }
-      const fingerprint = (occurrence.noteFingerprints ?? []).find(
-        (item) => item.indexInGroup === noteIndex
-      );
-      if (fingerprint) {
-        return {
-          indexInGroup: fingerprint.indexInGroup,
-          targetGroupUuid:
-            typeof occurrence.targetGroupUuid === "string" ? occurrence.targetGroupUuid : null,
-        };
-      }
+    const fingerprint = (rangeOccurrence?.noteFingerprints ?? []).find(
+      (item) => item.indexInGroup === noteIndex
+    );
+    if (fingerprint) {
+      return {
+        indexInGroup: fingerprint.indexInGroup,
+        targetGroupUuid:
+          typeof rangeOccurrence.targetGroupUuid === "string"
+            ? rangeOccurrence.targetGroupUuid
+            : null,
+      };
     }
     throw codedError(
       "NOTE_NOT_IN_CONTEXT",
-      `note ${noteIndex} is not part of the supplied range context${input.occurrenceId !== undefined ? " and occurrenceId" : ""}`,
+      `note ${noteIndex} is not part of the selected range occurrence`,
       { got: noteIndex }
     );
   }
@@ -252,13 +272,13 @@ function resolveContextNotePosition(stored, input, noteIndex) {
 
 function normalizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(request, ["operation", "contextId", "occurrenceId", "notes", "indexInGroup"], "request");
+  assertKnownKeys(request, ["operation", "contextId", "occurrence", "notes", "indexInGroup"], "request");
   const operation = request.operation;
   if (!OPERATIONS.includes(operation)) {
     throw codedError("INVALID_ARGUMENTS", `operation must be one of ${OPERATIONS.join(", ")}`);
   }
   if (operation === "clear") {
-    for (const key of ["contextId", "occurrenceId", "notes", "indexInGroup"]) {
+    for (const key of ["contextId", "occurrence", "notes", "indexInGroup"]) {
       if (request[key] !== undefined) {
         throw codedError("INVALID_ARGUMENTS", `operation "clear" does not accept ${key}`);
       }
@@ -279,22 +299,25 @@ function normalizeRequest(request) {
     }
     assertIndexArray(request.notes, "notes");
     if (
-      request.occurrenceId !== undefined &&
-      (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+      request.occurrence !== undefined &&
+      (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
     ) {
-      throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        "occurrence must be a non-negative occurrence ordinal when provided"
+      );
     }
     return {
       operation,
       contextId: request.contextId,
-      occurrenceId: request.occurrenceId,
+      occurrence: request.occurrence,
       notes: request.notes,
     };
   }
-  if (request.contextId !== undefined || request.occurrenceId !== undefined) {
+  if (request.contextId !== undefined || request.occurrence !== undefined) {
     throw codedError(
       "INVALID_ARGUMENTS",
-      "indexInGroup addresses the host's current group directly and does not accept contextId/occurrenceId"
+      "indexInGroup addresses the host's current group directly and does not accept contextId/occurrence"
     );
   }
   if (

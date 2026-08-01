@@ -69,6 +69,18 @@ export function resolvePlanReference({
       : null;
 
   const mutationRequest = canonicalClone(plan.mutationRequest);
+  if (capsule) {
+    // Plan capsule 只封存目标 occurrence，因此它在 capsule 内的 ordinal 恒为 0。
+    // 原 Context 仍在时必须保留原 ordinal；只有真正切到 capsule 时才能重映射。
+    if (Number.isSafeInteger(mutationRequest.occurrence)) mutationRequest.occurrence = 0;
+    if (
+      mutationRequest.target &&
+      typeof mutationRequest.target === "object" &&
+      Number.isSafeInteger(mutationRequest.target.occurrence)
+    ) {
+      mutationRequest.target.occurrence = 0;
+    }
+  }
   mutationRequest.dryRun = action === "dry_run";
   applyConfirmations(mutationRequest, expectedTargetTool, confirmations);
   applyExecutionOptions(mutationRequest, expectedTargetTool, executionOptions);
@@ -129,7 +141,7 @@ export function settlePlanLedger(planLedger, ledgerRef, result) {
  * @param {string} options.targetTool
  * @param {object} options.mutationRequest
  * @param {string} [options.targetGroupUuid]
- * @param {string} [options.occurrenceId]
+ * @param {number} [options.occurrence]
  * @param {number} [options.expectedTimeOffsetBlick]
  * @param {object} [options.fingerprints]
  * @returns {{ kind: "plan", payload: object }}
@@ -138,7 +150,7 @@ export function buildPlanArtifact({
   targetTool,
   mutationRequest,
   targetGroupUuid,
-  occurrenceId,
+  occurrence,
   expectedTimeOffsetBlick,
   fingerprints = {},
   contextSnapshot,
@@ -149,7 +161,7 @@ export function buildPlanArtifact({
       targetTool,
       mutationRequest,
       ...(targetGroupUuid !== undefined ? { targetGroupUuid } : {}),
-      ...(occurrenceId !== undefined ? { occurrenceId } : {}),
+      ...(occurrence !== undefined ? { occurrence } : {}),
       ...(expectedTimeOffsetBlick !== undefined ? { expectedTimeOffsetBlick } : {}),
       fingerprints,
       ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),
@@ -191,7 +203,10 @@ export function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {
   }
   // Capsule 只保留恢复 live preflight 所需字段；分析结果、voice、Automation 等大块数据不进入计划。
   const minimalOccurrence = {
-    occurrenceId: occurrence.occurrenceId,
+    // capsule 只封存一个 occurrence，因此它在 capsule 内的 ordinal 恒为 0——原 Context
+    // 里的 ordinal 不能带进来：capsule 的 occurrences 数组只有一项，带一个非 0 的编号
+    // 会让 scope-source 的 ordinal 一致性检查（正确地）拒绝它。
+    occurrence: 0,
     trackIndex: occurrence.trackIndex,
     groupIndex: occurrence.groupIndex,
     targetGroupUuid: occurrence.targetGroupUuid,

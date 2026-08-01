@@ -89,6 +89,7 @@ test("a full gesture set compiles to bounded group-local add curves with a unifi
   // apply.arguments 携带 expectedNotes/expectedTimeOffsetBlick 漂移守卫。
   assert.ok(Array.isArray(result.apply.arguments.target.expectedNotes));
   assert.equal(result.apply.arguments.target.expectedTimeOffsetBlick, 0);
+  assert.equal(result.apply.arguments.occurrence, 0);
 });
 
 test("planner output is schema-valid and plannable against the live host (dry-run, zero writes)", async () => {

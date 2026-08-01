@@ -284,14 +284,20 @@ export function buildSurfaceIoPolicies(tools) {
  * 尚未清掉的写在 LEGACY_REQUEST_FIELDS——把它们混进这里只会让门禁一直红着，
  * 从而失去发现新问题的能力。
  */
-export const BANNED_REQUEST_FIELDS = Object.freeze(["contextSnapshot", "detailRef", "planRefObject"]);
+export const BANNED_REQUEST_FIELDS = Object.freeze([
+  "contextSnapshot",
+  "detailRef",
+  "planRefObject",
+  "occurrenceId",
+  "sourceOccurrenceId",
+  "targetOccurrenceId",
+]);
 
 /**
  * 迁移期仍存在于请求 schema 里的长身份/开关。B2 逐对 planner→apply 迁移时清空。
  * 与 root-envelope 的 LEGACY 表同理：登记让「还欠多少」可数，且门禁会拒绝过期条目。
  */
 export const LEGACY_REQUEST_FIELDS = Object.freeze({
-  occurrenceId: "§3.1：改为 Context 内 occurrence ordinal（B2）",
   dryRun: "§10.6：统一为 action: dry_run | commit（B2）",
   responseMode: "§3.6：响应形状由契约规定，不由调用方选择（B2）",
   cursor: "§4.1：offset 分页降级为待数据评估（C2）",

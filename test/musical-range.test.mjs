@@ -471,7 +471,6 @@ test("range snapshot returns one editable context with all tuning includes", asy
   assert.equal(result.data.computedPitch.length, 1);
   assert.equal(result.data.computedPitch[0].values.length, 4);
   assert.equal(result.data.tracks[0].groups[0].processing.state, "ready");
-  const occurrenceId = result.data.tracks[0].groups[0].occurrenceId;
   // 身份是组内 index（§3.1）：note.id 与 indexInGroup 是同一个值。
   assert.ok(result.data.notes.every((note) => note.id === note.indexInGroup));
   const stored = service.store.get(result.contextId);
@@ -597,7 +596,6 @@ test("range occurrence identity distinguishes references to one shared target", 
   });
   const groups = result.data.tracks[0].groups;
   assert.equal(groups.length, 2);
-  assert.notEqual(groups[0].occurrenceId, groups[1].occurrenceId);
   // ordinal 由服务端按完整 occurrences 数组分配，消费方不必自己 indexOf——
   // 各自推导会在数组被过滤后给出不同编号（§3.1 规则 1）。
   assert.deepEqual(
@@ -605,8 +603,8 @@ test("range occurrence identity distinguishes references to one shared target", 
     [0, 1]
   );
   assert.deepEqual(groups[0].sharedTargetOccurrences, [
-    groups[0].occurrenceId,
-    groups[1].occurrenceId,
+    groups[0].occurrence,
+    groups[1].occurrence,
   ]);
 });
 
@@ -664,10 +662,10 @@ test("range snapshot stores computed pitch for sv_compare_computed_pitch", async
   // 供 compare 使用的上下文增量：pitchOffset、tempo map 与未分页 computed-pitch 序列。
   assert.equal(occurrence.pitchOffsetSemitone, 0);
   assert.ok(Array.isArray(stored.context.tempoMarks) && stored.context.tempoMarks.length > 0);
-  const series = getStoredComputedPitch(stored, occurrence.occurrenceId);
+  const series = getStoredComputedPitch(stored, occurrence.occurrence);
   assert.equal(series.values.length, 40);
   assert.equal(series.evidence.observedFrames, 40);
-  assert.equal(getStoredComputedPitch(stored, "ctx_x:t:9:r:9"), null);
+  assert.equal(getStoredComputedPitch(stored, 9), null);
 
   // 端到端：真实 snapshot 存储 → compare 纯内存分析，全程零额外宿主访问。
   const hostCallsBeforeCompare = model.hostCalls.length;
@@ -680,7 +678,7 @@ test("range snapshot stores computed pitch for sv_compare_computed_pitch", async
     contextId: snap.contextId,
   });
   assert.equal(result.ok, true);
-  // 对外身份是 ordinal（§3.1）；occurrenceId 只是 Context 内部存储键。
+  // 对外身份是 ordinal（§3.1）：请求里填什么，响应里就回什么。
   assert.equal(result.occurrence.occurrence, 0);
   assert.ok(result.summary.validFrameCount > 0);
   assert.ok(Number.isFinite(result.summary.maeCent));
@@ -703,7 +701,7 @@ test("range snapshot stores automation/voice/processing profiles for sv_style_pr
   assert.equal(occurrence.processing.state, "ready");
   assert.ok(occurrence.processing.phonemeCoverage);
   assert.equal(stored.context.automationCaptured, true);
-  const curves = stored.context.automationByOccurrence[occurrence.occurrenceId];
+  const curves = stored.context.automationByOccurrence[occurrence.occurrence];
   assert.equal(curves.length, 1);
   assert.equal(curves[0].resolvedParameter, "tension");
   assert.equal(curves[0].points.length, 2);

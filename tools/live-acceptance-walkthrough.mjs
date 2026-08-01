@@ -309,15 +309,15 @@ async function runWalkthrough(client) {
     harmonySkipReason = "fixture has only one vocal NoteGroup; harmony needs a separate target";
   } else {
     const both = await captureRange(client, fixture, { includeSecondGroup: true });
-    const target = both.allGroups.find((group) => group.occurrenceId !== both.group.occurrenceId);
+    const target = both.allGroups.find((group) => group.occurrence !== both.group.occurrence);
     if (!target) {
       harmonySkipReason = "second vocal group did not appear in the range context";
     } else {
       planners.generate_harmony = structured(
         await facadeCall(client, "sv_generate_harmony", {
           contextId: both.result.contextId,
-          sourceOccurrenceId: both.group.occurrenceId,
-          targetOccurrenceId: target.occurrenceId,
+          sourceOccurrence: both.group.occurrence,
+          targetOccurrence: target.occurrence,
           harmony: { interval: "third_below" },
           responseMode: "compact",
         })
@@ -346,7 +346,7 @@ async function runWalkthrough(client) {
   dryRuns.patch_notes = structured(
     await facadeCall(client, "sv_patch_notes", {
       contextId: captured.result.contextId,
-      occurrenceId: captured.group.occurrenceId,
+      occurrence: captured.group.occurrence,
       patches: [{ note: 0, set: { detuneCents: 7 } }],
       dryRun: true,
       waitFor: "none",
@@ -355,7 +355,7 @@ async function runWalkthrough(client) {
   dryRuns.patch_pitch_controls = structured(
     await facadeCall(client, "sv_patch_pitch_controls", {
       contextId: captured.result.contextId,
-      occurrenceId: captured.group.occurrenceId,
+      occurrence: captured.group.occurrence,
       operations: [
         {
           op: "add",
@@ -373,7 +373,7 @@ async function runWalkthrough(client) {
     await facadeCall(client, "sv_edit_phrase", {
       target: {
         contextId: captured.result.contextId,
-        occurrenceId: captured.group.occurrenceId,
+        occurrence: captured.group.occurrence,
       },
       notePatches: [{ note: 0, set: { detuneCents: 5 } }],
       dryRun: true,
@@ -398,7 +398,7 @@ async function runWalkthrough(client) {
   // ---- §15.10 insert + delete + split + merge against one snapshot ----
   const structureArgs = {
     contextId: captured.result.contextId,
-    occurrenceId: captured.group.occurrenceId,
+    occurrence: captured.group.occurrence,
     operations: [
       // 四种 op 同批，全部相对同一快照 index 解析。split 的 atBlick 取自捕获音符的
       // 真实中点——传非法值只能测到拒绝路径，测不到"index 相对同一快照解析"本身。
@@ -710,8 +710,8 @@ async function captureRange(client, fixture, { includeSecondGroup = false } = {}
     allGroups.find(
       (entry) => entry.trackIndex === fixture.trackIndex && entry.groupIndex === fixture.groupIndex
     ) ?? allGroups[0];
-  if (!group?.occurrenceId) {
-    throw new Error("range snapshot did not expose an occurrenceId for the fixture group");
+  if (!Number.isSafeInteger(group?.occurrence)) {
+    throw new Error("range snapshot did not expose an occurrence ordinal for the fixture group");
   }
   const notes = result.data?.notes ?? [];
   const firstNote = notes[0] ?? { onsetBlick: 0, durationBlick: 176400, pitch: 60 };

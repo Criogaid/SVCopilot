@@ -182,7 +182,7 @@ async function measureMode({ host, fixture, indices, useBulk }) {
     const startedAt = process.hrtime.bigint();
     const result = await patcher.patchNotes({
       contextId: captured.contextId,
-      occurrenceId: occurrence.occurrenceId,
+      occurrence: occurrence.occurrence,
       patches: indices.map((index) => ({
         note: index,
         // dryRun 下不写入;set 里给一个必然与现值不同的值,以确保预检真的
@@ -256,12 +256,12 @@ function wrapSession(host, { allowBulk }) {
   };
 }
 
-// occurrenceId 出现在响应的 data.tracks[].groups[] 上（context 里的 occurrences
-// 是服务内部状态，不进响应）。按 track/group 索引定位，不猜第一个。
+// occurrence ordinal 出现在响应的 data.tracks[].groups[] 上。按 track/group
+// 索引定位，不猜第一个。
 function findOccurrence(captured, fixture) {
   const track = (captured?.data?.tracks ?? []).find((item) => item.index === fixture.trackIndex);
   const group = (track?.groups ?? []).find((item) => item.index === fixture.groupIndex);
-  if (!group?.occurrenceId) {
+  if (!Number.isSafeInteger(group?.occurrence)) {
     throw new Error(
       `range snapshot did not return the fixture occurrence (track=${fixture.trackIndex} group=${fixture.groupIndex}); widen the range scope`
     );

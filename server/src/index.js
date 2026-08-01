@@ -236,12 +236,16 @@ const CURVE_TARGET_SCHEMA = {
   type: "object",
   additionalProperties: false,
   description:
-    "Use either trackIndex+groupIndex, or contextId+occurrenceId from sv_snapshot_range.",
+    "Use either trackIndex+groupIndex, or contextId+occurrence from sv_snapshot_range.",
   properties: {
     trackIndex: { type: "integer", minimum: 0 },
     groupIndex: { type: "integer", minimum: 0 },
     contextId: { type: "string", minLength: 1 },
-    occurrenceId: { type: "string", minLength: 1 },
+    occurrence: {
+      type: "integer",
+      minimum: 0,
+      description: "0-based occurrence ordinal indexing the full range-context occurrences array.",
+    },
     expectedGroupUuid: { type: "string", minLength: 1 },
     allowSharedTargetMutation: { type: "boolean", default: false },
     expectedTimeOffsetBlick: {
@@ -810,17 +814,17 @@ export const TOOLS = [
   {
     name: "sv_wait_for_processing",
     description:
-      'Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide occurrenceId; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT. For computedPitch, omitted startBlick/intervalBlick/frames inherit that occurrence\'s sampling when the range context was captured with include:["computedPitch"]; otherwise all three are required. Explicit values override captured sampling. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.',
+      'Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide the 0-based occurrence ordinal; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT with ordinal candidates. For computedPitch, omitted startBlick/intervalBlick/frames inherit that occurrence\'s sampling when the range context was captured with include:["computedPitch"]; otherwise all three are required. Explicit values override captured sampling. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         contextId: { type: "string" },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
+        occurrence: {
+          type: "integer",
+          minimum: 0,
           description:
-            "Occurrence from sv_snapshot_range; optional only when the range contains exactly one vocal occurrence.",
+            "0-based occurrence ordinal from sv_snapshot_range; optional only when the range contains exactly one vocal occurrence.",
         },
         group: {
           type: "object",
@@ -910,11 +914,11 @@ export const TOOLS = [
       properties: {
         ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
+        occurrence: {
+          type: "integer",
+          minimum: 0,
           description:
-            "Range contexts only: the occurrence to edit. May be omitted when exactly one vocal occurrence exists.",
+            "Range contexts only: 0-based occurrence ordinal indexing the full occurrences array. May be omitted when exactly one vocal occurrence exists.",
         },
         allowSharedTargetMutation: {
           type: "boolean",
@@ -1451,10 +1455,11 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range captured with notes.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional when the context has exactly one occurrence with notes.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal indexing the full range-context array; optional when exactly one occurrence has notes.",
         },
         lyrics: {
           type: "string",
@@ -1616,7 +1621,7 @@ export const TOOLS = [
             },
             required: ["contextId"],
           },
-          description: "Duplicate contextId+occurrenceId pairs are rejected (they would double-count aggregates).",
+          description: "Duplicate contextId+occurrence pairs are rejected (they would double-count aggregates).",
         },
         include: {
           type: "array",
@@ -1703,7 +1708,7 @@ export const TOOLS = [
   {
     name: "sv_quantize_notes",
     description:
-      'Side-effect-free quantize planner over a range context (include ["notes"]; in-memory only, never touches the host). Snaps note onsets to a bar-anchored grid ("1/4"|"1/8"|"1/16"|"1/32"|"1/8T"|"1/16T"; the grid re-anchors at every meter change), with strength (0-1 linear interpolation toward the grid), swing (odd grid slots shifted by swing×half-step; straight divisions only — triplet grids reject swing), and optional duration quantization. Deterministic and order-preserving: notes that collide onto one grid slot keep their original onset (QUANTIZE_COLLISION) and onset changes that would introduce overlaps are reverted (OVERLAP_AFTER_QUANTIZE) unless quantizeDurations trims the earlier note — no half-step guessing, and NO humanize (random micro-timing conflicts with the deterministic-planner contract). Breath notes ("br") are quantized like any timed note. Returns a unified apply envelope (read apply.tool and submit apply.arguments verbatim; the deprecated patchRequest field carries the identical payload) with expected onset/duration preconditions; plans above the 200-patch cap return the first 200 plus a continuation block (commit → re-snapshot → re-run with identical options; already-quantized notes come back unchanged so the loop converges to no_change; an explicit occurrenceId is re-anchored only while a short-lived continuation identity proves the same target group UUID).',
+      'Side-effect-free quantize planner over a range context (include ["notes"]; in-memory only, never touches the host). Snaps note onsets to a bar-anchored grid ("1/4"|"1/8"|"1/16"|"1/32"|"1/8T"|"1/16T"; the grid re-anchors at every meter change), with strength (0-1 linear interpolation toward the grid), swing (odd grid slots shifted by swing×half-step; straight divisions only — triplet grids reject swing), and optional duration quantization. Deterministic and order-preserving: notes that collide onto one grid slot keep their original onset (QUANTIZE_COLLISION) and onset changes that would introduce overlaps are reverted (OVERLAP_AFTER_QUANTIZE) unless quantizeDurations trims the earlier note — no half-step guessing, and NO humanize (random micro-timing conflicts with the deterministic-planner contract). Breath notes ("br") are quantized like any timed note. Returns a unified apply envelope (read apply.tool and submit apply.arguments verbatim; the deprecated patchRequest field carries the identical payload) with expected onset/duration preconditions; plans above the 200-patch cap return the first 200 plus a continuation block (commit → re-snapshot → re-run with identical options; already-quantized notes come back unchanged so the loop converges to no_change).',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1713,10 +1718,11 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range captured with notes.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional when the context has exactly one occurrence with notes.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal indexing the full range-context array; optional when exactly one occurrence has notes.",
         },
         notes: {
           type: "array",
@@ -1774,14 +1780,14 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range capturing BOTH source and target occurrences with notes.",
         },
-        sourceOccurrenceId: {
-          type: "string",
-          minLength: 1,
+        sourceOccurrence: {
+          type: "integer",
+          minimum: 0,
           description: "Optional when exactly one non-target occurrence has notes.",
         },
-        targetOccurrenceId: {
-          type: "string",
-          minLength: 1,
+        targetOccurrence: {
+          type: "integer",
+          minimum: 0,
           description: "Destination occurrence for the harmony inserts; must differ from the source.",
         },
         harmony: {
@@ -1863,7 +1869,7 @@ export const TOOLS = [
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         usePlanRef: USE_PLAN_REF_SCHEMA,
       },
-      required: ["contextId", "targetOccurrenceId", "harmony"],
+      required: ["contextId", "targetOccurrence", "harmony"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
@@ -2008,7 +2014,12 @@ export const TOOLS = [
       properties: {
         ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
-        occurrenceId: { type: "string", minLength: 1 },
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "Required: 0-based occurrence ordinal from sv_snapshot_range. PitchControl edits have no single-candidate default because the whole group's controls are rewritten.",
+        },
         target: {
           type: "object",
           additionalProperties: false,
@@ -2124,7 +2135,7 @@ export const TOOLS = [
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
       oneOf: [
-        { required: ["contextId", "occurrenceId", "operations"] },
+        { required: ["contextId", "occurrence", "operations"] },
         { required: ["planRef", "action"] },
       ],
     },
@@ -2140,7 +2151,12 @@ export const TOOLS = [
       properties: {
         ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
-        occurrenceId: { type: "string", minLength: 1 },
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal indexing the full range-context array; optional when exactly one occurrence has notes.",
+        },
         specialEventPolicy: {
           enum: ["warn_and_skip", "include", "error"],
           default: "warn_and_skip",
@@ -2261,7 +2277,12 @@ export const TOOLS = [
       additionalProperties: false,
       properties: {
         contextId: { type: "string", minLength: 1 },
-        occurrenceId: { type: "string", minLength: 1 },
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal indexing the full range-context array; optional when exactly one vocal occurrence exists.",
+        },
         sampling: {
           type: "object",
           additionalProperties: false,
@@ -2320,11 +2341,16 @@ export const TOOLS = [
           additionalProperties: false,
           properties: {
             contextId: { type: "string", minLength: 1 },
-            occurrenceId: { type: "string", minLength: 1 },
+            occurrence: {
+              type: "integer",
+              minimum: 0,
+              description:
+                "Required: 0-based occurrence ordinal. A combined transaction must name its target explicitly.",
+            },
             expectedGroupUuid: { type: "string", minLength: 1 },
             allowSharedTargetMutation: { type: "boolean", default: false },
           },
-          required: ["contextId", "occurrenceId"],
+          required: ["contextId", "occurrence"],
         },
         notePatches: {
           type: "array",
@@ -2474,18 +2500,18 @@ export const TOOLS = [
   {
     name: "sv_restructure_notes",
     description:
-      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Accepts group/selection contexts from sv_snapshot and range contexts from sv_snapshot_range (notes are referenced by 0-based group index, so a multi-occurrence range needs occurrenceId, and a shared target NoteGroup requires allowSharedTargetMutation:true after a commit-time project scan). Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
+      "Structural note edits on a snapshot context: insert new notes, delete (with a deep-copy compensation backup), split one note at a group-local blick (second half defaults to the \"-\" extender lyric), and merge consecutive notes. Accepts group/selection contexts from sv_snapshot and range contexts from sv_snapshot_range (notes are referenced by 0-based group index, so a multi-occurrence range needs an occurrence ordinal, and a shared target NoteGroup requires allowSharedTargetMutation:true after a commit-time project scan). Operations run in caller order with live index resolution, inside undo boundaries. atomic:true restores the journal (clones and durations) in reverse order on failure — verified compensation, not ACID. A successful write invalidates the contextId; re-snapshot before further edits.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         ...PLAN_EXECUTION_PROPERTIES,
         contextId: { type: "string", minLength: 1 },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
+        occurrence: {
+          type: "integer",
+          minimum: 0,
           description:
-            "Range contexts only: the occurrence to edit. May be omitted when exactly one vocal occurrence exists.",
+            "Range contexts only: 0-based occurrence ordinal indexing the full occurrences array. May be omitted when exactly one vocal occurrence exists.",
         },
         allowSharedTargetMutation: {
           type: "boolean",
@@ -2654,7 +2680,7 @@ export const TOOLS = [
   {
     name: "sv_set_selection",
     description:
-      'Set the editor note selection with a trustworthy result. SynthV has been observed CHANGING selection state while unselectNote() returned false, so this tool never treats a host boolean as evidence: it reads the selection before and after the operation and derives `changed` from that read-back, reporting the raw hostResults alongside and warning HOST_RETURN_DISAGREES_WITH_READBACK when they contradict each other. Operations: "clear" (unselect all notes), "select" (replace the selection), "add" (extend it), "remove" (unselect the listed notes). Target notes either by `notes` (0-based group indexes from a sv_snapshot or sv_snapshot_range context; a range reference may be narrowed with occurrenceId) or by indexInGroup against the host\'s CURRENT editor group directly. Context references are accepted only when their target NoteGroup UUID matches the current editor group; otherwise CURRENT_GROUP_MISMATCH is returned before any selection mutation. If the group shrank after the snapshot, the call fails NOTE_INDEX_OUT_OF_RANGE instead of quietly selecting a different note. Selection is UI state: this creates no Undo record, because the official API does not make one for it.',
+      'Set the editor note selection with a trustworthy result. SynthV has been observed CHANGING selection state while unselectNote() returned false, so this tool never treats a host boolean as evidence: it reads the selection before and after the operation and derives `changed` from that read-back, reporting the raw hostResults alongside and warning HOST_RETURN_DISAGREES_WITH_READBACK when they contradict each other. Operations: "clear" (unselect all notes), "select" (replace the selection), "add" (extend it), "remove" (unselect the listed notes). Target notes either by `notes` (0-based group indexes from a sv_snapshot or sv_snapshot_range context; a multi-occurrence range requires its 0-based occurrence ordinal) or by indexInGroup against the host\'s CURRENT editor group directly. Context references are accepted only when their target NoteGroup UUID matches the current editor group; otherwise CURRENT_GROUP_MISMATCH is returned before any selection mutation. If the group shrank after the snapshot, the call fails NOTE_INDEX_OUT_OF_RANGE instead of quietly selecting a different note. Selection is UI state: this creates no Undo record, because the official API does not make one for it.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2669,11 +2695,11 @@ export const TOOLS = [
           minLength: 1,
           description: "Required with notes; the context that issued them.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
+        occurrence: {
+          type: "integer",
+          minimum: 0,
           description:
-            "Optional narrowing for range-context notes. The host selection always applies to the current editor group.",
+            "0-based occurrence ordinal for range-context notes. Optional only when the range has one captured occurrence. The host selection always applies to the current editor group.",
         },
         notes: {
           type: "array",

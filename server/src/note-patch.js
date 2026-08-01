@@ -97,11 +97,9 @@ export class NotePatchService {
         resolved = await resolveContextTarget(host, stored, {
           verify: true,
           acceptRange: true,
-          occurrenceId:
-            input.occurrenceId ??
-            // index 身份不含 occurrence 前缀，因此不能从引用里推导 occurrence。
-            // 单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 由 resolveContextTarget 负责。
-            undefined,
+          // index 身份不含 occurrence 前缀，因此不能从引用里推导 occurrence。
+          // 单 occurrence 自动选择与 AMBIGUOUS_CONTEXT 由 resolveContextTarget 负责。
+          occurrence: input.occurrence,
           noteIndicesInGroup: input.patches.map((patch) => patch.note),
           diagnostics,
         });
@@ -861,10 +859,13 @@ function normalizeRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "diagnostics must be a boolean");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence must be a non-negative occurrence ordinal when provided"
+    );
   }
   if (
     request.allowSharedTargetMutation !== undefined &&
@@ -875,7 +876,7 @@ function normalizeRequest(request) {
   return {
     contextId: request.contextId,
     patches,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
     dryRun: request.dryRun === true,
     atomic: request.atomic !== false,

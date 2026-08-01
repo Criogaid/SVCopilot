@@ -66,9 +66,9 @@ test("range snapshot reads Point and Curve with discriminator, units, and dual c
   assert.deepEqual(point.ownership.scriptDataKeys, ["mm_Flag"]);
   assert.ok(point.fingerprint.startsWith("sha256:"));
   assert.equal(point.noteId, undefined);
-  // context-scoped controlId = <occurrenceId>:pc:<index>。
-  const occurrenceId = `${result.contextId}:t:0:r:0`;
-  assert.equal(point.controlId, `${occurrenceId}:pc:0`);
+  // context-scoped controlId = o:<occurrence ordinal>:pc:<index>。以前这里嵌的是
+  // <contextId>:t:X:r:Y，把一个已死的 contextId 焊进了对外 id 里。
+  assert.equal(point.controlId, "o:0:pc:0");
 
   // Curve：SVCopilot 自有；anchor 双坐标，points 保持 anchor 相对坐标（绝不提前展开）。
   assert.equal(curve.kind, "curve");
@@ -277,7 +277,7 @@ test("typed-v2 envelope internals never leak into scriptDataKeys", async () => {
 });
 
 test("makeContextControlId and pitchEquals honor identity and float tolerance contracts", () => {
-  assert.equal(makeContextControlId("ctx:t:0:r:0", 3), "ctx:t:0:r:0:pc:3");
+  assert.equal(makeContextControlId(0, 3), "o:0:pc:3");
   // pitch 浮点容差：1e-4 semitone（0.01 cent）内相等，BLICK 不走 epsilon。
   assert.ok(pitchEquals(60, 60 + 1e-5));
   assert.ok(!pitchEquals(60, 60 + 1e-2));
@@ -304,12 +304,10 @@ test("a shared target yields occurrence-specific absolute coordinates under one 
   assert.equal(result.data.pitchControls.length, 2);
 
   const byOccurrence = Object.fromEntries(
-    result.data.pitchControls.map((control) => [control.occurrenceId, control])
+    result.data.pitchControls.map((control) => [control.occurrence, control])
   );
-  const mainOccurrenceId = `${result.contextId}:t:0:r:0`;
-  const secondOccurrenceId = `${result.contextId}:t:0:r:1`;
-  const mainPoint = byOccurrence[mainOccurrenceId];
-  const secondPoint = byOccurrence[secondOccurrenceId];
+  const mainPoint = byOccurrence[0];
+  const secondPoint = byOccurrence[1];
   assert.equal(mainPoint.position.occurrenceAbsoluteBlick, Q + BAR);
   assert.equal(mainPoint.pitch.occurrenceAbsoluteSemitone, 62);
   assert.equal(secondPoint.position.occurrenceAbsoluteBlick, Q + 2 * BAR);
@@ -323,5 +321,5 @@ test("a shared target yields occurrence-specific absolute coordinates under one 
   assert.equal(groups.length, 2);
   assert.equal(groups[0].uuid, groups[1].uuid);
   assert.equal(groups[0].pitchControlGroupFingerprint, groups[1].pitchControlGroupFingerprint);
-  assert.deepEqual(groups[0].sharedTargetOccurrences, [mainOccurrenceId, secondOccurrenceId]);
+  assert.deepEqual(groups[0].sharedTargetOccurrences, [0, 1]);
 });

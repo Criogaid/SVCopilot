@@ -26,7 +26,6 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -36,33 +35,28 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: "",
     languageOverride: note.languageOverride ?? "",
     detuneCents: note.detuneCents ?? 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: uuid,
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints,
     ...(voiceParameters !== undefined ? { voiceParameters } : {}),
   });
   if (extraOccurrenceWithNotes) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
-      occurrenceId: secondId,
+      occurrence: 1,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: uuid,
       timeOffsetBlick: 0,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [occurrenceId, secondId],
-      noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
-        ...fingerprint,
-        noteId: `${secondId}:n:${index}`,
-      })),
+      sharedTargetOccurrences: [0, 1],
+      noteFingerprints: noteFingerprints.map((fingerprint) => ({ ...fingerprint })),
     });
   }
   stored.context.quarterBlick = Q;
@@ -71,9 +65,9 @@ function createStoredContext(store, options = {}) {
   stored.context.automationCaptured = automation !== null;
   stored.context.automationByOccurrence = Object.create(null);
   if (automation !== null) {
-    stored.context.automationByOccurrence[occurrenceId] = automation;
+    stored.context.automationByOccurrence[0] = automation;
   }
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {

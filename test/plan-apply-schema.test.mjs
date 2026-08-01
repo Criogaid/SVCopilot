@@ -40,17 +40,15 @@ function createStoredContext(store, notes) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   stored.context.occurrences.push({
     occurrence: 0,
-    occurrenceId,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-schema-test",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
     groupNoteCount: notes.length,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints: notes.map((note, index) => ({
       indexInGroup: index,
       onsetBlick: note.onsetBlick,
@@ -60,14 +58,13 @@ function createStoredContext(store, notes) {
       phonemesOverride: "",
       languageOverride: "",
       detuneCents: 0,
-      noteId: `${occurrenceId}:n:${index}`,
     })),
   });
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
   stored.snapshotToken = `snap_${stored.contextId}`;
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 // facade 是唯一 surface，direct tool 的 schema 不在 tools/list 里；
@@ -147,7 +144,7 @@ test("served sv_patch_notes schema exposes diagnostics and scoped note reference
   assert.equal(
     validate({
       contextId: "ctx_test",
-      occurrenceId: "ctx_test:t:0:r:0",
+      occurrence: 0,
       patches: [{ note: 0, set: { lyrics: "test" } }],
       dryRun: true,
       diagnostics: true,
@@ -155,6 +152,51 @@ test("served sv_patch_notes schema exposes diagnostics and scoped note reference
     true,
     JSON.stringify(validate.errors)
   );
+});
+
+test("all nine occurrence-facing tools expose ordinal-only public schemas", async () => {
+  const schemas = await fetchServedSchemas([
+    "sv_wait_for_processing",
+    "sv_align_lyrics",
+    "sv_quantize_notes",
+    "sv_generate_harmony",
+    "sv_get_parameter_curve",
+    "sv_patch_parameter_curves",
+    "sv_plan_pitch_gesture",
+    "sv_bake_computed_pitch",
+    "sv_set_selection",
+  ]);
+  const assertOrdinal = (schema, label) => {
+    assert.deepEqual(
+      { type: schema.type, minimum: schema.minimum },
+      { type: "integer", minimum: 0 },
+      label
+    );
+  };
+
+  for (const name of [
+    "sv_wait_for_processing",
+    "sv_align_lyrics",
+    "sv_quantize_notes",
+    "sv_plan_pitch_gesture",
+    "sv_bake_computed_pitch",
+    "sv_set_selection",
+  ]) {
+    assertOrdinal(schemas[name].properties.occurrence, `${name}.occurrence`);
+    assert.equal(schemas[name].properties.occurrenceId, undefined, name);
+  }
+  for (const name of ["sv_get_parameter_curve", "sv_patch_parameter_curves"]) {
+    const target = schemas[name].properties.target;
+    assertOrdinal(target.properties.occurrence, `${name}.target.occurrence`);
+    assert.equal(target.properties.occurrenceId, undefined, name);
+  }
+  const harmony = schemas.sv_generate_harmony;
+  assertOrdinal(harmony.properties.sourceOccurrence, "sv_generate_harmony.sourceOccurrence");
+  assertOrdinal(harmony.properties.targetOccurrence, "sv_generate_harmony.targetOccurrence");
+  assert.ok(harmony.required.includes("targetOccurrence"));
+  for (const removed of ["occurrenceId", "sourceOccurrenceId", "targetOccurrenceId"]) {
+    assert.equal(harmony.properties[removed], undefined, removed);
+  }
 });
 
 test("planner outputs validate against the schemas the real server serves", async () => {
@@ -258,7 +300,7 @@ test("served curve schemas accept dense-table-v1 points on batch and phrase writ
       ],
     }
   );
-  const target = { contextId: "ctx_dense", occurrenceId: "ctx_dense:t:0:r:0" };
+  const target = { contextId: "ctx_dense", occurrence: 0 };
   const curve = {
     parameter: "tension",
     mode: "replace",
@@ -286,9 +328,7 @@ function harmonyContext(store) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const sourceId = `${stored.contextId}:t:0:r:0`;
-  const targetId = `${stored.contextId}:t:1:r:0`;
-  const fingerprint = (occurrenceId, note, index) => ({
+  const fingerprint = (note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
     durationBlick: note.durationBlick,
@@ -297,7 +337,6 @@ function harmonyContext(store) {
     phonemesOverride: "",
     languageOverride: "",
     detuneCents: 0,
-    noteId: `${occurrenceId}:n:${index}`,
   });
   const sourceNotes = [
     { onsetBlick: 0, durationBlick: Q, pitch: 69, lyrics: "a" },
@@ -305,25 +344,25 @@ function harmonyContext(store) {
     { onsetBlick: 2 * Q, durationBlick: Q, pitch: 72, lyrics: "c" },
     { onsetBlick: 3 * Q, durationBlick: Q, pitch: 74, lyrics: "d" },
   ];
-  for (const [occurrenceId, trackIndex, uuid, notes] of [
-    [sourceId, 0, "uuid-melody", sourceNotes],
-    [targetId, 1, "uuid-harmony", []],
+  for (const [ordinal, trackIndex, uuid, notes] of [
+    [0, 0, "uuid-melody", sourceNotes],
+    [1, 1, "uuid-harmony", []],
   ]) {
     stored.context.occurrences.push({
-      occurrenceId,
+      occurrence: ordinal,
       trackIndex,
       groupIndex: 0,
       targetGroupUuid: uuid,
       timeOffsetBlick: 0,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [occurrenceId],
-      noteFingerprints: notes.map((note, index) => fingerprint(occurrenceId, note, index)),
+      sharedTargetOccurrences: [ordinal],
+      noteFingerprints: notes.map((note, index) => fingerprint(note, index)),
     });
   }
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, sourceId, targetId };
+  return { stored };
 }
 
 async function buildPlans() {
@@ -379,8 +418,8 @@ async function buildPlans() {
     planner: "sv_generate_harmony",
     plan: await new HarmonyPlanService({ store: harmonyStore, now: () => 2000 }).plan({
       contextId: harmonyCtx.stored.contextId,
-      sourceOccurrenceId: harmonyCtx.sourceId,
-      targetOccurrenceId: harmonyCtx.targetId,
+      sourceOccurrence: 0,
+      targetOccurrence: 1,
       harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     }),
     legacyField: "restructureRequest",
@@ -495,8 +534,8 @@ test("lyric and harmony planners default to complete plan references without inl
     sessionId,
   }).plan({
     contextId: harmonyCtx.stored.contextId,
-    sourceOccurrenceId: harmonyCtx.sourceId,
-    targetOccurrenceId: harmonyCtx.targetId,
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
 
@@ -679,8 +718,8 @@ test("generalized harmony input validates against the served sv_generate_harmony
   // 广义 interval 对象 + 显式 scale 必须通过服务端 inputSchema。
   assertValid(validate, {
     contextId: "ctx_SCHEMA",
-    sourceOccurrenceId: "ctx_SCHEMA:t:0:r:0",
-    targetOccurrenceId: "ctx_SCHEMA:t:1:r:0",
+    sourceOccurrence: 0,
+    targetOccurrence: 1,
     harmony: {
       interval: { degree: 3, direction: "above", octaveOffset: 1 },
       key: { tonic: "D", mode: "minor", scale: "dorian" },
@@ -688,13 +727,13 @@ test("generalized harmony input validates against the served sv_generate_harmony
   }, "generalized interval + explicit scale");
   assertValid(validate, {
     contextId: "ctx_SCHEMA",
-    targetOccurrenceId: "ctx_SCHEMA:t:1:r:0",
+    targetOccurrence: 1,
     harmony: { interval: { degree: 1, direction: "below" } },
   }, "unison below without key");
-  // 旧的字符串 interval 仍然合法（向后兼容）。
+  // 字符串 interval 与广义对象 interval 都属于当前业务契约。
   assertValid(validate, {
     contextId: "ctx_SCHEMA",
-    targetOccurrenceId: "ctx_SCHEMA:t:1:r:0",
+    targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   }, "legacy string interval");
 });

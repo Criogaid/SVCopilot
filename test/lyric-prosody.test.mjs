@@ -23,7 +23,6 @@ function createStoredContext(store, options = {}) {
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrenceId = `${stored.contextId}:t:0:r:0`;
   const noteFingerprints = notes.map((note, index) => ({
     indexInGroup: index,
     onsetBlick: note.onsetBlick,
@@ -33,39 +32,34 @@ function createStoredContext(store, options = {}) {
     phonemesOverride: note.phonemesOverride ?? "",
     languageOverride: note.languageOverride ?? "",
     detuneCents: 0,
-    noteId: `${occurrenceId}:n:${index}`,
   }));
   stored.context.occurrences.push({
-    occurrenceId,
+    occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
     targetGroupUuid: "uuid-prosody-test",
     timeOffsetBlick: 0,
     pitchOffsetSemitone: 0,
-    sharedTargetOccurrences: [occurrenceId],
+    sharedTargetOccurrences: [0],
     noteFingerprints,
     ...(processing !== undefined ? { processing } : {}),
   });
   if (extraOccurrenceWithNotes) {
-    const secondId = `${stored.contextId}:t:0:r:1`;
     stored.context.occurrences.push({
-      occurrenceId: secondId,
+      occurrence: 1,
       trackIndex: 0,
       groupIndex: 1,
       targetGroupUuid: "uuid-prosody-test",
       timeOffsetBlick: 0,
       pitchOffsetSemitone: 0,
-      sharedTargetOccurrences: [occurrenceId, secondId],
-      noteFingerprints: noteFingerprints.map((fingerprint, index) => ({
-        ...fingerprint,
-        noteId: `${secondId}:n:${index}`,
-      })),
+      sharedTargetOccurrences: [0, 1],
+      noteFingerprints: noteFingerprints.map((fingerprint) => ({ ...fingerprint })),
     });
   }
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = meterMarks;
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
-  return { stored, occurrenceId };
+  return { stored };
 }
 
 function createService(store) {
@@ -74,7 +68,7 @@ function createService(store) {
 
 test("breath check flags overrides and unusually long breaths", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, lyrics: "br", languageOverride: "japanese" },
       { onsetBlick: Q, durationBlick: 2 * Q, lyrics: "br" },
@@ -99,7 +93,7 @@ test("breath check flags overrides and unusually long breaths", async () => {
 
 test("specialLyricChains reports orphan continuations with stable structured codes", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, lyrics: "+" },
       { onsetBlick: Q, durationBlick: Q, lyrics: "br" },
@@ -143,7 +137,7 @@ test("specialLyricChains accepts a contiguous lexical, '+', '-' chain", async ()
 
 test("specialLyricChains preserves a one-BLICK continuation gap as evidence", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, lyrics: "glory" },
       { onsetBlick: Q + 1, durationBlick: Q, lyrics: "+" },
@@ -187,7 +181,7 @@ test("japaneseMora flags multi-mora lyrics and isolated small kana; clean kana p
 
 test("englishSyllables compares heuristic counts against following '+' notes", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, lyrics: "hello" }, // 2 音节但无 "+"
       { onsetBlick: Q, durationBlick: Q, lyrics: "cat" }, // 1 音节
@@ -258,7 +252,7 @@ test("stressAlignment reports weak-beat multi-syllable words as low-confidence i
 
 test("phonemeCoverage flags only melodic words; br and continuations stay legitimate", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [
       { onsetBlick: 0, durationBlick: Q, lyrics: "br" }, // 空音素合法
       { onsetBlick: Q, durationBlick: Q, lyrics: "xyzzy" }, // 空音素可疑
@@ -291,7 +285,7 @@ test("phonemeCoverage flags only melodic words; br and continuations stay legiti
 
 test("near-miss special lyrics remain lexical across every validator check", async () => {
   const store = createStore();
-  const { stored, occurrenceId } = createStoredContext(store, {
+  const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: Q, lyrics: " br " }],
     processing: {
       state: "ready",
