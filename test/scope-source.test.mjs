@@ -66,12 +66,9 @@ test("both sources produce the identical scope shape", () => {
   const fromCapsule = resolveMutationScope({
     source: {
       kind: "plan_capsule",
-      capsule: {
-        contextEpoch: 3,
-        occurrence,
-        sharedTargetOccurrences: occurrence.sharedTargetOccurrences,
-        groupNoteCount: occurrence.groupNoteCount,
-      },
+      // capsule 与 store entry 同形：epoch + context.occurrences，而不是一套
+      // 只有测试认识的扁平字段。两者同形正是本测试要守的性质。
+      capsule: { epoch: 3, context: { kind: "range", occurrences: [occurrence] } },
     },
   });
 
@@ -178,10 +175,8 @@ test("an out-of-range ordinal reports the maximum", () => {
 test("a capsule seals exactly one occurrence, so a non-zero ordinal is a mix-up", () => {
   // 把 Context ordinal 当成 capsule ordinal 传进来时静默接受，会读到错误的 occurrence。
   const capsule = {
-    contextEpoch: 1,
-    occurrence: occurrenceWith([0, 1]),
-    sharedTargetOccurrences: [],
-    groupNoteCount: 8,
+    epoch: 1,
+    context: { kind: "range", occurrences: [occurrenceWith([0, 1])] },
   };
   assert.equal(
     codeOf(() => resolveMutationScope({ source: { kind: "plan_capsule", capsule }, occurrence: 2 })),

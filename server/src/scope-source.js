@@ -241,18 +241,35 @@ function fromCapsule(capsule, requestedOrdinal) {
       "a plan capsule seals exactly one occurrence; its ordinal is always 0"
     );
   }
-  const occurrence = capsule.occurrence;
-  if (!occurrence) {
+  // capsule 与 store entry **是同一个形状**，因此这里读的字段与 fromSnapshot 完全一致。
+  //
+  // 以前这个分支读的是一套自己的扁平字段（contextEpoch / occurrence / groupNoteCount），
+  // 而生产路径封存出来的 capsule 是 store-entry 形状（epoch / context.occurrences[0]）。
+  // 两套词汇谁都不认识谁，于是这个分支只有测试走得通——真实 capsule 从 getContext()
+  // 的替身路径进入下游，绕过了这里的全部检查。`groupNoteCount` 被漏封存的缺陷正是
+  // 藏在这道缝里：没有任何一处同时看得见"要求什么"和"实际封存了什么"。
+  //
+  // 让 capsule 就是 entry，缝就没有了：它必须通过 fromSnapshot 的每一条一致性检查
+  // （ordinal 与数组位置相符、非空捕获），差别只剩来源标签与 contextId。
+  const occurrences = Array.isArray(capsule.context?.occurrences)
+    ? capsule.context.occurrences
+    : null;
+  if (!occurrences || occurrences.length === 0) {
     throw codedError("PLAN_CAPSULE_INCOMPLETE", "capsule must seal its occurrence");
+  }
+  if (occurrences.length !== 1) {
+    throw codedError(
+      "PLAN_CAPSULE_INCOMPLETE",
+      `a plan capsule seals exactly one occurrence; got ${occurrences.length}`
+    );
   }
   return buildScope({
     sourceKind: "plan_capsule",
+    // capsule 刻意不带 contextId：它不在 store 里，让下游拿它去 get() 只会得到 null。
     contextId: null,
-    epoch: capsule.contextEpoch,
-    occurrence,
+    epoch: capsule.epoch,
+    occurrence: occurrences[0],
     ordinal: 0,
-    sharedTargetOccurrences: capsule.sharedTargetOccurrences,
-    groupNoteCount: capsule.groupNoteCount,
   });
 }
 
