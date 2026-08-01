@@ -102,6 +102,18 @@ export const INTENT_PRESETS = Object.freeze({
 });
 const MAX_GESTURES = 32;
 const MAX_POINTS_PER_CURVE = 2000;
+// 一次响应最多交接多少个 apply 调用。
+//
+// 上限的来源是两条硬约束，不是审美：
+//   1. §4.4 规则 8：compact success envelope <= 16 KiB。每个 apply 调用都要在信封里
+//      带一个 planRef 与一条 undoLabel，实测 16 次调用刚好贴住预算。
+//   2. ArtifactStore 的 maxEntries 配额（默认 128）是**整个会话共享**的。K 次调用
+//      封存 K 个 plan artifact，因此一次不封顶的规划可以独占甚至耗尽配额——耗尽之后
+//      seal 抛错，而旧代码的兜底是把整份 mutation payload 内联回响应（实测 320 KB，
+//      超预算 20 倍）。封顶把"配额耗尽"变成一件规划期就能如实上报的事。
+//
+// 超出的簇按 continuation 交回调用方分轮提交，与 quantize/lyric/harmony 同一模式。
+const MAX_APPLY_CALLS = 16;
 
 const PROVENANCE = Object.freeze({
   planner: "deterministic_gesture_compiler",
@@ -1200,7 +1212,10 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     curves: compiled.operations.map(curveOf),
   }).slice(0, 16)}`;
   const applyRequests = [];
-  for (let callIndex = 0; callIndex < compiled.applyCallCount; callIndex += 1) {
+  // 只构造前 MAX_APPLY_CALLS 次调用；其余簇进 continuation（见常量注释）。
+  const submittableCallCount = Math.min(compiled.applyCallCount, MAX_APPLY_CALLS);
+  const deferredCallCount = compiled.applyCallCount - submittableCallCount;
+  for (let callIndex = 0; callIndex < submittableCallCount; callIndex += 1) {
     const callOperations = compiled.operations.filter(
       (operation) => operation.applyCallIndex === callIndex
     );
@@ -1212,7 +1227,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
         curves: callOperations.map(curveOf),
         action: "dry_run",
         atomic: true,
-        undoLabel: `sv_plan_expression ${planId} (${callIndex + 1}/${compiled.applyCallCount})`,
+        undoLabel: `sv_plan_expression ${planId} (${callIndex + 1}/${submittableCallCount})`,
       },
     });
   }
@@ -1266,6 +1281,33 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     checklist.push(
       "The target NoteGroup is shared by multiple occurrences; commit requires target.allowSharedTargetMutation:true and affects every occurrence."
     );
+  }
+
+  // 超过 MAX_APPLY_CALLS 的簇不静默丢弃，也不硬塞进信封：按 continuation 交回调用方，
+  // 与 quantize/lyric/harmony 同一模式。deferred 的簇在下一轮重新规划时自然重新出现，
+  // 因为 planner 是纯函数——它对同一 Context 与同一请求恒定给出同一批簇。
+  const continuation =
+    deferredCallCount > 0
+      ? {
+          reason: "APPLY_CALL_CAP",
+          applyCallCapPerPlan: MAX_APPLY_CALLS,
+          remainingCallCount: deferredCallCount,
+          workflow: [
+            "Submit apply.arguments with action dry_run, then the identical arguments with action commit; repeat for each apply.additionalCalls entry in order.",
+            "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
+            "Re-run sv_plan_expression with the same gestures/intent against the fresh contextId: already-written curves come back as the same values, so the next round plans the remaining clusters.",
+            "Repeat until the response carries no continuation.",
+          ],
+        }
+      : null;
+  if (continuation) {
+    checklist.push(
+      `This plan needed ${compiled.applyCallCount} batch calls but the per-plan cap is ${MAX_APPLY_CALLS}; ${deferredCallCount} cluster call(s) are deferred to a later round (see continuation).`
+    );
+    warnings.push({
+      code: "PLAN_EXCEEDS_APPLY_CALL_CAP",
+      message: `${compiled.applyCallCount} sequential batch calls exceed the ${MAX_APPLY_CALLS}-call per-plan cap; apply carries the first ${applyRequests.length} and ${deferredCallCount} remain. Follow continuation.workflow: commit these, re-snapshot, re-plan. Each round is its own transaction and Undo record.`,
+    });
   }
 
   const planArtifactRefs = [];
@@ -1352,12 +1394,14 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
       totalPoints: compiled.totalPoints,
       applyCallCount: applyRequests.length,
       expectedUserUndoSteps: applyRequests.length,
+      ...(deferredCallCount > 0 ? { plannedCallCount: compiled.applyCallCount } : {}),
       parameters: [...new Set(compiled.operations.map((operation) => operation.parameter))],
     },
     gestures: publicGestures,
     operations: operationsMeta,
     ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
     apply: applyEnvelope,
+    ...(continuation ? { continuation } : {}),
     ...(planArtifactRefs.length > 0 && planArtifactRefs.length === applyRequests.length
       ? {}
       : { applyRequests }),

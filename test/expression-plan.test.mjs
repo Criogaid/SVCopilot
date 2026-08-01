@@ -982,3 +982,57 @@ test("unknown presets are rejected before touching the store", async () => {
     (error) => error.code === "INVALID_ARGUMENTS"
   );
 });
+
+test("the apply-call cap keeps a wide plan inside its budget instead of inlining megabytes", async () => {
+  // 回归：一个参数上的**不相邻**表现手法簇各自需要独立的 apply 调用，而调用数以前
+  // 完全不封顶。两条硬约束会同时被打破：
+  //   1. K 次调用要封存 K 个 plan artifact，而 ArtifactStore 的 maxEntries（默认 128）
+  //      是整个会话共享的。越过配额后 seal 抛错。
+  //   2. seal 失败的旧兜底是把整份 mutation payload 内联回响应——实测 320 KB，
+  //      超 16 KiB 上限 20 倍，而这正是 §11 条目 7 已经删除的 inline apply 路径。
+  // 封顶把它变成规划期就如实上报的 continuation。
+  const store = createStore();
+  const targetCount = 200;
+  // 每个 scoop 目标之间留一整个空拍，因此它们互不相邻，无法合并成一次调用。
+  const notes = Array.from({ length: targetCount * 2 }, (_, index) => ({
+    onsetBlick: index * 2 * Q,
+    durationBlick: Q,
+    pitch: 60,
+  }));
+  const { stored } = createStoredContext(store, { notes });
+  const artifactStore = new ArtifactStore({ now: () => 2000 });
+  const service = new ExpressionPlanService({
+    store,
+    now: () => 2000,
+    artifactStore,
+    sessionId: "sess_apply_cap",
+  });
+  const result = await service.plan({
+    contextId: stored.contextId,
+    constraints: { maxTotalPoints: 2000 },
+    gestures: [
+      {
+        type: "scoop",
+        targets: Array.from({ length: targetCount }, (_, index) => [index * 2, 20]),
+      },
+    ],
+  });
+
+  // 交接的调用数被封顶，且响应留在 compact 预算内。
+  assert.equal(result.apply.callCount, 16);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(result), "utf8") <= 16 * 1024,
+    "a wide plan must stay inside the 16 KiB compact envelope budget"
+  );
+  // 交接仍然走 planRef，绝不回落到内联 payload。
+  assert.ok(result.apply.arguments.planRef);
+  assert.equal(result.applyRequests, undefined);
+  // 被推迟的簇如实上报，而不是静默丢弃。
+  assert.equal(result.continuation.reason, "APPLY_CALL_CAP");
+  assert.equal(result.continuation.remainingCallCount, targetCount - 16);
+  assert.ok(result.continuation.workflow.length > 0);
+  assert.ok(result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_APPLY_CALL_CAP"));
+  // 配额没有被一次规划吃掉：16 个 plan + 1 个 detail，而不是 200 个。
+  assert.ok(artifactStore.entries.size <= 17, `sealed ${artifactStore.entries.size} artifacts`);
+  assert.ok(!result.warnings.some((warning) => warning.code === "ARTIFACT_SEAL_FAILED"));
+});
