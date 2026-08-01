@@ -1,6 +1,8 @@
 // 规划引用解析：把只读 plan artifact 展开为目标 mutation 工具的规范请求。
 // 目标工具仍须走自己的 normalization、target resolution、shared-target 检查、live preflight 和 rollback。
 import { canonicalClone } from "./canonical-json.js";
+import { operationNameForTool } from "./operation-catalog.js";
+import { assertSealedCapsuleSatisfies } from "./scope-source.js";
 
 const EXECUTION_OPTIONS_BY_TOOL = Object.freeze({
   sv_patch_notes: new Set(["atomic", "waitFor", "timeoutMs", "pollIntervalMs"]),
@@ -150,6 +152,22 @@ export function buildPlanArtifact({
   fingerprints = {},
   contextSnapshot,
 }) {
+  // capsule 完整性在**封存时**校验，而不是等 apply 走到一半。
+  //
+  // 这条校验（CAPSULE_REQUIREMENTS_BY_OPERATION + assertCapsuleSatisfies）此前只被
+  // 测试调用过，生产路径一次都没走到——于是 capsule 漏掉 groupNoteCount 的真实缺陷
+  // 一直没人发现：每个越界检查都写成 `groupNoteCount ?? fingerprints.length`，而
+  // capsule 只封存被触及的那几个指纹，回退值因此是被过滤后的数量。
+  //
+  // 放在这里而不是 resolve 时：封存是 planner 自己的代码路径，此刻失败指向的是
+  // planner 少存了东西；等到 resolve 才发现，报错会出现在无辜的执行方那一侧。
+  if (contextSnapshot !== undefined) {
+    assertSealedCapsuleSatisfies(
+      operationNameForTool(targetTool),
+      contextSnapshot.snapshot,
+      contextSnapshot.snapshot?.epoch
+    );
+  }
   return {
     kind: "plan",
     payload: {
@@ -211,6 +229,14 @@ export function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {
     ...(Number.isFinite(occurrence.pitchOffsetSemitone)
       ? { pitchOffsetSemitone: occurrence.pitchOffsetSemitone }
       : {}),
+    // groupNoteCount 必须原样封存，绝不能靠 noteFingerprints.length 推导。
+    //
+    // capsule 通常只保留被计划触及的那几个音符（noteIndexes 过滤），而每个越界检查
+    // 都写成 `occurrence.groupNoteCount ?? fingerprints.length`。少了它，回退值就是
+    // **被过滤后**的数量：一个 9 音符的组只封存 1 个指纹时，note 5 会被判成
+    // NOTE_INDEX_OUT_OF_RANGE——那是个假的结构漂移报告，而真正的越界与它无法区分。
+    groupNoteCount:
+      occurrence.groupNoteCount ?? (Array.isArray(fingerprints) ? fingerprints.length : 0),
     sharedTargetOccurrences: Array.isArray(occurrence.sharedTargetOccurrences)
       ? occurrence.sharedTargetOccurrences
       : [],

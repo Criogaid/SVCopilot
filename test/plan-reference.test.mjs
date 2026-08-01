@@ -527,4 +527,119 @@ const sessionId = "sess_plan";
   assert.strictEqual(ledger.get(artifact.id).state, "sealed");
 }
 
+// capsule 必须独立封存 groupNoteCount，不能让消费者退化到用指纹条数推断。
+//
+// 这是一个真实缺陷的回归：capsule 通常只封存**被触及**的那几个音符指纹，而
+// note-patch / note-structure / parameter-curve 的越界判定都写成
+// `occurrence.groupNoteCount ?? fingerprints.length`。groupNoteCount 一旦丢失，
+// 回退值就是被过滤后的条数，于是一个在真实 9 音符组里完全合法的 index 5 会被
+// 判成 NOTE_INDEX_OUT_OF_RANGE——计划在过期后重放时静默缩小了合法范围。
+{
+  const store = new SnapshotStore({ now: () => 1000 });
+  const stored = store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrence = {
+    occurrence: 0,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "grp_count",
+    timeOffsetBlick: 0,
+    groupNoteCount: 9,
+    sharedTargetOccurrences: [],
+    noteFingerprints: Array.from({ length: 9 }, (_, index) => ({
+      indexInGroup: index,
+      onsetBlick: index * 100,
+      durationBlick: 100,
+      pitch: 60,
+      lyrics: `n${index}`,
+    })),
+  };
+  stored.context.occurrences.push(occurrence);
+
+  // 只封存一个被触及的音符——这正是 planner 的常态（noteIndexes 只列出要改的）。
+  const capsule = buildPlanContextSnapshot(stored, occurrence, { noteIndexes: [5] });
+  const sealed = capsule.snapshot.context.occurrences[0];
+  assert.strictEqual(sealed.noteFingerprints.length, 1);
+  // 组内总数与被封存的指纹条数是两件不同的事实，必须各自存在。
+  assert.strictEqual(sealed.groupNoteCount, 9);
+  // 消费者共用的回退表达式在 capsule 上必须得出真实总数。
+  assert.strictEqual(sealed.groupNoteCount ?? sealed.noteFingerprints.length, 9);
+}
+
+// 封存时校验 capsule 完整性：缺判据的计划必须在 seal 阶段就失败，
+// 而不是等 apply 在真实工程上走到一半才发现。
+{
+  const store = new SnapshotStore({ now: () => 1000 });
+  const stored = store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrence = {
+    occurrence: 0,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "grp_validate",
+    timeOffsetBlick: 0,
+    groupNoteCount: 4,
+    sharedTargetOccurrences: [],
+    noteFingerprints: [{ indexInGroup: 0, onsetBlick: 0, durationBlick: 100, pitch: 60 }],
+  };
+  stored.context.occurrences.push(occurrence);
+  const good = buildPlanContextSnapshot(stored, occurrence);
+
+  // 完整 capsule 正常封存。
+  assert.ok(
+    buildPlanArtifact({
+      targetTool: "sv_restructure_notes",
+      mutationRequest: { contextId: stored.contextId, operations: [] },
+      contextSnapshot: good,
+    }).payload
+  );
+
+  // 结构编辑缺 groupNoteCount：越界判定失去依据。
+  const noCount = structuredClone(good);
+  delete noCount.snapshot.context.occurrences[0].groupNoteCount;
+  assert.throws(
+    () =>
+      buildPlanArtifact({
+        targetTool: "sv_restructure_notes",
+        mutationRequest: { contextId: stored.contextId, operations: [] },
+        contextSnapshot: noCount,
+      }),
+    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /groupNoteCount/.test(error.message)
+  );
+
+  // 曲线写入缺 timeOffsetBlick：曲线锚在音符位置上，没有它无法换算坐标。
+  const noOffset = structuredClone(good);
+  delete noOffset.snapshot.context.occurrences[0].timeOffsetBlick;
+  assert.throws(
+    () =>
+      buildPlanArtifact({
+        targetTool: "sv_patch_parameter_curves",
+        mutationRequest: { target: { contextId: stored.contextId }, curves: [] },
+        contextSnapshot: noOffset,
+      }),
+    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /timeOffsetBlick/.test(error.message)
+  );
+
+  // 缺目标身份：连"改的是哪个 NoteGroup"都不知道。
+  const noTarget = structuredClone(good);
+  delete noTarget.snapshot.context.occurrences[0].targetGroupUuid;
+  assert.throws(
+    () =>
+      buildPlanArtifact({
+        targetTool: "sv_patch_notes",
+        mutationRequest: { contextId: stored.contextId, patches: [] },
+        contextSnapshot: noTarget,
+      }),
+    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /target/.test(error.message)
+  );
+}
+
 console.log("plan-reference.test.mjs passed");

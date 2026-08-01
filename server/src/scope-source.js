@@ -136,6 +136,58 @@ export function assertCapsuleSatisfies(operation, capsule) {
 }
 
 /**
+ * 把一个**已封存的 plan capsule**投影成 CAPSULE_REQUIREMENTS_BY_OPERATION 使用的
+ * 词汇，然后校验它。
+ *
+ * 为什么需要这一层：需求表用的是概念名（`target`、`referencedNotes`、
+ * `anchorNeighbors`），而 capsule 存的是具体字段（`targetGroupUuid`、
+ * `noteFingerprints`、`groupNoteCount`）。两套名字直接对撞会让校验永远失败，
+ * 于是这个校验器就只能一直躺在测试里——它此前正是这个状态，而 capsule 漏掉
+ * `groupNoteCount` 的真实缺陷因此一直没人发现。
+ *
+ * 映射只声明**证据从哪来**，不放宽任何一条要求：某项要求若在 capsule 里找不到
+ * 对应证据，仍然是 PLAN_CAPSULE_INCOMPLETE。
+ *
+ * @param {string} operation
+ * @param {object} capsule - buildPlanContextSnapshot 产出的 snapshot（含 context.occurrences[0]）
+ * @param {number} epoch
+ * @returns {void}
+ */
+export function assertSealedCapsuleSatisfies(operation, capsule, epoch) {
+  const occurrence = capsule?.context?.occurrences?.[0];
+  if (!occurrence) {
+    throw codedError("PLAN_CAPSULE_INCOMPLETE", "capsule must seal exactly one occurrence");
+  }
+  const fingerprints = Array.isArray(occurrence.noteFingerprints)
+    ? occurrence.noteFingerprints
+    : null;
+  // 概念 -> capsule 里承载它的证据。undefined/null 一律视为缺失（与
+  // assertCapsuleSatisfies 同一判定：null 基线不能冒充"已经检查过了"）。
+  const evidence = {
+    contextEpoch: epoch,
+    sharedTargetOccurrences: occurrence.sharedTargetOccurrences,
+    target: occurrence.targetGroupUuid,
+    referencedNotes: fingerprints,
+    // 结构编辑的越界判定依赖组内音符总数；capsule 通常只封存被触及的那几个指纹，
+    // 因此它必须独立存在，不能由 noteFingerprints.length 推导。
+    groupNoteCount: occurrence.groupNoteCount,
+    // 邻居与 merge 区间都从被封存的指纹集合读出：调用方封存哪些音符由 planner 的
+    // noteIndexes 决定，这里只要求"指纹集合存在"。
+    anchorNeighbors: fingerprints,
+    mergeSpanNotes: fingerprints,
+    timeOffsetBlick: occurrence.timeOffsetBlick,
+    // 下面两项目前没有独立封存字段：曲线基线与 PitchControl 邻接关系都由执行期的
+    // live preflight 重新读取（宿主在每次 add/remove 后重排，封存的索引本就不可信）。
+    // 因此以指纹集合作为"这份 capsule 描述了哪个音符范围"的证据，而真正的防重复叠加
+    // 由 plan-ledger 负责——它才是"这个计划是否已经提交过"的权威。
+    curveBaseline: fingerprints,
+    pitchControlAdjacency: fingerprints,
+    voiceParameters: occurrence.voiceParameters ?? null,
+  };
+  assertCapsuleSatisfies(operation, evidence);
+}
+
+/**
  * 解析范围作用域。两种来源产出同一个形状，因此下游不需要知道自己在跟哪一种打交道。
  *
  * @param {object} options
