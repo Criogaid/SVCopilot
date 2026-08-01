@@ -356,7 +356,8 @@ test("range snapshot token is stable and sinceToken returns no_change", async ()
   const hostCallsAfterRefresh = model.hostCalls.length;
 
   assert.equal(second.status, "no_change");
-  assert.equal(second.data, null);
+  // no_change 不再返回 data:null（§10.2.1 折叠需要 data 是对象）；status 已说明这件事。
+  assert.equal(second.status, "no_change");
   assert.equal(second.snapshotToken, first.snapshotToken);
   assert.notEqual(second.contextId, first.contextId);
   assert.match(second.contextExpiresAt, /^\d{4}-\d{2}-\d{2}T/);

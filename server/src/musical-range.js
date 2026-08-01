@@ -145,7 +145,8 @@ export class RangeSnapshotService {
             observedAt: stored.observedAt,
             contextExpiresAt: new Date(stored.expiresAt).toISOString(),
             consistency: "best-effort",
-            data: null,
+            // 不返回 data:null：no_change 已经说明"没有新载荷"，再加一个 null 只是
+            // 第二份同义信息，而且它会挡住 §10.2.1 的根字段折叠（data 必须是对象）。
             page: {
               complete: true,
               nextCursor: null,

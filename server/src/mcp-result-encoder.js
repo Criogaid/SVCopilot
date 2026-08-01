@@ -9,6 +9,7 @@ import {
   isErrorStatus,
   projectStatusEnvelope,
 } from "./result-status.js";
+import { classifyRootField } from "./root-envelope.js";
 
 const TEXT_SUMMARY_MAX_BYTES = 512;
 
@@ -104,6 +105,49 @@ export function summarizeLine(structured) {
 }
 
 /**
+ * 把迁移期仍在根级的业务字段收进 `data`（计划 §10.2.1 / §15 步骤 5）。
+ *
+ * 为什么在编码器而不是在每个服务里做：根信封的字段全集是一条**跨 operation** 的
+ * 契约，而每个服务只知道自己返回什么。分散到 40 多处 return 去改，等于把同一条规则
+ * 抄 40 遍，并且下一个新服务默认又是违规的。这里是所有 MCP 结果的唯一出口，因此
+ * 在这里折叠一次，契约就对整个 surface 成立。
+ *
+ * 三条边界：
+ * 1. 只在存在 `status` 时折叠。没有信封的 operation（sv_raw 的 handle 图、官方文档
+ *    查询）直接透出宿主值，把它们塞进 `data` 会改变一个尚未定义信封的形状——那属于
+ *    STATUSLESS_OPERATIONS 登记的欠迁移项，不是这里能顺手解决的。
+ * 2. `detail` 有固定层级（DETAIL_PATHS）：根级的它必须落到 `data.detail`，而不是与
+ *    「错误证据」的 error.detail 混成一处。
+ * 3. 服务已经在 `data` 里放了同名字段时以 `data` 为准：那是服务自己给出的规范位置，
+ *    根级的那份只是旧写法的残留，覆盖它会用旧值盖掉新值。
+ */
+function foldLegacyRootFields(envelope) {
+  if (typeof envelope.status !== "string") return envelope;
+  const legacy = Object.keys(envelope).filter(
+    (field) => classifyRootField(field) === "legacy"
+  );
+  if (legacy.length === 0) return envelope;
+
+  const folded = {};
+  const movedData = {};
+  for (const [field, value] of Object.entries(envelope)) {
+    if (classifyRootField(field) === "legacy") movedData[field] = value;
+    else folded[field] = value;
+  }
+  const existingData =
+    envelope.data !== null && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+      ? envelope.data
+      : null;
+  // data 原本是标量/数组（例如 range 的 no_change 返回 data:null）时不折叠：把它
+  // 换成对象会改变一条已定型的读取路径，而新造一个根级字段来存放这些值同样是违规。
+  // 这类信封仍留在 LEGACY 登记表里，由后续按 operation 定义各自的 data 形状。
+  if (envelope.data !== undefined && existingData === null) return envelope;
+  // 展开顺序即优先级：服务自己写进 data 的值覆盖同名的根级残留（边界 3）。
+  folded.data = { ...movedData, ...(existingData ?? {}) };
+  return folded;
+}
+
+/**
  * 编码成功工具结果。
  *
  * @param {unknown} value - 工具返回的业务结果；标量会包装成 { result: value }
@@ -124,8 +168,8 @@ export function encodeToolResult(value) {
   // 三步规范化，顺序不可换：先把服务内部 status（audition 状态机、processing 观测
   // 结论）投影进冻结矩阵，再补齐可由 status 唯一推导的 effects，最后校验三者相容。
   // 校验放在最后，才是在检查「模型真正看到的那一份」。
-  const projected = fillCanonicalEffects(
-    projectStatusEnvelope(stripRedundantOk(normalizedValue))
+  const projected = foldLegacyRootFields(
+    fillCanonicalEffects(projectStatusEnvelope(stripRedundantOk(normalizedValue)))
   );
   if (typeof projected.status === "string") assertStatusEnvelope(projected);
 

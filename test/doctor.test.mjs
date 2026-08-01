@@ -15,7 +15,7 @@ const serverScript = path.resolve(testDir, "..", "server", "src", "index.js");
 const fixturesDir = path.resolve(testDir, "fixtures", "host-profiles");
 
 // doctor 只能通过 sv_status facade 到达：facade 是唯一 surface。
-async function callDoctor() {
+async function callDoctorEnvelope() {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
@@ -34,6 +34,14 @@ async function callDoctor() {
   } finally {
     await client.close().catch(() => {});
   }
+}
+
+// 报告本体现在在 data 里（§10.2.1）：根信封只保留契约字段，业务载荷一律进 data。
+// 绝大多数断言关心的是报告自身的结构，因此默认解包到 data；只有校验信封本身
+// （status / 不再有 ok）的那一处用 callDoctorEnvelope。
+async function callDoctor() {
+  const envelope = await callDoctorEnvelope();
+  return envelope.data ?? envelope;
 }
 
 test("the doctor operation is reachable through sv_status and stays read-only", async () => {
@@ -64,13 +72,14 @@ test("the doctor operation is reachable through sv_status and stays read-only", 
 });
 
 test("sv_doctor returns a structurally valid report", async () => {
-  const d = await callDoctor();
-  assert.equal(d.kind, "svcopilot-doctor");
+  const envelope = await callDoctorEnvelope();
   // 诊断跑完了就是 succeeded；「安装是否健康」是另一个结论，不挤进 status。
-  assert.equal(d.status, "succeeded");
-  assert.equal(typeof d.installationHealthy, "boolean");
+  assert.equal(envelope.status, "succeeded");
   // 与 status 并存的 ok 布尔已从 MCP surface 移除。
-  assert.equal("ok" in d, false);
+  assert.equal("ok" in envelope, false);
+  const d = envelope.data;
+  assert.equal(d.kind, "svcopilot-doctor");
+  assert.equal(typeof d.installationHealthy, "boolean");
   assert.ok(d.generatedAt);
   assert.ok(d.versions?.interfaceVersion);
   assert.ok(d.versions?.node);

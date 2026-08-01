@@ -129,6 +129,27 @@ test("every root field a real server emits is registered", async () => {
   );
 });
 
+test("enveloped results carry no legacy business field at the root", async () => {
+  // 上一个测试只问「这个根级字段登记过吗」，因此登记表既能记录欠迁移项、也能变成
+  // 永久豁免口——只要写进表里就永远不会失败。这条门禁问的是另一个问题：**已经有
+  // 信封的** operation 必须已经完成折叠，登记表对它们不再是通行证。
+  //
+  // 仍有信封的 operation 全部走 encodeToolResult 的同一个出口，因此这条断言覆盖整个
+  // surface；没有信封的（STATUSLESS_OPERATIONS）不在范围内——它们连 data 都还没定义。
+  const offenders = [];
+  for (const { operation, payload } of await collectEnvelopes()) {
+    if (typeof payload?.status !== "string") continue;
+    for (const field of Object.keys(payload)) {
+      if (classifyRootField(field) === "legacy") offenders.push(`${operation}.${field}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these business fields must be folded into data, not left at the root: ${offenders.join(", ")}`
+  );
+});
+
 test("detail never appears at the root", async () => {
   // 根级 detail 会把「业务明细超预算」与「错误证据超预算」混成一个字段。
   // 计划 §10.2.1 固定它只出现在 data.detail 或 error.detail。

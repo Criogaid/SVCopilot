@@ -164,20 +164,25 @@ export function createCompactFacade(tools) {
       budget -= size;
     }
 
+    // 业务载荷放在 data 里（§10.2.1）：根信封只保留契约字段。`operations` 与
+    // `deferred` 必须同层——它们是同一次取舍的两半，分开放会让"哪些没返回"离
+    // "哪些返回了"隔一层，而模型正是要对比这两者才知道还需不需要再问一次。
     return {
       status: "succeeded",
-      operations: described,
-      ...(deferred.length > 0
-        ? {
-            // 如实报告被推迟的部分及其体积，并给出可执行的下一步，而不是静默丢弃。
-            deferred: {
-              operations: deferred,
-              reason: "response_byte_budget_exhausted",
-              budgetBytes: MAX_DESCRIBE_BYTES,
-              remedy: "call sv_describe again with these operations alone",
-            },
-          }
-        : {}),
+      data: {
+        operations: described,
+        ...(deferred.length > 0
+          ? {
+              // 如实报告被推迟的部分及其体积，并给出可执行的下一步，而不是静默丢弃。
+              deferred: {
+                operations: deferred,
+                reason: "response_byte_budget_exhausted",
+                budgetBytes: MAX_DESCRIBE_BYTES,
+                remedy: "call sv_describe again with these operations alone",
+              },
+            }
+          : {}),
+      },
     };
   }
 

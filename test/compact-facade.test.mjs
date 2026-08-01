@@ -200,8 +200,9 @@ test("sv_describe returns the operation's real schema and its facade tool", asyn
   // status 是唯一成败来源；与之并存的 ok 布尔不进入 MCP surface。
   assert.equal(described.status, "succeeded");
   assert.equal("ok" in described, false);
-  assert.equal(described.operations.length, 2);
-  const patch = described.operations.find((entry) => entry.operation === "patch_notes");
+  // 业务载荷在 data 里（§10.2.1）：根信封只保留契约字段。
+  assert.equal(described.data.operations.length, 2);
+  const patch = described.data.operations.find((entry) => entry.operation === "patch_notes");
   // tool 就是 facade 工具名；不再同时返回 facade 字段重复同一信息。
   assert.equal(patch.tool, "sv_edit");
   assert.equal("facade" in patch, false);
@@ -220,9 +221,11 @@ test("sv_describe never exceeds its byte budget and defers honestly", async () =
       arguments: { operations: ["patch_parameter_curves", "edit_phrase"] },
     })
   );
-  const payload = response.structuredContent;
+  // 预算按整个 MCP 结果衡量，取舍的对象是 data 里的 operations。
+  const envelope = response.structuredContent;
+  const payload = envelope.data;
   assert.ok(
-    Buffer.byteLength(JSON.stringify(payload), "utf8") <= MAX_DESCRIBE_BYTES,
+    Buffer.byteLength(JSON.stringify(envelope), "utf8") <= MAX_DESCRIBE_BYTES,
     "describe response must stay within its byte budget"
   );
   // 第一个无论多大都要返回，否则请求毫无进展。
@@ -247,7 +250,7 @@ test("a two-operation describe that fits returns both with no deferral", async (
       name: DESCRIBE_OPERATION_TOOL,
       arguments: { operations: ["ping", "doctor"] },
     });
-    return response.structuredContent;
+    return response.structuredContent.data;
   });
   assert.equal(payload.operations.length, 2);
   assert.equal("deferred" in payload, false);

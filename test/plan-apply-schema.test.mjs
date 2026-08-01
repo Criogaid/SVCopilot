@@ -91,7 +91,8 @@ async function fetchServedSchemas(toolNames) {
         arguments: { operations: batch.map(operationNameForTool) },
       });
       assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
-      const { operations, deferred } = response.structuredContent;
+      // 业务载荷在 data 里（§10.2.1）。
+      const { operations, deferred } = response.structuredContent.data;
       for (const name of batch) {
         const entry = operations.find((item) => item.operation === operationNameForTool(name));
         if (!entry) {

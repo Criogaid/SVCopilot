@@ -57,18 +57,40 @@ function okOf(result) {
   return result?.ok;
 }
 
+// 业务载荷现在在 `data` 里（§10.2.1：根信封只保留契约字段）。这个 smoke 测试关心的
+// 是「端到端语义是否正确」，字段落在根级还是 data 由 root-envelope.test.mjs 专门把关，
+// 因此这里返回一个扁平视图：契约字段 + data 内的业务字段同时可读。
+//
+// 顺序即优先级：契约字段（status/effects/warnings/...）永远来自信封本身，不会被 data
+// 里的同名字段顶掉；`data` 本身也保留，因此 result.data.notes 这类读法继续有效。
+// 业务载荷现在一律在 `data` 里（§10.2.1：根信封只保留 15 个契约字段）。这个 smoke
+// 测试关心的是「经过真实 MCP + IO PIPE 往返后，业务语义是否正确」，字段该放在哪一层
+// 由 root-envelope.test.mjs 专门把关。因此这里返回一个扁平视图，让下面几十条业务断言
+// 继续按业务结构读，而不是逐处插入 `.data`。
+//
+// 契约字段优先：envelope 后展开，因此 status/effects/error 永远来自根级，不会被
+// data 里的同名业务字段（例如某个 section 自己的 status）盖掉。
+function flattenEnvelope(envelope) {
+  const payload =
+    envelope.data !== null && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+      ? envelope.data
+      : null;
+  return payload ? { ...payload, ...envelope } : envelope;
+}
+
 function parseToolResult(response) {
   const text = assertSummaryLine(response);
   if (response.isError) throw new Error(text || "MCP tool failed");
   assert.notEqual(response.structuredContent, undefined);
-  return response.structuredContent;
+  return flattenEnvelope(response.structuredContent);
 }
 
 function parseToolError(response) {
   assert.equal(response.isError, true);
   assertSummaryLine(response);
   assert.notEqual(response.structuredContent, undefined);
-  return response.structuredContent;
+  // 失败信封同样会折叠：mutation 的零写入失败仍带 curves/target 这类业务证据。
+  return flattenEnvelope(response.structuredContent);
 }
 
 function parseResource(response) {
@@ -127,7 +149,8 @@ async function describeTools(names) {
       arguments: { operations: batch.map(operationNameForTool) },
     });
     assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
-    const { operations, deferred } = response.structuredContent;
+    // 业务载荷在 data 里（§10.2.1）：根信封只保留契约字段。
+    const { operations, deferred } = response.structuredContent.data;
     for (const name of batch) {
       const entry = operations.find((item) => item.operation === operationNameForTool(name));
       if (!entry) {
@@ -1289,16 +1312,18 @@ try {
     })
   );
   assert.equal(rangeAgain.status, "no_change");
-  assert.equal(rangeAgain.data, null);
-  assert.match(rangeAgain.contextExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
-  assert.ok(rangeAgain.page.detailCursor);
+  // 迁移期的根级业务字段已收进 data（§10.2.1）：no_change 的事实由 status 承载，
+  // 因此不再另有一个 data:null 说同一件事。
+  assert.match(rangeAgain.data.contextExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(rangeAgain.data.snapshotToken, rangeSnapshot.snapshotToken);
+  assert.ok(rangeAgain.data.page.detailCursor);
   const refreshedRangeIdentity = parseToolResult(
     await facadeCall({
       name: "sv_snapshot_range",
-      arguments: { cursor: rangeAgain.page.detailCursor },
+      arguments: { cursor: rangeAgain.data.page.detailCursor },
     })
   );
-  assert.equal(refreshedRangeIdentity.contextId, rangeAgain.contextId);
+  assert.equal(refreshedRangeIdentity.data.contextId, rangeAgain.data.contextId);
   // 身份不再内嵌 contextId；同一 context 重新取页仍给出同一组内 index。
   assert.equal(
     refreshedRangeIdentity.data.notes[0].id,

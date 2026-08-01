@@ -93,10 +93,11 @@ test("every guide example validates against the schemas the real server serves",
         arguments: { operations: batch },
       });
       assert.notEqual(response.isError, true, `sv_describe failed for ${batch.join(", ")}`);
-      for (const entry of response.structuredContent.operations) {
+      // 业务载荷在 data 里（§10.2.1）。
+      for (const entry of response.structuredContent.data.operations) {
         collected.set(entry.operation, entry.inputSchema);
       }
-      for (const item of response.structuredContent.deferred?.operations ?? []) {
+      for (const item of response.structuredContent.data.deferred?.operations ?? []) {
         pending.push(item.operation);
       }
     }

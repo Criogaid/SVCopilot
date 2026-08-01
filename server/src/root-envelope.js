@@ -37,8 +37,21 @@ export const ROOT_ENVELOPE_FIELDS = Object.freeze({
 export const DETAIL_PATHS = Object.freeze(["data.detail", "error.detail"]);
 
 /**
- * 迁移期仍出现在根级的字段。每项必须写明它属于哪个 operation、为什么还没收进
- * `data`、以及最终去处——否则这张表会变成豁免口。
+ * 曾经出现在根级的业务字段，以及它们各自的归属说明。
+ *
+ * 这张表现在是**折叠清单**，不再是豁免清单：encodeToolResult 会把这里登记的每个
+ * 根级字段收进 `data`（见 mcp-result-encoder 的 foldLegacyRootFields），因此模型
+ * 看到的信封只剩 ROOT_ENVELOPE_FIELDS 的 15 个契约字段。
+ *
+ * 为什么保留这张表而不是直接删掉：
+ * 1. 它就是折叠的依据——`classifyRootField` 用它区分「该收进 data 的业务载荷」与
+ *    「必须留在根上的契约字段」。删了它，折叠就只能靠一份硬编码的字段名清单。
+ * 2. 它记录了每个字段的去处，因此某个服务把字段直接写进 `data` 之后，这里的条目
+ *    就成为过期项——门禁会指出来（见 surface-io-policy 那条「登记表两个方向都要
+ *    诚实」的测试的同类约束）。
+ *
+ * 服务端仍可以逐个把字段直接写进自己的 `data`（那是更好的终态，因为形状在服务里
+ * 就是对的）；折叠只保证「无论服务写没写对，surface 上的契约都成立」。
  */
 export const LEGACY_ROOT_FIELDS = Object.freeze({
   // sv_status(doctor)：安装诊断不是「对某个工程对象的操作」，它的字段是诊断报告本身。
