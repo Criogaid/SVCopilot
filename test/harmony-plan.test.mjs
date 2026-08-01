@@ -530,7 +530,7 @@ test("shared target groups surface the confirmation requirement in review", asyn
   assert.ok(result.review.checklist.some((item) => /allowSharedTargetMutation/.test(item)));
 });
 
-test("identical requests produce identical planIds and responseMode governs perNote", async () => {
+test("identical requests produce identical planIds and perNote is capped at one size", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, { sourceNotes: cMajorNotes() });
   const service = createService(store);
@@ -542,10 +542,10 @@ test("identical requests produce identical planIds and responseMode governs perN
   const first = await service.plan(request);
   const second = await service.plan(request);
   assert.equal(first.planId, second.planId);
-  const compact = await service.plan({ ...request, responseMode: "compact" });
-  assert.equal(compact.perNote, undefined);
-  assert.equal(compact.summary.planned, 5);
-  assert.ok(JSON.stringify(compact).length < JSON.stringify(first).length);
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  // 唯一形状（§10.6 规则 14）：perNote 恒定返回并按同一上限截断，调用方不再挑档。
+  assert.equal(first.perNote.length, 5);
+  assert.equal(first.summary.planned, 5);
 });
 
 test("harmony resolves contexts honestly across error paths", async () => {

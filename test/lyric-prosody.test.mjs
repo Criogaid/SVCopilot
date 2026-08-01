@@ -351,7 +351,7 @@ test("a clean passage reports clean:true with zero issues", async () => {
   assert.deepEqual(result.summary.bySeverity, { error: 0, warning: 0, info: 0 });
 });
 
-test("issues are sorted by severity then start time and responseMode governs the list", async () => {
+test("issues are sorted by severity then start time", async () => {
   const store = createStore();
   // 时间序：先 warning（多 mora），后 error（小假名）；输出必须 error 在前。
   const { stored } = createStoredContext(store, {
@@ -360,25 +360,18 @@ test("issues are sorted by severity then start time and responseMode governs the
       { onsetBlick: Q, durationBlick: Q, lyrics: "ょう" },
     ],
   });
-  const service = createService(store);
-  const standard = await service.validate({
+  const result = await createService(store).validate({
     contextId: stored.contextId,
     checks: ["japaneseMora"],
   });
-  assert.equal(standard.issues[0].kind, "isolated_small_kana");
-  assert.equal(standard.issues[1].kind, "note_overfilled_morae");
-
-  const compact = await service.validate({
-    contextId: stored.contextId,
-    checks: ["japaneseMora"],
-    responseMode: "compact",
-  });
-  assert.equal(compact.issues, undefined);
-  assert.equal(compact.summary.issueCount, 2);
-  assert.ok(JSON.stringify(compact).length < JSON.stringify(standard).length);
+  assert.equal(result.issues[0].kind, "isolated_small_kana");
+  assert.equal(result.issues[1].kind, "note_overfilled_morae");
+  assert.equal(result.summary.issueCount, 2);
 });
 
-test("standard caps issues at 100 with a warning while verbose returns all", async () => {
+test("the issue list is capped at 100 with a truncation warning", async () => {
+  // 响应形状由契约规定，不由调用方选择（§4.4）：超出上限的完整明细通过 Artifact
+  // 读取，而不是让调用方传一个开关把同一份数据要第二遍。
   const store = createStore();
   const count = 130;
   const notes = Array.from({ length: count }, (_, index) => ({
@@ -387,23 +380,15 @@ test("standard caps issues at 100 with a warning while verbose returns all", asy
     lyrics: "とう", // 每个音符一个多 mora warning
   }));
   const { stored } = createStoredContext(store, { notes });
-  const service = createService(store);
-  const standard = await service.validate({
+  const result = await createService(store).validate({
     contextId: stored.contextId,
     checks: ["japaneseMora"],
   });
-  assert.equal(standard.summary.issueCount, count);
-  assert.equal(standard.issues.length, 100);
-  assert.equal(standard.issuesTruncated, true);
-  assert.ok(standard.warnings.some((warning) => warning.code === "ISSUES_TRUNCATED"));
-
-  const verbose = await service.validate({
-    contextId: stored.contextId,
-    checks: ["japaneseMora"],
-    responseMode: "verbose",
-  });
-  assert.equal(verbose.issues.length, count);
-  assert.equal(verbose.issuesTruncated, false);
+  // 摘要覆盖全部 issue；被截断的只是逐项列表。
+  assert.equal(result.summary.issueCount, count);
+  assert.equal(result.issues.length, 100);
+  assert.equal(result.issuesTruncated, true);
+  assert.ok(result.warnings.some((warning) => warning.code === "ISSUES_TRUNCATED"));
 });
 
 test("validator resolves contexts honestly across error paths", async () => {
@@ -440,7 +425,6 @@ test("validator rejects malformed requests before touching the store", async () 
     { contextId: "" },
     { contextId: "ctx", checks: [] },
     { contextId: "ctx", checks: ["bogus"] },
-    { contextId: "ctx", responseMode: "loud" },
     { contextId: "ctx", bogus: true },
   ]) {
     await assert.rejects(service.validate(request), (error) => error.code === "INVALID_ARGUMENTS");

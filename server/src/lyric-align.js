@@ -696,12 +696,7 @@ function buildAlignResponse(
   let alignmentDetailRef = null;
   const hasAlignmentDetails =
     mapped.unassignedUnits.length > 0 || mapped.unfilledNotes.length > 0;
-  if (
-    input.responseMode === "compact" &&
-    hasAlignmentDetails &&
-    artifactStore &&
-    sessionId
-  ) {
+  if (hasAlignmentDetails && artifactStore && sessionId) {
     try {
       alignmentDetailRef = artifactReference(
         artifactStore.seal({
@@ -758,23 +753,19 @@ function buildAlignResponse(
       semanticRoles,
       complete: mapped.unassignedUnits.length === 0,
     },
-    ...(input.responseMode === "compact"
-      ? {}
-      : {
-          tokens: tokens.map((token) => ({
-            index: token.index,
-            text: token.text,
-            kind: token.kind,
-            language: token.language,
-            semanticRole: token.semanticRole,
-            semanticEvidence: token.semanticEvidence,
-            ...(token.syllables !== undefined ? { syllables: token.syllables } : {}),
-            confidence: token.confidence,
-            ...(token.needsReview ? { needsReview: true } : {}),
-          })),
-          perNote: mapped.perNote,
-        }),
-    alignment: formatAlignment(mapped, input.responseMode, alignmentDetailRef),
+    tokens: tokens.map((token) => ({
+      index: token.index,
+      text: token.text,
+      kind: token.kind,
+      language: token.language,
+      semanticRole: token.semanticRole,
+      semanticEvidence: token.semanticEvidence,
+      ...(token.syllables !== undefined ? { syllables: token.syllables } : {}),
+      confidence: token.confidence,
+      ...(token.needsReview ? { needsReview: true } : {}),
+    })),
+    perNote: mapped.perNote,
+    alignment: formatAlignment(mapped, alignmentDetailRef),
     apply,
     ...(!planRef ? { patchRequest } : {}),
     ...(continuation ? { continuation } : {}),
@@ -798,7 +789,6 @@ function normalizeAlignRequest(request) {
       "language",
       "startNote",
       "setLanguageOverride",
-      "responseMode",
     ],
     "request"
   );
@@ -836,10 +826,6 @@ function normalizeAlignRequest(request) {
   ) {
     throw codedError("INVALID_ARGUMENTS", "setLanguageOverride must be a boolean");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   return {
     contextId: request.contextId,
     occurrence: request.occurrence,
@@ -847,11 +833,10 @@ function normalizeAlignRequest(request) {
     language,
     startNote: request.startNote,
     setLanguageOverride: request.setLanguageOverride ?? true,
-    responseMode,
   };
 }
 
-function formatAlignment(mapped, responseMode, detailRef) {
+function formatAlignment(mapped, detailRef) {
   const unassignedCount = mapped.unassignedUnits.length;
   const unfilledCount = mapped.unfilledNotes.length;
   const summary = {
@@ -870,20 +855,15 @@ function formatAlignment(mapped, responseMode, detailRef) {
         }
       : {}),
   };
-  if (responseMode === "compact") {
-    return {
-      ...summary,
-      detailsOmitted: hasAlignmentOverflow(mapped, 0),
-      ...(detailRef ? { detailRef } : {}),
-    };
-  }
-  const limit = responseMode === "verbose" ? Number.POSITIVE_INFINITY : STANDARD_ALIGNMENT_ITEMS;
+  // 单一形状：定量截断的列表 + 溢出时指向完整明细的 detailRef（§10.6 规则 10/14）。
+  const limit = STANDARD_ALIGNMENT_ITEMS;
   return {
     ...summary,
     unassignedUnits: mapped.unassignedUnits.slice(0, limit),
     unfilledNotes: mapped.unfilledNotes.slice(0, limit),
     unassignedTruncated: mapped.unassignedUnits.length > limit,
     unfilledTruncated: mapped.unfilledNotes.length > limit,
+    ...(hasAlignmentOverflow(mapped, limit) && detailRef ? { detailRef } : {}),
   };
 }
 

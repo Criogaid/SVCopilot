@@ -1190,7 +1190,7 @@ function phraseSuccess(options) {
             ? "shared_target_observed"
             : "single_target_observed",
     },
-    changes: phraseChanges(prepared, input.responseMode),
+    changes: phraseChanges(prepared),
     undo: {
       boundaryCallsCompleted: boundaryCalls,
       expectedUserUndoSteps: boundaryCalls === 2 ? 1 : boundaryCalls === 0 ? 0 : null,
@@ -1250,29 +1250,28 @@ function phraseFailure(options) {
   };
 }
 
-function phraseChanges(prepared, responseMode) {
+// 单一响应形状（§4.4 规则 14）：不再有 compact/standard/verbose 分支。
+//
+// 保留 diff、丢弃逐点 resolvedPositions/plannedPoints，不是任意取舍：diff 有界于
+// operation cap（模型据它判断"改了什么"），而逐点展开会随曲线长度线性增长且没有
+// 上限。让调用方选形状会让同一个 operation 有三种契约，模型必须先猜该要哪一种。
+function phraseChanges(prepared) {
   const curves = prepared.curvePlans.map((plan) => ({
     parameter: plan.typeName,
     points: plan.planned.length,
     verified: plan.verification?.passed ?? null,
-    ...(responseMode === "verbose"
-      ? {
-          resolvedPositions: plan.resolvedInputPoints,
-          plannedPoints: plan.planned,
-        }
-      : {}),
   }));
   return {
     notePatches: {
       requested: prepared.notePlan.requested,
       changedNotes: prepared.notePlan.changedNotes,
-      ...(responseMode === "compact" ? {} : { diff: prepared.notePlan.diff }),
+      diff: prepared.notePlan.diff,
     },
     structure: prepared.structurePlan,
     curves,
     voice: {
       changed: prepared.voice.changed,
-      ...(responseMode === "compact" ? {} : { diff: prepared.voice.diff }),
+      diff: prepared.voice.diff,
     },
     finalNoteCount: prepared.finalNoteCount,
   };
@@ -1352,10 +1351,6 @@ function normalizeRequest(request) {
   if (!["none", "phonemes", "computedAttributes"].includes(waitFor)) {
     throw codedError("INVALID_ARGUMENTS", "waitFor must be none, phonemes, or computedAttributes");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   return {
     target: {
       contextId: target.contextId,
@@ -1370,7 +1365,6 @@ function normalizeRequest(request) {
     dryRun: dryRunFromAction(request.action),
     atomic: request.atomic !== false,
     waitFor,
-    responseMode,
     timeoutMs: clampInteger(request.timeoutMs, 0, 30_000, 10_000),
     pollIntervalMs: clampInteger(request.pollIntervalMs, 20, 2_000, 100),
   };

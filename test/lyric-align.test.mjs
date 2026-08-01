@@ -438,7 +438,7 @@ test("explicit continuation chains override inferred English syllable expansion"
   }
 });
 
-test("orphan continuations require review and compact preserves semantic counts", async () => {
+test("orphan continuations require review and semantic counts stay exact", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, {
     notes: uniformNotes(["", "", ""]),
@@ -446,11 +446,12 @@ test("orphan continuations require review and compact preserves semantic counts"
   const result = await createService(store).align({
     contextId: stored.contextId,
     lyrics: "+ - word",
-    responseMode: "compact",
   });
 
-  assert.equal(result.tokens, undefined);
-  assert.equal(result.perNote, undefined);
+  // 单一形状：tokens/perNote 恒定返回（§10.6 规则 14），因此语义计数与逐项证据
+  // 不再互斥——以前 compact 只给计数，模型想看是哪一个 token 出问题必须重发请求。
+  assert.equal(result.tokens.length, 3);
+  assert.equal(result.perNote.length, 3);
   assert.deepEqual(result.summary.semanticRoles.byRole, {
     syllable_continuation: 1,
     phonation_continuation: 1,
@@ -668,27 +669,29 @@ test("align validates request shape before touching the store", async () => {
     { contextId: "ctx_x", lyrics: "あ", language: "klingon" },
     { contextId: "ctx_x", lyrics: "あ", bogus: true },
     { contextId: "ctx_x", lyrics: "あ", setLanguageOverride: "yes" },
-    { contextId: "ctx_x", lyrics: "あ", responseMode: "loud" },
+    { contextId: "ctx_x", lyrics: "あ", responseMode: "compact" },
   ]) {
     await assert.rejects(service.align(request), (error) => error.code === "INVALID_ARGUMENTS");
   }
 });
 
-test("compact responses keep summary, alignment, and patchRequest only", async () => {
+test("a clean alignment reports empty overflow lists rather than omitting them", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, { notes: uniformNotes(["a", "b"]) });
   const result = await createService(store).align({
     contextId: stored.contextId,
     lyrics: "あさ",
-    responseMode: "compact",
   });
-  assert.equal(result.tokens, undefined);
-  assert.equal(result.perNote, undefined);
+  assert.equal(result.tokens.length, 2);
+  assert.equal(result.perNote.length, 2);
   assert.ok(result.summary);
-  assert.equal(result.alignment.unassignedUnits, undefined);
-  assert.equal(result.alignment.unfilledNotes, undefined);
+  // 空列表与"字段不存在"必须区分：前者是"确实没有遗漏"，后者是"这档不告诉你"。
+  // 契约固定为前者，因此模型读到 [] 就能断定对齐是干净的，不必再猜档位。
+  assert.deepEqual(result.alignment.unassignedUnits, []);
+  assert.deepEqual(result.alignment.unfilledNotes, []);
   assert.equal(result.alignment.unassignedCount, 0);
   assert.equal(result.alignment.unfilledCount, 0);
+  assert.equal(result.alignment.detailRef, undefined);
   assert.ok(result.patchRequest.arguments.patches.length === 2);
   assert.match(result.planId, /^lyr_[0-9a-f]{16}$/);
 });

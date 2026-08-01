@@ -215,7 +215,6 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
     const anomalies = input.metrics.anomalySegments
       ? collectAnomalySegments(base.frameData.frameCents, params.anomalyThresholdCent)
       : null;
-    if (input.responseMode === "compact") return { anomalies };
     const perNote = input.metrics.perNote
       ? buildPerNoteItems(spans, base.frameData.perSpan, params, context, series, {
           vibrato: input.metrics.vibrato,
@@ -239,15 +238,11 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
     excludedEvents: partition.excludedEvents,
     sampling,
     summary: base.summary,
-    ...(input.responseMode === "compact"
-      ? {}
-      : {
-          ...(detail.perNote ? { perNote: detail.perNote } : {}),
-          ...(detail.transitions ? { transitions: detail.transitions } : {}),
-          analysis: publicAnalysisParams(params),
-        }),
+    ...(detail.perNote ? { perNote: detail.perNote } : {}),
+    ...(detail.transitions ? { transitions: detail.transitions } : {}),
+    analysis: publicAnalysisParams(params),
     ...(detail.anomalies
-      ? { anomalySegments: emitAnomalies(detail.anomalies, input.responseMode, input.anomalySortBy) }
+      ? { anomalySegments: emitAnomalies(detail.anomalies, input.anomalySortBy) }
       : {}),
   };
 }
@@ -585,7 +580,6 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     const anomalies = input.metrics.anomalySegments
       ? collectAnomalySegments(base.frameCents, params.anomalyThresholdCent)
       : null;
-    if (input.responseMode === "compact") return { anomalies };
     const perNote = input.metrics.perNote
       ? buildContextsPerNote(
           before,
@@ -633,14 +627,10 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
       ...summarizeCents(base.deltasSemitone.map((delta) => delta * 100)),
     },
     semitoneDelta: buildSemitoneDelta(base.deltasSemitone),
-    ...(input.responseMode === "compact"
-      ? {}
-      : {
-          ...(detail.perNote ? { perNote: detail.perNote } : {}),
-          analysis: publicAnalysisParams(params),
-        }),
+    ...(detail.perNote ? { perNote: detail.perNote } : {}),
+    analysis: publicAnalysisParams(params),
     ...(detail.anomalies
-      ? { anomalySegments: emitAnomalies(detail.anomalies, input.responseMode, input.anomalySortBy) }
+      ? { anomalySegments: emitAnomalies(detail.anomalies, input.anomalySortBy) }
       : {}),
   };
 }
@@ -990,15 +980,12 @@ function collectAnomalySegments(frameCents, thresholdCent) {
   return segments;
 }
 
-function emitAnomalies(segments, responseMode, sortBy) {
+function emitAnomalies(segments, sortBy) {
   // top 恒为最严重段：无论 sortBy 与截断如何，最严重段绝不被时间序截断吞掉。
   const top = segments.reduce(
     (best, segment) => (best === null || segment.peakAbsCent > best.peakAbsCent ? segment : best),
     null
   );
-  if (responseMode === "compact") {
-    return { total: segments.length, sortBy, top };
-  }
   const sorted =
     sortBy === "severity"
       ? [...segments].sort(
@@ -1156,7 +1143,6 @@ function normalizeCompareRequest(request) {
       "metrics",
       "analysis",
       "anomalySortBy",
-      "responseMode",
     ],
     "request"
   );
@@ -1166,10 +1152,6 @@ function normalizeCompareRequest(request) {
       "INVALID_ARGUMENTS",
       'mode must be "compare_to_target" or "compare_contexts"'
     );
-  }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
   }
   const anomalySortBy = request.anomalySortBy ?? "startBlick";
   if (!ANOMALY_SORT_MODES.includes(anomalySortBy)) {
@@ -1193,7 +1175,6 @@ function normalizeCompareRequest(request) {
       metrics,
       analysis,
       anomalySortBy,
-      responseMode,
     };
   }
   if (request.contextId !== undefined || request.occurrence !== undefined) {
@@ -1204,7 +1185,7 @@ function normalizeCompareRequest(request) {
   }
   const before = normalizeSide(request.before, "before");
   const after = normalizeSide(request.after, "after");
-  return { mode, before, after, metrics, analysis, anomalySortBy, responseMode };
+  return { mode, before, after, metrics, analysis, anomalySortBy };
 }
 
 function normalizeSide(value, label) {

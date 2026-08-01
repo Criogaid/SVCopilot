@@ -386,7 +386,7 @@ test("a reanchored selector is rejected when the target group UUID changed", asy
   );
 });
 
-test("notes select a subset and responseMode governs perNote size", async () => {
+test("notes select a subset and perNote is capped at one size", async () => {
   const store = createStore();
   const count = 130;
   const notes = Array.from({ length: count }, (_, index) => ({
@@ -403,26 +403,13 @@ test("notes select a subset and responseMode governs perNote size", async () => 
   assert.equal(subset.summary.noteCount, 2);
   assert.equal(subset.patchRequest.arguments.patches.length, 2);
 
-  const standard = await service.plan({ contextId: stored.contextId, grid: { division: "1/4" } });
-  assert.equal(standard.perNote.length, 100);
-  assert.equal(standard.perNoteTruncated, true);
-  assert.ok(standard.warnings.some((warning) => warning.code === "PER_NOTE_TRUNCATED"));
-  assert.equal(standard.summary.noteCount, count);
-
-  const compact = await service.plan({
-    contextId: stored.contextId,
-    grid: { division: "1/4" },
-    responseMode: "compact",
-  });
-  assert.equal(compact.perNote, undefined);
-  assert.equal(compact.summary.noteCount, count);
-
-  const verbose = await service.plan({
-    contextId: stored.contextId,
-    grid: { division: "1/4" },
-    responseMode: "verbose",
-  });
-  assert.equal(verbose.perNote.length, count);
+  // 唯一形状：perNote 恒定返回、按 MAX_LIST_ITEMS 截断并给出截断警告；
+  // summary 始终覆盖全部音符，因此截断不会让计数失真。
+  const full = await service.plan({ contextId: stored.contextId, grid: { division: "1/4" } });
+  assert.equal(full.perNote.length, 100);
+  assert.equal(full.perNoteTruncated, true);
+  assert.ok(full.warnings.some((warning) => warning.code === "PER_NOTE_TRUNCATED"));
+  assert.equal(full.summary.noteCount, count);
 });
 
 test("identical requests produce identical planIds (determinism)", async () => {
@@ -482,7 +469,7 @@ test("quantize rejects malformed requests before touching the store", async () =
     { contextId: "ctx", grid: { division: "1/8" }, quantizeDurations: "yes" },
     { contextId: "ctx", grid: { division: "1/8" }, notes: [] },
     { contextId: "ctx", grid: { division: "1/8" }, notes: [0, 0] },
-    { contextId: "ctx", grid: { division: "1/8" }, responseMode: "loud" },
+    { contextId: "ctx", grid: { division: "1/8" }, responseMode: "compact" },
     { contextId: "ctx", grid: { division: "1/8" }, bogus: true },
   ]) {
     await assert.rejects(service.plan(request), (error) => error.code === "INVALID_ARGUMENTS");

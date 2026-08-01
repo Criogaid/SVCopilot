@@ -271,19 +271,16 @@ test("an all-breath target keeps null sections and the run fails only when every
   );
 });
 
-test("responseMode compact drops per-target sections but keeps the aggregate", async () => {
+test("every target carries its sections alongside the aggregate", async () => {
+  // 单一响应形状（§4.4）：per-target sections 与 aggregate 一起返回，调用方不需要
+  // 先猜一个 responseMode 再决定能读到什么。
   const store = createStore();
   const { stored } = createStoredContext(store, { notes: simpleNotes() });
-  const service = createService(store);
-  const compact = await service.profile({
+  const result = await createService(store).profile({
     targets: [{ contextId: stored.contextId }],
-    responseMode: "compact",
   });
-  assert.equal(compact.targets[0].sections, undefined);
-  assert.ok(compact.aggregate.overall.register);
-  const standard = await service.profile({ targets: [{ contextId: stored.contextId }] });
-  assert.ok(standard.targets[0].sections.register);
-  assert.ok(JSON.stringify(compact).length < JSON.stringify(standard).length);
+  assert.ok(result.targets[0].sections.register);
+  assert.ok(result.aggregate.overall.register);
 });
 
 test("profile resolves contexts honestly across error paths", async () => {
@@ -324,7 +321,6 @@ test("profile validates request shape and rejects duplicate targets", async () =
     { targets: [{ contextId: "ctx" }], include: [] },
     { targets: [{ contextId: "ctx" }], include: ["bogus"] },
     { targets: [{ contextId: "ctx" }], phraseGapQuarter: 0 },
-    { targets: [{ contextId: "ctx" }], responseMode: "loud" },
     { targets: Array.from({ length: 9 }, () => ({ contextId: "ctx" })) },
     {
       targets: [{ contextId: stored.contextId }, { contextId: stored.contextId }],

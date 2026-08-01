@@ -295,7 +295,6 @@ test("a planner success envelope fits the compact budget without its detail payl
   }).plan({
     contextId: stored.contextId,
     ...groupedExpressionRequest(stored.contextId),
-    responseMode: "compact",
   });
   assert.equal(result.ok, true);
   const bytes = utf8(result);

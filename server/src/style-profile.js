@@ -78,7 +78,7 @@ export class StyleProfileService {
       ok: true,
       status: "succeeded",
       targetCount: profiles.length,
-      targets: profiles.map((profile) => publicTargetProfile(profile, input.responseMode)),
+      targets: profiles.map((profile) => publicTargetProfile(profile)),
       aggregate,
       provenance: PROVENANCE,
       warnings,
@@ -326,7 +326,7 @@ function buildParameterSection(loaded, input, warnings, targetLabel, profile) {
       defaultValue: Number.isFinite(defaultValue) ? defaultValue : null,
       nonDefaultRatio:
         nonDefaultCount !== null && values.length > 0 ? nonDefaultCount / values.length : null,
-      ...(input.responseMode !== "compact" && perPhrase.length > 0 ? { perPhrase } : {}),
+      ...(perPhrase.length > 0 ? { perPhrase } : {}),
     };
   });
   return { status: "captured", curves: items };
@@ -532,7 +532,9 @@ function aggregateGroup(profiles, input) {
 
 // ---------- 响应裁剪 ----------
 
-function publicTargetProfile(profile, responseMode) {
+// 单一响应形状（§4.4 规则 14）：sections 一律返回。它按 include 有界，
+// 而"让调用方选形状"会让同一个 operation 有三份契约。
+function publicTargetProfile(profile) {
   const base = {
     index: profile.index,
     label: profile.label,
@@ -541,7 +543,6 @@ function publicTargetProfile(profile, responseMode) {
     noteCount: profile.noteCount,
     breathCount: profile.breathCount,
   };
-  if (responseMode === "compact") return base;
   return { ...base, sections: profile.sections };
 }
 
@@ -558,7 +559,7 @@ function median(sortedAscending) {
 
 function normalizeProfileRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(request, ["targets", "include", "phraseGapQuarter", "responseMode"], "request");
+  assertKnownKeys(request, ["targets", "include", "phraseGapQuarter"], "request");
   if (!Array.isArray(request.targets) || request.targets.length < 1 || request.targets.length > MAX_TARGETS) {
     throw codedError("INVALID_ARGUMENTS", `targets must be an array of 1-${MAX_TARGETS} items`);
   }
@@ -620,11 +621,7 @@ function normalizeProfileRequest(request) {
   if (!Number.isFinite(phraseGapQuarter) || phraseGapQuarter < 0.25 || phraseGapQuarter > 8) {
     throw codedError("INVALID_ARGUMENTS", "phraseGapQuarter must be a number between 0.25 and 8");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
-  return { targets, include, phraseGapQuarter, responseMode };
+  return { targets, include, phraseGapQuarter };
 }
 
 function assertKnownKeys(value, allowed, label) {

@@ -446,7 +446,7 @@ test("time-ordered truncation still surfaces a late most-severe segment via top"
   approx(result.anomalySegments.top.peakAbsCent, 400, 1e-6);
 });
 
-test("compact responses keep summary and top anomaly only", async () => {
+test("one response shape carries summary, detail, and the top anomaly", async () => {
   const store = createStore();
   const interval = Q / 10;
   const values = new Array(20).fill(60);
@@ -459,12 +459,12 @@ test("compact responses keep summary and top anomaly only", async () => {
   const result = await createService(store).compare({
     mode: "compare_to_target",
     contextId: stored.contextId,
-    responseMode: "compact",
   });
-  assert.equal(result.perNote, undefined);
-  assert.equal(result.transitions, undefined);
-  assert.equal(result.analysis, undefined);
+  // §4.4 规则 14：没有 compact/standard/verbose 分支了，明细恒返回。
   assert.ok(result.summary);
+  assert.ok(result.perNote);
+  assert.ok(result.analysis);
+  // top 恒为最严重段，与排序和截断无关。
   assert.equal(result.anomalySegments.total, 1);
   assert.equal(result.anomalySegments.sortBy, "startBlick");
   approx(result.anomalySegments.top.peakAbsCent, 100, 1e-6);

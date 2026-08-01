@@ -77,7 +77,6 @@ export const LEGACY_ROOT_FIELDS = Object.freeze({
   // 属于结果语义而非业务载荷，B2 决定它是并入 verification 还是留在根级。
   atomicity: "全部 mutation：verified_compensation | none；B2 决定归属",
   indexBase: "mutation/read：恒为 0，可由契约声明一次而不必逐次返回",
-  responseMode: "回显入参；§3.6 规定 responseMode 从外部 schema 删除",
   target: "mutation：目标描述 -> data.target",
   contextId: "read/plan：新建或复用的 Context -> data.contextId",
   observedAt: "read -> data.observedAt",

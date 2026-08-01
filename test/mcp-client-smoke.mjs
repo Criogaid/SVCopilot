@@ -286,7 +286,8 @@ try {
   assert.match(cloneTrackTool.description, /not an isolated musical-data fork/);
   assert.match(cloneTrackTool.description, /sharedTargetGroups/);
   assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
-  assert.equal(batchCurveTool.inputSchema.properties.responseMode.default, "standard");
+  // 响应形状由契约固定（§10.6 规则 14）：schema 不再提供 responseMode 这个旋钮。
+  assert.equal(batchCurveTool.inputSchema.properties.responseMode, undefined);
   const curveTarget = batchCurveTool.inputSchema.properties.target;
   assert.ok(curveTarget.properties.trackIndex);
   assert.ok(curveTarget.properties.expectedGroupUuid);
@@ -1372,7 +1373,6 @@ try {
             ],
           },
         ],
-        responseMode: "compact",
         undoLabel: "Smoke batch curve",
       },
     })

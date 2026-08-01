@@ -367,7 +367,6 @@ function formatBakeResponse(loaded, input, plan, patchResult, timings) {
       anchorPositionBlick: plan.curve.anchorPositionBlick,
       anchorPitchSemitone: plan.curve.anchorPitchSemitone,
       pointCount: plan.pointCount,
-      ...(input.responseMode === "verbose" ? { points: plan.curve.points } : {}),
     },
     modifiedRange: plan.modifiedRange,
     provenance: PROVENANCE,
@@ -429,7 +428,6 @@ function normalizeBakeRequest(request) {
       "pitchDeltaHandling",
       "allowSharedTargetMutation",
       "action",
-      "responseMode",
     ],
     "request"
   );
@@ -504,7 +502,6 @@ function normalizeBakeRequest(request) {
     pitchDeltaHandling,
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
     dryRun: dryRunFromAction(request.action),
-    responseMode: ["compact", "standard", "verbose"].includes(request.responseMode) ? request.responseMode : "standard",
   };
 }
 

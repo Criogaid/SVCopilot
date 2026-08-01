@@ -158,7 +158,7 @@ test("a group with no pitch controls yields an empty list, not an error", async 
   assert.deepEqual(result.data.pitchControls, []);
 });
 
-test("compact range summary counts a point control without assuming curve points", async () => {
+test("a point control is returned with its discriminator and no invented curve points", async () => {
   const model = createPitchHostModel({
     controls: [{ kind: "point", position: Q, pitch: 60 }],
   });
@@ -166,16 +166,17 @@ test("compact range summary counts a point control without assuming curve points
   const result = await service.snapshot({
     ...RANGE,
     include: ["pitchControls"],
-    responseMode: "compact",
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.data.summaries.pitchControls, {
-    count: 1,
-    points: 0,
-    curves: 0,
-    svcopilotOwned: 0,
-  });
+  // Point 与 Curve 是不同的对象：point 没有 points 数组，绝不能补一个空数组冒充
+  // 「有曲线但没点」。这个区分以前只在 compact 摘要里被断言，而 responseMode 删除后
+  // 它属于唯一形状的逐项数据本身。
+  assert.equal(result.data.pitchControls.length, 1);
+  const control = result.data.pitchControls[0];
+  assert.equal(control.kind, "point");
+  assert.equal(control.points, undefined);
+  assert.equal(control.ownership.owner, "external_or_unknown");
 });
 
 test("pitchControls paginate by item budget and cursor pages serve from cache without re-reading the host", async () => {

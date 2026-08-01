@@ -406,7 +406,7 @@ const TARGET = { trackIndex: 0, groupIndex: 0 };
 // 却占全部 schema 的 10%，还让模型每次都要判断"该调哪个"。这些用例仍然描述"一条
 // 曲线"的行为，因此统一走复数端点并读 curves[0]，而不是保留一份并行契约。
 function oneCurve(request) {
-  const { target, action, atomic, responseMode, undoLabel, ...curve } = request;
+  const { target, action, atomic, undoLabel, ...curve } = request;
   return {
     target,
     curves: [curve],
@@ -416,7 +416,6 @@ function oneCurve(request) {
     action: action ?? "commit",
     ...(atomic === undefined ? {} : { atomic }),
     ...(undoLabel === undefined ? {} : { undoLabel }),
-    responseMode: responseMode ?? "standard",
   };
 }
 
@@ -921,7 +920,7 @@ test("sv_patch_parameter_curves dry-run preflights four curves without writes or
     tension: model.batchPoints.tension.map((point) => [...point]),
   };
   const result = await createService(model).patchCurves(
-    fourCurveRequest({ action: "dry_run", responseMode: "compact", undoLabel: "Tune Lead 1" })
+    fourCurveRequest({ action: "dry_run", undoLabel: "Tune Lead 1" })
   );
 
   assert.equal(result.ok, true);
@@ -935,8 +934,12 @@ test("sv_patch_parameter_curves dry-run preflights four curves without writes or
   assert.equal(model.undoCount, 0);
   assert.deepEqual(model.points, before.loudness);
   assert.deepEqual(model.batchPoints.tension, before.tension);
-  assert.equal("before" in result.curves[0], false);
-  assert.equal("planned" in result.curves[0], false);
+  // 唯一形状（§10.6 规则 14）：before/planned 的计数与统计恒定返回，因此 dry-run
+  // 的证据不再依赖调用方先选对档位。逐点数组仍不内联（规则 10）。
+  assert.equal(result.curves[0].before.pointCount, 3);
+  assert.equal(result.curves[0].planned.pointCount, 1);
+  assert.equal(result.curves[0].before.points, undefined);
+  assert.equal(result.curves[0].planned.points, undefined);
 });
 
 test("sv_patch_parameter_curves commits and verifies four curves in one Undo interval", async () => {
@@ -946,7 +949,7 @@ test("sv_patch_parameter_curves commits and verifies four curves in one Undo int
     { withExclusive: (task) => task(model.host) },
     { now: () => tick++ }
   );
-  const result = await service.patchCurves(fourCurveRequest({ responseMode: "standard" }));
+  const result = await service.patchCurves(fourCurveRequest({ }));
 
   assert.equal(result.ok, true);
   assert.equal(result.status, "succeeded");
@@ -1041,7 +1044,7 @@ test("sv_patch_parameter_curves leaves prepared curves untouched when preflight 
 test("sv_patch_parameter_curves accepts float32 quantization through the shared verifier", async () => {
   const model = addBatchCurves(createCurveModel());
   model.coerceValuesToFloat32 = true;
-  const request = fourCurveRequest({ responseMode: "standard" });
+  const request = fourCurveRequest({ });
   request.curves = [
     {
       parameter: "loudness",
@@ -1119,7 +1122,7 @@ test("sv_patch_parameter_curves rejects typos before the host can apply its defa
 test("sv_patch_parameter_curves validates dynamic vocal modes and reports aliases", async () => {
   const model = addBatchCurves(createCurveModel());
   const service = createService(model);
-  const valid = fourCurveRequest({ action: "dry_run", responseMode: "compact" });
+  const valid = fourCurveRequest({ action: "dry_run" });
   valid.curves = [
     {
       parameter: "VOCALMODE_POWERFUL",
@@ -1229,21 +1232,19 @@ test("sv_patch_parameter_curves measures ExecutionCoordinator wait separately", 
   assert.equal(secondResult.timings.serviceTotalMs, 900);
 });
 
-test("sv_patch_parameter_curves verbose includes point evidence and rejects duplicates", async () => {
+test("sv_patch_parameter_curves reports point-count evidence and rejects duplicates", async () => {
   const model = addBatchCurves(createCurveModel());
-  const verbose = await createService(model).patchCurves(
-    fourCurveRequest({ action: "dry_run", responseMode: "verbose" })
+  const planned = await createService(model).patchCurves(
+    fourCurveRequest({ action: "dry_run" })
   );
-  assert.deepEqual(verbose.curves[0].before.points[0], {
-    localBlick: 0,
-    absoluteBlick: 4 * Q,
-    value: 0,
-  });
-  assert.deepEqual(verbose.curves[0].planned.points[0], {
-    localBlick: 0,
-    absoluteBlick: 4 * Q,
-    value: 2,
-  });
+  // 唯一形状（§10.6 规则 14）：before/planned 返回计数与统计，不内联逐点数组
+  // ——逐点明细是唯一会随曲线长度无界增长的部分，按规则 10 只走 Artifact。
+  assert.equal(planned.curves[0].before.pointCount, 3);
+  assert.equal(planned.curves[0].planned.pointCount, 1);
+  assert.equal(planned.curves[0].before.points, undefined);
+  assert.equal(planned.curves[0].planned.points, undefined);
+  assert.ok(planned.curves[0].before.stats);
+  assert.ok(planned.curves[0].planned.stats);
 
   const duplicate = fourCurveRequest();
   duplicate.curves[1].parameter = "LOUDNESS";
@@ -1267,7 +1268,6 @@ test("range context resolves note anchors and musical positions in batch dry-run
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
     action: "dry_run",
-    responseMode: "standard",
     curves: [
       {
         parameter: "loudness",
@@ -1348,7 +1348,6 @@ test("semantic ranges support snapshot boundaries and adjacent-note gap anchors"
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
     action: "dry_run",
-    responseMode: "standard",
     curves: [
       {
         parameter: "loudness",

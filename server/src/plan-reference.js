@@ -4,14 +4,8 @@ import { canonicalClone } from "./canonical-json.js";
 
 const EXECUTION_OPTIONS_BY_TOOL = Object.freeze({
   sv_patch_notes: new Set(["atomic", "waitFor", "timeoutMs", "pollIntervalMs"]),
-  sv_patch_parameter_curves: new Set(["atomic", "responseMode", "undoLabel"]),
-  sv_patch_pitch_controls: new Set([
-    "atomic",
-    "responseMode",
-    "waitFor",
-    "timeoutMs",
-    "pollIntervalMs",
-  ]),
+  sv_patch_parameter_curves: new Set(["atomic", "undoLabel"]),
+  sv_patch_pitch_controls: new Set(["atomic", "waitFor", "timeoutMs", "pollIntervalMs"]),
   sv_restructure_notes: new Set(["atomic", "waitFor", "timeoutMs", "pollIntervalMs"]),
 });
 

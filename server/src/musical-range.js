@@ -615,7 +615,6 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
   stored.context.snapshotToken = snapshotToken;
   stored.snapshotToken = snapshotToken;
   stored.warnings = warnings;
-  stored.responseMode = input.responseMode;
   stored.rangePages = buildRangePages(captured.data, input.budgets, stored);
 
   // Phase 2：大 detail 封存为 artifact，响应中携带 artifactRef。
@@ -646,9 +645,8 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
     }
   }
 
-  if (input.responseMode === "compact") {
-    return { initialPage: compactRangePage(captured.data, stored) };
-  }
+  // 唯一形状：预算驱动的分页 + artifactRef（§10.6 规则 10/14）。以前的 compact 变体
+  // 是同一份数据的第二种契约，调用方必须先选模式才知道自己能读到什么。
   return { initialPage: stored.rangePages[0] };
 }
 
@@ -743,56 +741,6 @@ function formatStoredRangePage(stored, page, { changedSinceToken = false, timing
     ...(stored.artifactRef ? { artifactRef: stored.artifactRef } : {}),
     warnings: stored.warnings ?? [],
     ...(timings ? { timings } : {}),
-  };
-}
-
-function compactRangePage(data, stored) {
-  const automation = data.automation ?? [];
-  const computedPitch = data.computedPitch ?? [];
-  const pitchControls = data.pitchControls ?? [];
-  return {
-    data: {
-      ...rangeBaseData(data),
-      summaries: {
-        notes: { count: data.notes?.length ?? 0 },
-        attributes: { count: data.attributes?.length ?? 0 },
-        automation: {
-          curves: automation.length,
-          points: automation.reduce((sum, curve) => sum + curve.points.length, 0),
-          parameters: [...new Set(automation.map((curve) => curve.resolvedParameter))],
-        },
-        computedPitch: {
-          groups: computedPitch.length,
-          frames: computedPitch.reduce((sum, item) => sum + item.values.length, 0),
-          observedFrames: computedPitch.reduce(
-            (sum, item) => sum + item.evidence.observedFrames,
-            0
-          ),
-        },
-        pitchControls: {
-          count: pitchControls.length,
-          points: pitchControls.reduce(
-            (sum, item) => sum + (Array.isArray(item.points) ? item.points.length : 0),
-            0
-          ),
-          curves: pitchControls.filter((item) => item.kind === "curve").length,
-          svcopilotOwned: pitchControls.filter((item) => item.ownership?.owner === "svcopilot").length,
-        },
-      },
-      snapshotComplete: true,
-    },
-    page: {
-      complete: true,
-      nextCursor: null,
-      detailCursor: stored.storeCursor ?? null,
-      returned: {
-        notes: 0,
-        attributes: 0,
-        automationPoints: 0,
-        computedPitchFrames: 0,
-        pitchControls: 0,
-      },
-    },
   };
 }
 
@@ -1181,10 +1129,6 @@ function normalizeRequest(request) {
   if (request.sinceToken !== undefined && typeof request.sinceToken !== "string") {
     throw codedError("INVALID_ARGUMENTS", "sinceToken must be a string");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   const automationParameters = normalizeStringList(
     request.automationParameters,
     DEFAULT_AUTOMATION_PARAMETERS,
@@ -1200,7 +1144,6 @@ function normalizeRequest(request) {
     include,
     unsupportedIncludes,
     sinceToken: request.sinceToken,
-    responseMode,
     automationParameters,
     computedPitchSampling,
     budgets,
@@ -1217,7 +1160,6 @@ function validateRangeRequestShape(request) {
       "automationParameters",
       "computedPitchSampling",
       "budgets",
-      "responseMode",
       "sinceToken",
       "cursor",
     ],

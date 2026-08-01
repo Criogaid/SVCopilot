@@ -966,7 +966,6 @@ function finish(tx, timer, input) {
     effects: tx.effects,
     atomicity: input.atomic ? "verified_compensation" : "none",
     indexBase: 0,
-    responseMode: input.responseMode,
     target: formatTarget(tx.target, input),
     changes: tx.changes,
     operations: formatOperations(tx, input),
@@ -1041,10 +1040,10 @@ function formatOperations(tx, input) {
       if (plan.createdControlId) output.controlId = plan.createdControlId;
       if (Number.isSafeInteger(plan.hostIndex)) output.hostIndex = plan.hostIndex;
     }
-    if (input.responseMode !== "compact") {
-      if (plan.op === "update" && plan.newDefinition) output.planned = publicDefinition(plan.newDefinition);
-      if (plan.op === "add") output.planned = publicDefinition(plan.control);
-    }
+    // 单一形状（§10.6 规则 14）：planned 恒定返回。它是 dry-run 唯一的可审内容，
+    // 由调用方选档会让"我看到的就是将要写入的"变成一句要先猜对参数才成立的话。
+    if (plan.op === "update" && plan.newDefinition) output.planned = publicDefinition(plan.newDefinition);
+    if (plan.op === "add") output.planned = publicDefinition(plan.control);
     if (plan.noop) output.noChange = true;
     return output;
   });
@@ -1075,9 +1074,6 @@ function formatValidationFailure(request, error, { elapsedMs }) {
     effects: "none",
     atomicity: request?.atomic === false ? "none" : "verified_compensation",
     indexBase: 0,
-    responseMode: ["compact", "standard", "verbose"].includes(request?.responseMode)
-      ? request.responseMode
-      : "standard",
     target: isRecord(request?.target)
       ? {
           ...(typeof request.target.expectedGroupUuid === "string"
@@ -1164,10 +1160,6 @@ function normalizeRequest(request) {
       "atomic:false is not supported in this version; every patch is one verified-compensation transaction"
     );
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   const waitFor = request.waitFor ?? "none";
   if (!["none", "computedPitch"].includes(waitFor)) {
     throw codedError("INVALID_ARGUMENTS", "waitFor must be none or computedPitch");
@@ -1179,7 +1171,6 @@ function normalizeRequest(request) {
     operations: request.operations.map((operation, index) => normalizeOperation(operation, index)),
     atomic: true,
     dryRun: dryRunFromAction(request.action),
-    responseMode,
     waitFor,
     timeoutMs: clampInteger(request.timeoutMs, 0, 30_000, 10_000),
     pollIntervalMs: clampInteger(request.pollIntervalMs, 20, 2_000, 100),

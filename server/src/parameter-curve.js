@@ -1680,9 +1680,6 @@ function formatBatchValidationFailure(request, error, { elapsedMs }) {
     effects: "none",
     atomicity: request?.atomic === false ? "none" : "verified_compensation",
     indexBase: 0,
-    responseMode: ["compact", "standard", "verbose"].includes(request?.responseMode)
-      ? request.responseMode
-      : "standard",
     target,
     curves: rawCurves.map((curve, index) => {
       const requestedParameter =
@@ -1726,13 +1723,7 @@ function formatBatchValidationFailure(request, error, { elapsedMs }) {
 function formatBatchTransaction(transaction, input) {
   const plansByIndex = new Map(transaction.plans.map((plan) => [plan.index, plan]));
   const curves = input.curves.map((curve, index) =>
-    formatBatchCurve(
-      plansByIndex.get(index) ?? null,
-      curve,
-      index,
-      transaction,
-      input.responseMode
-    )
+    formatBatchCurve(plansByIndex.get(index) ?? null, curve, index, transaction)
   );
   const verifiedPlans = transaction.plans.filter((plan) => plan.verification?.attempted);
   const noChange = transaction.status === "no_change";
@@ -1748,7 +1739,6 @@ function formatBatchTransaction(transaction, input) {
     effects: transaction.effects,
     atomicity: transaction.atomicity,
     indexBase: 0,
-    responseMode: input.responseMode,
     target: {
       ...(input.target.contextId ? { contextId: input.target.contextId } : {}),
       ...(Number.isSafeInteger(input.target.occurrence)
@@ -1794,7 +1784,7 @@ function formatBatchTransaction(transaction, input) {
   };
 }
 
-function formatBatchCurve(plan, input, index, transaction, responseMode) {
+function formatBatchCurve(plan, input, index, transaction) {
   if (!plan) {
     const isFailure = transaction.failure?.curveIndex === index;
     return {
@@ -1819,27 +1809,19 @@ function formatBatchCurve(plan, input, index, transaction, responseMode) {
     valueTolerance: plan.verification?.evidence?.valueTolerance ?? curveValueTolerance(plan.definition),
     timings: plan.timings,
   };
-  if (responseMode !== "compact") {
-    output.definition = plan.definition;
-    output.interpolationMethod = plan.interpolationMethod;
-    output.range = formatRange(plan);
-    output.before = { pointCount: plan.journal.length, stats: pointStats(plan.journal) };
-    output.planned = { pointCount: plan.planned.length, stats: pointStats(plan.planned) };
-    output.after = plan.observed
-      ? { pointCount: plan.observed.length, stats: pointStats(plan.observed) }
-      : null;
-    output.verification = plan.verification ?? { attempted: false, passed: null };
-    Object.assign(output, formatResolvedInputPositions(plan));
-    if (plan.rollback) output.rollback = plan.rollback;
-  }
-  if (responseMode === "verbose") {
-    const offset = transaction.target.groupTimeOffsetBlick;
-    output.before.points = inlinePoints(plan.journal, offset, Number.POSITIVE_INFINITY);
-    output.planned.points = inlinePoints(plan.planned, offset, Number.POSITIVE_INFINITY);
-    if (plan.observed) {
-      output.after.points = inlinePoints(plan.observed, offset, Number.POSITIVE_INFINITY);
-    }
-  }
+  // 单一形状（§10.6 规则 14）：证据字段恒定返回，不再由调用方选择档位。
+  // 逐点明细不内联——它是唯一会随曲线长度无界增长的部分，按规则 10 归 Artifact。
+  output.definition = plan.definition;
+  output.interpolationMethod = plan.interpolationMethod;
+  output.range = formatRange(plan);
+  output.before = { pointCount: plan.journal.length, stats: pointStats(plan.journal) };
+  output.planned = { pointCount: plan.planned.length, stats: pointStats(plan.planned) };
+  output.after = plan.observed
+    ? { pointCount: plan.observed.length, stats: pointStats(plan.observed) }
+    : null;
+  output.verification = plan.verification ?? { attempted: false, passed: null };
+  Object.assign(output, formatResolvedInputPositions(plan));
+  if (plan.rollback) output.rollback = plan.rollback;
   return output;
 }
 
@@ -1945,13 +1927,6 @@ function normalizeBatchPatchRequest(request) {
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError(
-      "INVALID_ARGUMENTS",
-      "responseMode must be compact, standard, or verbose"
-    );
-  }
   if (
     request.undoLabel !== undefined &&
     (typeof request.undoLabel !== "string" || request.undoLabel.length > 200)
@@ -1963,7 +1938,6 @@ function normalizeBatchPatchRequest(request) {
     curves,
     dryRun: dryRunFromAction(request.action),
     atomic: request.atomic !== false,
-    responseMode,
     undoLabel: request.undoLabel ?? null,
   };
 }

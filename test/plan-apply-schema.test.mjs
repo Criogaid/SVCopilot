@@ -564,7 +564,7 @@ test("lyric and harmony planners default to complete plan references without inl
   }
 });
 
-test("compact lyric plans externalize alignment detail and capsule only touched notes", async () => {
+test("oversized lyric alignment lists are capped and backed by a detail artifact", async () => {
   const sessionId = "sess_compact_lyrics";
   const artifactStore = new ArtifactStore({ now: () => 2000 });
   const store = new SnapshotStore({ now: () => 1000 });
@@ -585,15 +585,18 @@ test("compact lyric plans externalize alignment detail and capsule only touched 
     contextId: context.stored.contextId,
     lyrics: "我你他她天地人",
     language: "mandarin",
-    responseMode: "compact",
   });
 
+  // 单一形状（§10.6 规则 14）：计数与首末项恒定返回，逐项列表定量截断，
+  // 完整明细走 detailRef。调用方不再需要先选一档才知道能读到什么。
   assert.equal(plan.alignment.unfilledCount, 366);
-  assert.equal(plan.alignment.unfilledNotes, undefined);
+  assert.equal(plan.alignment.unfilledNotes.length, 50);
+  assert.equal(plan.alignment.unfilledTruncated, true);
   assert.equal(plan.alignment.firstUnfilledNote.note, 7);
   assert.equal(plan.alignment.lastUnfilledNote.note, 372);
   assert.ok(plan.alignment.detailRef);
-  assert.ok(JSON.stringify(plan).length < 6_000);
+  // 截断后的信封仍远小于 16 KiB compact 预算，且 366 项完整明细可从 artifact 取回。
+  assert.ok(Buffer.byteLength(JSON.stringify(plan), "utf8") < 16 * 1024);
 
   const planArtifact = artifactStore.resolve({
     artifactId: plan.apply.arguments.planRef,

@@ -431,11 +431,11 @@ function buildValidateResponse(loaded, input, issues, coverage, warnings, timing
     counts[issue.severity] += 1;
     byKind[issue.kind] = (byKind[issue.kind] ?? 0) + 1;
   }
-  const cap = input.responseMode === "verbose" ? issues.length : MAX_ISSUE_ITEMS;
+  const cap = MAX_ISSUE_ITEMS;
   if (issues.length > cap) {
     warnings.push({
       code: "ISSUES_TRUNCATED",
-      message: `issues reports the first ${cap} of ${issues.length} findings (sorted by severity, then start time); use responseMode:"verbose" for the full list.`,
+      message: `issues reports the first ${cap} of ${issues.length} findings (sorted by severity, then start time); read the full list from the sealed detail artifact.`,
     });
   }
   return {
@@ -456,7 +456,8 @@ function buildValidateResponse(loaded, input, issues, coverage, warnings, timing
       byKind,
       clean: issues.length === 0,
     },
-    ...(input.responseMode === "compact" ? {} : { issues: issues.slice(0, cap), issuesTruncated: issues.length > cap }),
+    issues: issues.slice(0, cap),
+    issuesTruncated: issues.length > cap,
     coverage,
     provenance: PROVENANCE,
     warnings,
@@ -468,7 +469,7 @@ function buildValidateResponse(loaded, input, issues, coverage, warnings, timing
 
 function normalizeValidateRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(request, ["contextId", "occurrence", "checks", "responseMode"], "request");
+  assertKnownKeys(request, ["contextId", "occurrence", "checks"], "request");
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
@@ -497,15 +498,10 @@ function normalizeValidateRequest(request) {
     }
     checks = new Set(request.checks);
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   return {
     contextId: request.contextId,
     occurrence: request.occurrence,
     checks,
-    responseMode,
   };
 }
 

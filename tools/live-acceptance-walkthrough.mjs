@@ -224,7 +224,6 @@ async function runWalkthrough(client) {
       { type: "hairpin", from: 0, to: 8, peak: 0.72, amounts: { loudness: 1.2, tension: 0.08 } },
       { type: "scoop", targets: [[0, 22], [4, 24]] },
     ],
-    responseMode: "compact",
   };
   const expressionStartedAt = process.hrtime.bigint();
   const expressionPlan = structured(await facadeCall(client, "sv_plan_expression", expressionArgs));
@@ -285,21 +284,18 @@ async function runWalkthrough(client) {
     await facadeCall(client, "sv_align_lyrics", {
       contextId: captured.result.contextId,
       lyrics: "\u3089",
-      responseMode: "compact",
     })
   );
   planners.plan_pitch_gesture = structured(
     await facadeCall(client, "sv_plan_pitch_gesture", {
       contextId: captured.result.contextId,
       gestures: [{ type: "attack", note: 0, depthSemitone: 0.3 }],
-      responseMode: "compact",
     })
   );
   planners.quantize_notes = structured(
     await facadeCall(client, "sv_quantize_notes", {
       contextId: captured.result.contextId,
       grid: { division: "1/8" },
-      responseMode: "compact",
     })
   );
   // harmony 需要第二个人声 occurrence 作为目标。fixture 没有时如实记 skipped，
@@ -319,7 +315,6 @@ async function runWalkthrough(client) {
           sourceOccurrence: both.group.occurrence,
           targetOccurrence: target.occurrence,
           harmony: { interval: "third_below" },
-          responseMode: "compact",
         })
       );
     }
@@ -439,13 +434,11 @@ async function runWalkthrough(client) {
     await facadeCall(client, "sv_analyze_phrase", {
       contextId: captured.result.contextId,
       include: ["key", "phrases"],
-      responseMode: "compact",
     })
   );
   readOnly.analyze_vocal_context = structured(
     await facadeCall(client, "sv_analyze_vocal_context", {
       contextId: captured.result.contextId,
-      responseMode: "compact",
     })
   );
   readOnly.wait_processing = structured(
@@ -520,7 +513,6 @@ async function runWalkthrough(client) {
     await facadeCall(client, "sv_analyze_phrase", {
       contextId: captured.result.contextId,
       include: ["key"],
-      responseMode: "compact",
     })
   );
   step(14, "a compact workflow returns detail pointers instead of detail", {
@@ -702,7 +694,6 @@ async function captureRange(client, fixture, { includeSecondGroup = false } = {}
         trackIndices,
       },
       include: ["notes"],
-      responseMode: "compact",
     })
   );
   const allGroups = (result.data?.tracks ?? []).flatMap((track) => track.groups ?? []);

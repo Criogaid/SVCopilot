@@ -630,11 +630,11 @@ function buildHarmonyResponse(
     outOfScale: planned.items.filter((item) => item.outOfScale).length,
     octaveShifted: planned.items.filter((item) => item.octaveShifted).length,
   };
-  const cap = input.responseMode === "verbose" ? planned.items.length : MAX_LIST_ITEMS;
-  if (input.responseMode !== "compact" && planned.items.length > cap) {
+  const cap = MAX_LIST_ITEMS;
+  if (planned.items.length > cap) {
     warnings.push({
       code: "PER_NOTE_TRUNCATED",
-      message: `perNote reports the first ${cap} of ${planned.items.length} source notes; use responseMode:"verbose" for the full list. Summary counts always cover all notes.`,
+      message: `perNote reports the first ${cap} of ${planned.items.length} source notes; read the sealed plan artifact for the full list. Summary counts always cover all notes.`,
     });
   }
   const checklist = [
@@ -736,29 +736,25 @@ function buildHarmonyResponse(
       ...(input.register ? { register: input.register } : {}),
     },
     summary: counts,
-    ...(input.responseMode === "compact"
-      ? {}
-      : {
-          perNote: planned.items.slice(0, cap).map((item) => ({
-            sourceNoteId: item.sourceNoteId,
-            sourceLyrics: item.sourceLyrics,
-            sourcePitch: item.sourcePitch,
-            status: item.status,
-            ...(item.harmonyPitch !== undefined ? { harmonyPitch: item.harmonyPitch } : {}),
-            ...(item.harmonySoundingPitch !== undefined
-              ? { harmonySoundingPitch: item.harmonySoundingPitch }
-              : {}),
-            ...(item.harmonyLyrics !== undefined ? { harmonyLyrics: item.harmonyLyrics } : {}),
-            ...(item.localOnsetBlick !== undefined
-              ? { targetLocalOnsetBlick: item.localOnsetBlick }
-              : {}),
-            ...(item.skipReason ? { skipReason: item.skipReason } : {}),
-            ...(item.needsReview ? { needsReview: true } : {}),
-            ...(item.octaveShifted ? { octaveShifted: true } : {}),
-          })),
-          perNoteTruncated: planned.items.length > cap,
-          conflicts: planned.conflicts.slice(0, cap),
-        }),
+    perNote: planned.items.slice(0, cap).map((item) => ({
+      sourceNoteId: item.sourceNoteId,
+      sourceLyrics: item.sourceLyrics,
+      sourcePitch: item.sourcePitch,
+      status: item.status,
+      ...(item.harmonyPitch !== undefined ? { harmonyPitch: item.harmonyPitch } : {}),
+      ...(item.harmonySoundingPitch !== undefined
+        ? { harmonySoundingPitch: item.harmonySoundingPitch }
+        : {}),
+      ...(item.harmonyLyrics !== undefined ? { harmonyLyrics: item.harmonyLyrics } : {}),
+      ...(item.localOnsetBlick !== undefined
+        ? { targetLocalOnsetBlick: item.localOnsetBlick }
+        : {}),
+      ...(item.skipReason ? { skipReason: item.skipReason } : {}),
+      ...(item.needsReview ? { needsReview: true } : {}),
+      ...(item.octaveShifted ? { octaveShifted: true } : {}),
+    })),
+    perNoteTruncated: planned.items.length > cap,
+    conflicts: planned.conflicts.slice(0, cap),
     apply,
     ...(!planRef ? { restructureRequest } : {}),
     ...(continuation ? { continuation } : {}),
@@ -787,7 +783,6 @@ function normalizeHarmonyRequest(request) {
       "register",
       "lyricsMode",
       "notes",
-      "responseMode",
     ],
     "request"
   );
@@ -873,10 +868,6 @@ function normalizeHarmonyRequest(request) {
       throw codedError("INVALID_ARGUMENTS", "notes must be 1-2000 unique non-negative indexes");
     }
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   return {
     contextId: request.contextId,
     sourceOccurrence: request.sourceOccurrence,
@@ -886,7 +877,6 @@ function normalizeHarmonyRequest(request) {
     register,
     lyricsMode,
     notes: request.notes,
-    responseMode,
   };
 }
 

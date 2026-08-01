@@ -1,9 +1,10 @@
 import { canonicalHashHex } from "./canonical-json.js";
-import { planReference } from "./artifact-store.js";
+import { artifactReference, planReference } from "./artifact-store.js";
 import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
 
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
+import { COMPACT_MAX_BYTES } from "./response-budget.js";
 import { ServiceTiming } from "./service-timing.js";
 import {
   analyzeVocalEventSequence,
@@ -1246,7 +1247,6 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     clampedCount: operation.clampedCount,
     fromGestures: operation.fromGestures,
     applyCallIndex: operation.applyCallIndex,
-    ...(input.responseMode === "verbose" ? { points: operation.points } : {}),
   }));
   const hasOperations = applyRequests.length > 0;
   const checklist = hasOperations
@@ -1328,7 +1328,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     }
   }
 
-  return {
+  return applyPlanByteBudget({
     ok: true,
     status: hasOperations ? "planned" : "no_change",
     effects: "none",
@@ -1352,9 +1352,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
       expectedUserUndoSteps: applyRequests.length,
       parameters: [...new Set(compiled.operations.map((operation) => operation.parameter))],
     },
-    ...(input.responseMode === "compact"
-      ? {}
-      : { gestures: publicGestures, operations: operationsMeta }),
+    gestures: publicGestures,
+    operations: operationsMeta,
     ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
     apply: applyEnvelope,
     ...(planArtifactRefs.length > 0 && planArtifactRefs.length === applyRequests.length
@@ -1370,7 +1369,57 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     provenance: PROVENANCE,
     warnings,
     timings,
-  };
+  }, warnings, {
+    artifactStore,
+    sessionId,
+    sourceEpoch: loaded.stored.epoch,
+    planId,
+    gestures: publicGestures,
+    operations: operationsMeta,
+  });
+}
+
+// gestures/operations 是唯一随计划规模无界增长的两段（373 音符实测约 12 KiB）。
+// §4.4 规则 8/10：compact success envelope ≤ 16 KiB，超预算的明细进 Artifact。
+//
+// 按项数截断在这里没有意义——体积主要来自每项的字段数而不是项数，任何"刚好合适"
+// 的项数上限都会在下一次字段增补后再次失效。因此按**实际字节**判定。
+//
+// Artifact 是**按需**封存的：装得下就内联，一个 artifact 都不占。无条件预封存会白白
+// 消耗 ArtifactStore 配额（并可能挤掉真正需要的 plan artifact），而绝大多数计划都装得下。
+function applyPlanByteBudget(response, warnings, detail) {
+  const size = Buffer.byteLength(JSON.stringify(response), "utf8");
+  if (size <= COMPACT_MAX_BYTES) return response;
+  const { artifactStore, sessionId, sourceEpoch, planId, gestures, operations } = detail;
+  if (!artifactStore || !sessionId) return response;
+  let detailRef = null;
+  try {
+    detailRef = artifactReference(
+      artifactStore.seal({
+        kind: "planner-detail",
+        schemaVersion: "1",
+        sessionId,
+        sourceEpoch,
+        payload: { planner: "sv_plan_expression", planId, gestures, operations },
+      })
+    );
+  } catch (error) {
+    warnings.push({
+      code: "ARTIFACT_SEAL_FAILED",
+      message: `Failed to seal expression plan detail artifact: ${error.message}`,
+    });
+  }
+  // 封存失败时不裁剪：那会把明细**删掉**而不是移走，调用方再也拿不到它。
+  // 宁可超预算也不能悄悄丢证据——超预算是可见的，丢证据不是。
+  if (!detailRef) return response;
+  const trimmed = { ...response, detailRef };
+  delete trimmed.gestures;
+  delete trimmed.operations;
+  warnings.push({
+    code: "RESPONSE_BUDGET_APPLIED",
+    message: `The full response was ${size} bytes, over the ${COMPACT_MAX_BYTES}-byte envelope budget; gestures and operations moved to detailRef. summary, apply, and review are complete.`,
+  });
+  return trimmed;
 }
 
 // ---------- 请求校验 ----------
@@ -1379,7 +1428,7 @@ function normalizePlanRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrence", "defaults", "gestures", "intent", "constraints", "sampling", "responseMode"],
+    ["contextId", "occurrence", "defaults", "gestures", "intent", "constraints", "sampling"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -1392,10 +1441,6 @@ function normalizePlanRequest(request) {
     (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
     throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer");
-  }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
   }
   // grouped gesture 的形状校验与展开由 expression-gestures 负责（§3.5）；这里只做
   // 数量上限，因为它是请求预算而不是身份语义。展开发生在 scope 解析之后。
@@ -1427,7 +1472,6 @@ function normalizePlanRequest(request) {
     constraints,
     sampling,
     intentDefaults: EXPRESSION_PLAN_DEFAULTS.intent,
-    responseMode,
   };
 }
 

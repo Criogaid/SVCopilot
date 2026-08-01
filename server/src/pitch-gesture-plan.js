@@ -718,7 +718,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   const operationsMeta = compiled.operations.map((operation) => ({
     gestureId: operation.gestureId,
     type: operation.type,
-    control: input.responseMode === "verbose" ? operation.control : {
+    control: {
       kind: "curve",
       anchorPositionBlick: operation.control.anchorPositionBlick,
       anchorPitchSemitone: operation.control.anchorPitchSemitone,
@@ -809,7 +809,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
       expectedUserUndoSteps: hasOperations ? 1 : 0,
       types: [...new Set(gestures.map((gesture) => gesture.type))],
     },
-    ...(input.responseMode === "compact" ? {} : { gestures: publicGestures, operations: operationsMeta }),
+    gestures: publicGestures,
+    operations: operationsMeta,
     apply: applyEnvelope,
     ...(planArtifactRef ? {} : { applyRequests }),
     review: {
@@ -837,7 +838,6 @@ function normalizePlanRequest(request) {
       "specialEventPolicy",
       "constraints",
       "sampling",
-      "responseMode",
     ],
     "request"
   );
@@ -856,10 +856,6 @@ function normalizePlanRequest(request) {
   if (request.gestures.length > MAX_GESTURES) {
     throw codedError("INVALID_ARGUMENTS", `gestures must contain at most ${MAX_GESTURES} items`);
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   const specialEventPolicy =
     request.specialEventPolicy ?? PITCH_GESTURE_DEFAULTS.specialEventPolicy;
   if (!["warn_and_skip", "include", "error"].includes(specialEventPolicy)) {
@@ -876,7 +872,6 @@ function normalizePlanRequest(request) {
     specialEventPolicy,
     constraints: normalizeConstraints(request.constraints),
     sampling: normalizeSampling(request.sampling),
-    responseMode,
   };
 }
 

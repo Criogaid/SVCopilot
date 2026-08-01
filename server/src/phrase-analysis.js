@@ -105,9 +105,9 @@ export class PhraseAnalysisService {
       // noteCount 保持既有含义：只数进入高层音乐推断的音符。
       noteCount: loaded.notes.length,
       breathCount: loaded.breathNotes.length,
-      excludedEvents: buildExcludedEvents(loaded, input.responseMode, warnings),
+      excludedEvents: buildExcludedEvents(loaded, warnings),
       ...analysis,
-      breathEvents: buildBreathEvents(loaded, input.responseMode, warnings),
+      breathEvents: buildBreathEvents(loaded, warnings),
       // 请求了和声语境时，把它的证据边界（尤其 evidenceScope:"melody_only"）并入 provenance。
       provenance: HARMONIC_INCLUDES.some((name) => input.include.has(name))
         ? { ...PROVENANCE, harmonicContext: HARMONIC_PROVENANCE }
@@ -211,16 +211,13 @@ function resolveAnalysisSource(store, input) {
 
 // 呼吸事件逐项返回：音高字段标 nominalPitch——宿主要求换气音符也有 pitch，
 // 但它不是可唱音高，绝不进入调性/音级/统计。三档响应与其他逐项列表共享同一预算。
-function buildBreathEvents(loaded, responseMode, warnings) {
-  if (responseMode === "compact") {
-    return { count: loaded.breathNotes.length };
-  }
+function buildBreathEvents(loaded, warnings) {
   const count = loaded.breathNotes.length;
-  const cap = responseMode === "verbose" ? count : MAX_LIST_ITEMS;
+  const cap = MAX_LIST_ITEMS;
   if (count > cap) {
     warnings.push({
       code: "BREATH_EVENTS_TRUNCATED",
-      message: `breathEvents.items reports the first ${cap} of ${count} breath events; use responseMode:"verbose" for the full list.`,
+      message: `breathEvents.items reports the first ${cap} of ${count} breath events; read the sealed detail artifact for the full list.`,
     });
   }
   return {
@@ -237,14 +234,13 @@ function buildBreathEvents(loaded, responseMode, warnings) {
   };
 }
 
-function buildExcludedEvents(loaded, responseMode, warnings) {
+function buildExcludedEvents(loaded, warnings) {
   const { count, byRole, items } = loaded.excludedEvents;
-  if (responseMode === "compact") return { count, byRole: { ...byRole } };
-  const cap = responseMode === "verbose" ? count : MAX_LIST_ITEMS;
+  const cap = MAX_LIST_ITEMS;
   if (count > cap) {
     warnings.push({
       code: "EXCLUDED_EVENTS_TRUNCATED",
-      message: `excludedEvents.items reports the first ${cap} of ${count} excluded events; use responseMode:"verbose" for the full list.`,
+      message: `excludedEvents.items reports the first ${cap} of ${count} excluded events; read the sealed detail artifact for the full list.`,
     });
   }
   return {
@@ -274,18 +270,17 @@ function runAnalysis(loaded, input, warnings) {
   }
   if (input.include.has("scaleDegrees")) {
     result.scaleDegrees = bestKey
-      ? scaleDegreesFor(loaded.notes, bestKey, input.responseMode, warnings)
+      ? scaleDegreesFor(loaded.notes, bestKey, warnings)
       : null;
   }
   if (input.include.has("phrases")) {
-    result.phrases = analyzePhrases(loaded, input.phraseGapQuarter, input.responseMode, warnings);
+    result.phrases = analyzePhrases(loaded, input.phraseGapQuarter, warnings);
   }
   if (input.include.has("statistics")) {
     result.statistics = analyzeStatistics(loaded);
   }
   // ---- P1-A：和声语境。单旋律无法确定真实和弦，各 section 自带 evidenceScope。----
   const harmonicOptions = {
-    responseMode: input.responseMode,
     phraseGapQuarter: input.phraseGapQuarter,
     harmonicWindow: input.harmonicWindow,
     ambiguityThreshold: input.ambiguityThreshold,
@@ -294,7 +289,7 @@ function runAnalysis(loaded, input, warnings) {
     suspensionMinQuarter: input.suspensionMinQuarter,
   };
   if (input.include.has("metricalRoles")) {
-    result.metricalRoles = analyzeMetricalRoles(loaded, input.responseMode, warnings);
+    result.metricalRoles = analyzeMetricalRoles(loaded, warnings);
   }
   // cadence 会引用和弦窗口作为佐证，因此先算 chordCandidates。
   let chordSection = null;
@@ -361,7 +356,7 @@ export function analyzeKey(notes, warnings) {
   };
 }
 
-function scaleDegreesFor(notes, key, responseMode, warnings) {
+function scaleDegreesFor(notes, key, warnings) {
   const scale = key.mode === "major" ? MAJOR_SCALE : NATURAL_MINOR_SCALE;
   const degreeByOffset = new Map(scale.map((offset, index) => [offset, index + 1]));
   const items = notes.map((note) => {
@@ -393,19 +388,11 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
       degreeHistogram,
     },
   };
-  if (responseMode === "compact") {
-    // compact：不逐音符展开，只给汇总与（截断的）非调内音符 id。
-    return {
-      ...base,
-      nonDiatonicNotes: nonDiatonicNotes.slice(0, MAX_LIST_ITEMS),
-      nonDiatonicTruncated: nonDiatonicNotes.length > MAX_LIST_ITEMS,
-    };
-  }
-  const cap = responseMode === "verbose" ? items.length : MAX_LIST_ITEMS;
+  const cap = MAX_LIST_ITEMS;
   if (items.length > cap) {
     warnings.push({
       code: "SCALE_DEGREES_TRUNCATED",
-      message: `scaleDegrees.items reports the first ${cap} of ${items.length} notes; use responseMode:"verbose" for the full per-note list or "compact" for the summary only.`,
+      message: `scaleDegrees.items reports the first ${cap} of ${items.length} notes; read the sealed detail artifact for the full per-note list.`,
     });
   }
   return {
@@ -416,7 +403,7 @@ function scaleDegreesFor(notes, key, responseMode, warnings) {
   };
 }
 
-function analyzePhrases(loaded, phraseGapQuarter, responseMode, warnings) {
+function analyzePhrases(loaded, phraseGapQuarter, warnings) {
   const gapBlick = Math.max(1, Math.round(phraseGapQuarter * loaded.quarterBlick));
   const phrases = segmentPhrases(loaded.notes, gapBlick);
   const items = phrases.map((phrase, index) => {
@@ -449,15 +436,11 @@ function analyzePhrases(loaded, phraseGapQuarter, responseMode, warnings) {
     noteCount: { min: Math.min(...noteCounts), max: Math.max(...noteCounts) },
     durationQuarter: { min: Math.min(...durations), max: Math.max(...durations) },
   };
-  if (responseMode === "compact") {
-    // compact 契约：只给汇总，不展开逐乐句列表。
-    return { phraseGapQuarter, count: items.length, summary };
-  }
-  const cap = responseMode === "verbose" ? items.length : MAX_LIST_ITEMS;
+  const cap = MAX_LIST_ITEMS;
   if (items.length > cap) {
     warnings.push({
       code: "PHRASES_TRUNCATED",
-      message: `phrases.items reports the first ${cap} of ${items.length} phrases; use responseMode:"verbose" for the full list.`,
+      message: `phrases.items reports the first ${cap} of ${items.length} phrases; read the sealed detail artifact for the full list.`,
     });
   }
   return {
@@ -555,7 +538,6 @@ function normalizeAnalyzeRequest(request) {
       "occurrence",
       "include",
       "phraseGapQuarter",
-      "responseMode",
       "harmonicWindow",
       "ambiguityThreshold",
       "maxChordCandidates",
@@ -596,10 +578,6 @@ function normalizeAnalyzeRequest(request) {
   if (!Number.isFinite(phraseGapQuarter) || phraseGapQuarter < 0.25 || phraseGapQuarter > 8) {
     throw codedError("INVALID_ARGUMENTS", "phraseGapQuarter must be a number between 0.25 and 8");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   const harmonicWindow = request.harmonicWindow ?? "bar";
   if (!["bar", "half_bar"].includes(harmonicWindow)) {
     throw codedError("INVALID_ARGUMENTS", 'harmonicWindow must be "bar" or "half_bar"');
@@ -637,7 +615,6 @@ function normalizeAnalyzeRequest(request) {
     occurrence: request.occurrence,
     include,
     phraseGapQuarter,
-    responseMode,
     harmonicWindow,
     ambiguityThreshold,
     maxChordCandidates,

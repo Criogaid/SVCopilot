@@ -415,22 +415,22 @@ test("half_bar windows subdivide the harmonic rhythm", async () => {
   );
 });
 
-test("compact mode returns harmonic summaries without per-item lists", async () => {
+test("harmonic sections carry both their summary and their items", async () => {
   const store = createStore();
   const { stored } = createContext(store, CLEAR_CADENCE);
   const result = await analyzer(store).analyze({
     contextId: stored.contextId,
     include: ["key", ...HARMONIC_INCLUDES],
-    responseMode: "compact",
   });
 
-  assert.equal(result.metricalRoles.items, undefined);
-  assert.equal(result.chordCandidates.items, undefined);
-  assert.equal(result.tensionResolution.items, undefined);
-  assert.ok(result.metricalRoles.summary);
-  assert.ok(result.chordCandidates.summary);
-  assert.ok(result.tensionResolution.summary);
-  // 终止式在 compact 下仍逐句返回：它不依赖 phrases section 的 items。
+  // 单一响应形状（§4.4 规则 14）：summary 与 items 一起返回，逐项按统一预算截断。
+  for (const section of [result.metricalRoles, result.chordCandidates, result.tensionResolution]) {
+    assert.ok(section.summary);
+    assert.ok(Array.isArray(section.items));
+  }
+  // 单旋律无法确定真实伴奏，因此每个和声 section 都必须自带 evidenceScope。
+  assert.equal(result.chordCandidates.summary.evidenceScope, "melody_only");
+  assert.equal(result.tensionResolution.evidenceScope, "melody_only");
   assert.equal(result.cadence.status, "succeeded");
   assert.ok(result.cadence.items.length >= 1);
 });

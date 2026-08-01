@@ -8,6 +8,11 @@
 // （`sv_describe` 既是工具又几乎是 operation 名），不带前缀会互相吞掉。
 
 import { buildOperationCatalog } from "./operation-catalog.js";
+import {
+  COMPACT_MAX_BYTES,
+  ERROR_MAX_BYTES,
+  REQUEST_MAX_BYTES,
+} from "./response-budget.js";
 
 // 计划 §2.3 的策略分类。requestShape/responseShape 只能取这些值。
 export const POLICY_SHAPES = Object.freeze([
@@ -21,11 +26,10 @@ export const POLICY_SHAPES = Object.freeze([
   "editor-state",
 ]);
 
-// 响应预算（§4.4 规则 8/9）。error 预算比 success 小：错误绝不该塞进大型证据。
-export const COMPACT_MAX_BYTES = 16 * 1024;
-export const ERROR_MAX_BYTES = 8 * 1024;
-// 请求预算：facade 信封 + 业务 arguments。grouped planner 请求是最大的一类。
-export const REQUEST_MAX_BYTES = 16 * 1024;
+// 响应/请求预算从 response-budget.js 单一来源导入并转出。
+// 不在这里重新声明数字：业务模块（超预算时移明细进 Artifact）必须用同一个值，
+// 而门禁禁止它们导入本注册表，因此常量的家在 response-budget.js。
+export { COMPACT_MAX_BYTES, ERROR_MAX_BYTES, REQUEST_MAX_BYTES } from "./response-budget.js";
 
 /**
  * 合法回显白名单（§10.2.2）。§4.4 规则 7 禁止回显调用方刚发过的输入，但少数字段是
@@ -295,6 +299,10 @@ export const BANNED_REQUEST_FIELDS = Object.freeze([
   // 内联路径绕过 Plan Artifact，因此也绕过 plan-ledger 的防重放——同一份 mode:"add"
   // 曲线可以被提交两次而 preflight 全部通过。规划器现在一律交接 planRef。
   "usePlanRef",
+  // responseMode 让同一个请求有三种返回形状，因此模型必须先猜一档再决定能读到什么，
+  // 猜错就得重发。响应形状现在由契约固定：摘要 + 定量截断的列表，完整明细一律走
+  // Artifact（§10.6 规则 10/14）。
+  "responseMode",
   // dryRun 是**布尔**，因此有默认值，而默认值在写操作上指向错误的方向：省略它就
   // 等于同意写入。`action` 是无默认的 enum，所以「忘了填」在 schema 层就被挡住，
   // 不会变成一次真实写入。两者不能并存——那会让同一个请求有两处说法。
@@ -306,6 +314,5 @@ export const BANNED_REQUEST_FIELDS = Object.freeze([
  * 与 root-envelope 的 LEGACY 表同理：登记让「还欠多少」可数，且门禁会拒绝过期条目。
  */
 export const LEGACY_REQUEST_FIELDS = Object.freeze({
-  responseMode: "§3.6：响应形状由契约规定，不由调用方选择（B2）",
   cursor: "§4.1：offset 分页降级为待数据评估（C2）",
 });

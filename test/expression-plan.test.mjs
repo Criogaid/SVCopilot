@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ArtifactStore } from "../server/src/artifact-store.js";
 import {
   EXPRESSION_PLAN_DEFAULTS,
   ExpressionPlanService,
@@ -759,27 +760,97 @@ test("plan validates request shape before touching the store", async () => {
       contextId: "ctx_x",
       gestures: [{ type: "vibrato", notes: [0], surface: "vibratoEnv", depthCents: 20 }],
     },
-    { contextId: "ctx_x", intent: { genre: "jpop" }, responseMode: "loud" },
+    // responseMode 已从 surface 删除：现在它是未知字段，必须被拒而不是被忽略。
+    { contextId: "ctx_x", intent: { genre: "jpop" }, responseMode: "compact" },
   ]) {
     await assert.rejects(service.plan(request), (error) => error.code === "INVALID_ARGUMENTS");
   }
 });
 
-test("compact responses keep summary, applyRequests, and review only", async () => {
+test("a small plan keeps its gestures and operations inline", async () => {
+  // 唯一响应形状（§4.4 规则 14）：没有 compact 档位了。装得下就内联——只有超出
+  // 16 KiB 信封预算且已封存 detailRef 时，明细才会被移走（见下一条用例）。
   const store = createStore();
   const { stored } = createStoredContext(store, {
     notes: [{ onsetBlick: 0, durationBlick: 2 * Q, pitch: 60 }],
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
-    responseMode: "compact",
     gestures: [{ type: "scoop", targets: [[0, 30]] }],
   });
-  assert.equal(result.gestures, undefined);
-  assert.equal(result.operations, undefined);
+  assert.ok(result.gestures.length > 0);
+  assert.ok(result.operations.length > 0);
   assert.ok(result.summary);
   assert.ok(result.applyRequests[0].arguments.curves[0].points.length > 0);
   assert.ok(result.review.checklist.length > 0);
+  assert.ok(!result.warnings.some((warning) => warning.code === "RESPONSE_BUDGET_APPLIED"));
+});
+
+test("an over-budget plan moves gestures and operations to detailRef, never drops them", async () => {
+  // §4.4 规则 8/10：compact success envelope ≤ 16 KiB，超预算的明细进 Artifact。
+  // 用 §15 的真实规模（373 音符 + §3.4 的完整 gesture 集）——体积问题只在真实规模下出现。
+  const count = 373;
+  const notes = Array.from({ length: count }, (_, index) => ({
+    onsetBlick: index * 2 * Q,
+    durationBlick: 2 * Q,
+    pitch: 60 + (index % 12),
+  }));
+  const request = (contextId) => ({
+    contextId,
+    defaults: {
+      vibrato: {
+        surface: "pitchDelta",
+        rateHz: 5.2,
+        onsetDelayQuarter: 0.22,
+        rampQuarter: 0.18,
+        fadeOutQuarter: 0.14,
+      },
+      scoop: { lengthQuarter: 0.16, shapePower: 2 },
+      fall: { lengthQuarter: 0.22, shapePower: 2 },
+    },
+    gestures: [
+      {
+        type: "hairpin",
+        from: 0,
+        to: 62,
+        peak: 0.72,
+        amounts: { loudness: 1.2, tension: 0.08, breathiness: 0.12 },
+      },
+      { type: "vibrato", notes: [62, 121, 178, 237, 296], depthCents: 15 },
+      { type: "vibrato", notes: [314, 336], depthCents: 18 },
+      { type: "scoop", targets: [[87, 22], [203, 24], [274, 18], [302, 28]] },
+      { type: "fall", targets: [[157, 22], [273, 26], [372, 32]] },
+    ],
+    constraints: { maxTotalPoints: 1200 },
+    sampling: { pointsPerQuarter: 4, vibratoPointsPerCycle: 8 },
+  });
+
+  const sealed = createStore();
+  const sealedContext = createStoredContext(sealed, { notes });
+  const trimmed = await new ExpressionPlanService({
+    store: sealed,
+    now: () => 2000,
+    artifactStore: new ArtifactStore({ now: () => 2000 }),
+    sessionId: "sess_budget",
+  }).plan(request(sealedContext.stored.contextId));
+
+  assert.ok(Buffer.byteLength(JSON.stringify(trimmed), "utf8") <= 16 * 1024);
+  assert.equal(trimmed.gestures, undefined);
+  assert.equal(trimmed.operations, undefined);
+  assert.ok(trimmed.detailRef, "detail must be reachable, not deleted");
+  assert.ok(trimmed.warnings.some((warning) => warning.code === "RESPONSE_BUDGET_APPLIED"));
+  // 决策面不受预算影响：摘要、交接信封与复核清单必须完整。
+  assert.ok(trimmed.summary.gestureCount > 0);
+  assert.ok(trimmed.apply);
+  assert.ok(trimmed.review.checklist.length > 0);
+
+  // 没有 Artifact 可指向时宁可超预算：裁剪必须是"移走"，绝不能变成静默删证据。
+  const unsealed = createStore();
+  const unsealedContext = createStoredContext(unsealed, { notes });
+  const kept = await createService(unsealed).plan(request(unsealedContext.stored.contextId));
+  assert.equal(kept.detailRef, undefined);
+  assert.ok(kept.gestures.length > 0, "no detailRef means the detail must stay inline");
+  assert.ok(kept.operations.length > 0);
 });
 
 test("shared targets surface in review and default constraints are exposed", async () => {

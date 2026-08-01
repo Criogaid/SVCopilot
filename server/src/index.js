@@ -558,7 +558,6 @@ const PLAN_EXECUTION_PROPERTIES = {
     additionalProperties: false,
     properties: {
       atomic: { type: "boolean" },
-      responseMode: { enum: ["compact", "standard", "verbose"] },
       undoLabel: { type: "string", maxLength: 200 },
       waitFor: { enum: ["none", "phonemes", "computedAttributes", "computedPitch"] },
       timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
@@ -1119,7 +1118,6 @@ export const TOOLS = [
           },
           description: "Independent per-page data budgets; overflow returns page.nextCursor.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         sinceToken: {
           type: "string",
           description: "snapshotToken from a previous read; identical content returns no_change.",
@@ -1220,7 +1218,6 @@ export const TOOLS = [
           description:
             "Ordering of anomalySegments.items: startBlick = score order (default), severity = peak error descending. top is always the most severe segment.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["mode"],
     },
@@ -1435,7 +1432,6 @@ export const TOOLS = [
             vibratoPointsPerCycle: { type: "integer", minimum: 4, maximum: 16, default: 8 },
           },
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["contextId"],
     },
@@ -1483,7 +1479,6 @@ export const TOOLS = [
           default: true,
           description: "Also plan per-note languageOverride values where the token language is known.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["contextId", "lyrics"],
     },
@@ -1571,12 +1566,6 @@ export const TOOLS = [
           default: 1,
           description: "Rest length (in quarters) treated as a phrase boundary.",
         },
-        responseMode: {
-          enum: ["compact", "standard", "verbose"],
-          default: "standard",
-          description:
-            "compact returns summaries without per-note item lists; standard caps scaleDegrees.items, phrases.items, and breathEvents.items at 100 with a truncation warning; verbose returns full lists.",
-        },
       },
       required: ["contextId"],
     },
@@ -1646,11 +1635,6 @@ export const TOOLS = [
           default: 1,
           description: "Rest length (in quarters) treated as a phrase boundary.",
         },
-        responseMode: {
-          enum: ["compact", "standard", "verbose"],
-          default: "standard",
-          description: "compact returns per-target counts and the aggregate without per-target sections.",
-        },
       },
       required: ["targets"],
     },
@@ -1691,12 +1675,6 @@ export const TOOLS = [
             ],
           },
           description: "Defaults to all checks.",
-        },
-        responseMode: {
-          enum: ["compact", "standard", "verbose"],
-          default: "standard",
-          description:
-            "compact returns the summary without the issue list; standard caps issues at 100 with a truncation warning; verbose returns all issues.",
         },
       },
       required: ["contextId"],
@@ -1758,7 +1736,6 @@ export const TOOLS = [
           default: false,
           description: "Also snap durations to whole grid steps and trim overlaps.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["contextId", "grid"],
     },
@@ -1863,7 +1840,6 @@ export const TOOLS = [
           description:
             "Optional source-note subset, as 0-based indexes within the source NoteGroup.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["contextId", "targetOccurrence", "harmony"],
     },
@@ -1902,12 +1878,6 @@ export const TOOLS = [
           maximum: 8,
           default: 1,
           description: "Rest length (in quarters) treated as a phrase boundary.",
-        },
-        responseMode: {
-          enum: ["compact", "standard", "verbose"],
-          default: "compact",
-          description:
-            "compact caps per-section item lists hard and relies on details.tool/arguments for full lists; standard and verbose honour the budgets below.",
         },
         budgets: {
           type: "object",
@@ -1989,7 +1959,6 @@ export const TOOLS = [
         },
         action: ACTION_SCHEMA,
         atomic: { type: "boolean", default: true },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         undoLabel: {
           type: "string",
           maxLength: 200,
@@ -2124,7 +2093,6 @@ export const TOOLS = [
           default: true,
           description: "Only atomic:true is supported; atomic:false is rejected, never silently ignored.",
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         waitFor: {
           enum: ["none", "computedPitch"],
           default: "none",
@@ -2251,7 +2219,6 @@ export const TOOLS = [
             vibratoPointsPerCycle: { type: "integer", minimum: 4, maximum: 16 },
           },
         },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["contextId", "gestures"],
       definitions: {
@@ -2323,7 +2290,6 @@ export const TOOLS = [
         },
         allowSharedTargetMutation: { type: "boolean", default: false },
         action: ACTION_SCHEMA,
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["contextId", "action"],
     },
@@ -2492,7 +2458,6 @@ export const TOOLS = [
         waitFor: { enum: ["none", "phonemes", "computedAttributes"], default: "none" },
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
-        responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
       required: ["target", "action"],
     },

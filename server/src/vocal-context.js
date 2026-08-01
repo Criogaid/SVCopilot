@@ -169,7 +169,7 @@ export class VocalContextAnalysisService {
     const projection = project({
       kind: PROJECTION_KIND,
       canonical,
-      mode: input.responseMode === "verbose" ? "audit" : input.responseMode,
+      mode: "standard",
       options: { artifactRef },
     });
     return applyByteBudget(
@@ -179,7 +179,6 @@ export class VocalContextAnalysisService {
         contextId: target.contextId,
         occurrence: target.publicOccurrence,
         requested: [...input.include],
-        responseMode: input.responseMode,
         ...projection.summary,
         ...(projection.representative ?? {}),
         ...(projection.detail ?? {}),
@@ -246,7 +245,6 @@ const SECTION_RUNNERS = {
       occurrence: target.occurrence,
       include: ["key", "phrases", "statistics"],
       phraseGapQuarter: input.phraseGapQuarter,
-      responseMode: "standard",
     }),
     run: (service, args) => service.phrase.analyze(args),
     summarize: summarizePhrase,
@@ -257,7 +255,6 @@ const SECTION_RUNNERS = {
     argumentsFor: (_input, target) => ({
       contextId: target.contextId,
       occurrence: target.occurrence,
-      responseMode: "standard",
     }),
     run: (service, args) => service.prosody.validate(args),
     summarize: summarizeProsody,
@@ -268,7 +265,6 @@ const SECTION_RUNNERS = {
     argumentsFor: (input, target) => ({
       targets: [{ contextId: target.contextId, occurrence: target.occurrence }],
       phraseGapQuarter: input.phraseGapQuarter,
-      responseMode: "standard",
     }),
     run: (service, args) => service.style.profile(args),
     summarize: summarizeStyle,
@@ -280,7 +276,6 @@ const SECTION_RUNNERS = {
       mode: "compare_to_target",
       contextId: target.contextId,
       occurrence: target.occurrence,
-      responseMode: "standard",
     }),
     run: (service, args) => service.computedPitch.compare(args),
     summarize: summarizeComputedPitch,
@@ -290,7 +285,6 @@ const SECTION_RUNNERS = {
 async function runSection(service, name, input, target, timer, warnings) {
   const runner = SECTION_RUNNERS[name];
   const args = runner.argumentsFor(input, target);
-  const detailArgs = { ...args, responseMode: "verbose" };
   try {
     const result = await timer.measure(runner.phase, async () => runner.run(service, args));
     return {
@@ -298,7 +292,7 @@ async function runSection(service, name, input, target, timer, warnings) {
       authority: runner.tool,
       ...runner.summarize(result, input),
       // compact 明细指针：分析器可无代价重跑，因此不引入 cursor 存储。
-      details: { tool: runner.tool, arguments: detailArgs },
+      details: { tool: runner.tool, arguments: args },
     };
   } catch (error) {
     const code = typeof error?.code === "string" ? error.code : "ANALYSIS_FAILED";
@@ -320,7 +314,7 @@ async function runSection(service, name, input, target, timer, warnings) {
       reason: { code, message: error instanceof Error ? error.message : String(error) },
       ...(error?.details !== undefined ? { detail: error.details } : {}),
       remedy: remedyFor(name, code),
-      details: { tool: runner.tool, arguments: detailArgs },
+      details: { tool: runner.tool, arguments: args },
     };
   }
 }
@@ -584,7 +578,6 @@ function nextSteps(sections, findings, target) {
         contextId: target.contextId,
         occurrence: target.occurrence,
         checks: ["specialLyricChains"],
-        responseMode: "verbose",
       },
       then: "Use code plus gapBlick/overlapBlick to choose a targeted sv_patch_notes or sv_restructure_notes edit.",
       note: "A continuation gap or overlap is an actionable score-structure finding, not a clean result.",
@@ -675,7 +668,7 @@ function normalizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrence", "include", "phraseGapQuarter", "responseMode", "budgets"],
+    ["contextId", "occurrence", "include", "phraseGapQuarter", "budgets"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -715,10 +708,6 @@ function normalizeRequest(request) {
   if (typeof phraseGapQuarter !== "number" || !(phraseGapQuarter >= 0.25 && phraseGapQuarter <= 8)) {
     throw codedError("INVALID_ARGUMENTS", "phraseGapQuarter must be a number between 0.25 and 8");
   }
-  const responseMode = request.responseMode ?? "compact";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   const budgets = { ...DEFAULT_BUDGETS };
   if (request.budgets !== undefined) {
     if (!isRecord(request.budgets)) throw codedError("INVALID_ARGUMENTS", "budgets must be an object");
@@ -735,18 +724,13 @@ function normalizeRequest(request) {
       budgets[key] = value;
     }
   }
-  // compact 只保留摘要与最高优先问题；明细通过 details.tool/arguments 展开。
-  if (responseMode === "compact") {
-    budgets.issues = Math.min(budgets.issues, 10);
-    budgets.perNote = 0;
-    budgets.anomalySegments = Math.min(budgets.anomalySegments, 5);
-  }
+  // 唯一形状：摘要 + 按 budgets 截断的代表性 items。完整未截断明细只在 artifactRef 里，
+  // 不再由调用方用 responseMode 挑档——那让同一个请求有三种返回形状，而模型得先猜一个。
   return {
     contextId: request.contextId,
     occurrence: request.occurrence,
     include,
     phraseGapQuarter,
-    responseMode,
     budgets,
   };
 }

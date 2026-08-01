@@ -405,10 +405,12 @@ test("range snapshot rejects mixed cursor and host-read arguments", async () => 
   const service = createService(model);
   const first = await service.snapshot({
     scope: { kind: "range", from: { bar: 1 }, to: { bar: 2 } },
-    responseMode: "compact",
   });
+  // cursor 读取只翻已捕获的数据，因此不接受任何会触发宿主读取的字段。
+  const cursor = service.store.get(first.contextId).storeCursor;
+  assert.ok(typeof cursor === "string" && cursor.length > 0);
   await assert.rejects(
-    service.snapshot({ cursor: first.page.detailCursor, responseMode: "compact" }),
+    service.snapshot({ cursor, sinceToken: "snap_x" }),
     (error) => error.code === "INVALID_ARGUMENTS" && /cursor reads/.test(error.message)
   );
 });
@@ -552,21 +554,22 @@ test("range snapshot enforces global Automation and computed-pitch capture limit
   );
 });
 
-test("compact range snapshot exposes summaries and a detail cursor", async () => {
+test("range snapshot returns captured items inline and pages by byte budget", async () => {
   const model = createRangeModel();
   const service = createService(model);
-  const compact = await service.snapshot({
+  // responseMode 已删除（§10.6 规则 14）：不再有「摘要档」与「明细档」之分。
+  // range 读取的唯一形状就是按预算分页的逐项数据——它的体积上界由 budgets 保证，
+  // 而不是由调用方先猜一个档位。cursor 分页本身属于 C2，不在本轮变更范围内。
+  const result = await service.snapshot({
     scope: { kind: "range", trackIndices: [0], from: { bar: 1 }, to: { bar: 12 } },
     include: ["notes", "automation"],
     automationParameters: ["tension"],
-    responseMode: "compact",
   });
-  assert.equal(compact.data.notes, undefined);
-  assert.equal(compact.data.summaries.notes.count, 4);
-  assert.equal(compact.data.summaries.automation.points, 2);
-  assert.ok(compact.page.detailCursor);
-  const detail = await service.snapshot({ cursor: compact.page.detailCursor });
-  assert.equal(detail.data.notes.length, 4);
+  assert.equal(result.data.notes.length, 4);
+  assert.equal(result.data.automation[0].points.length, 2);
+  assert.equal(result.data.summaries, undefined);
+  assert.equal(result.page.complete, true);
+  assert.equal(result.data.snapshotComplete, true);
 });
 
 test("range snapshot accepts exact decimal and rational beats", async () => {

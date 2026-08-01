@@ -176,7 +176,6 @@ async function measureMode({ host, fixture, indices, useBulk }) {
         trackIndices: [fixture.trackIndex],
       },
       include: ["notes"],
-      responseMode: "compact",
     });
     const occurrence = findOccurrence(captured, fixture);
     const startedAt = process.hrtime.bigint();

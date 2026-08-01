@@ -88,25 +88,25 @@ const MELODY = [
 
 function analyzer(store) {
   const service = new VocalContextAnalysisService({ store, now: () => 2000 });
-  // 既有 section 断言走 standard；compact 专项测试显式请求 compact。
+  // 唯一响应形状：不再有 compact/standard/verbose 分支可选。
   return {
     style: service.style,
-    analyze: (request) => service.analyze({ responseMode: "standard", ...request }),
+    analyze: (request) => service.analyze(request),
   };
 }
 
-test("compact projection omits item lists while preserving decisions and detail pointers", async () => {
+test("the single response shape carries decisions, an index, and detail pointers", async () => {
   const store = createStore();
   const { stored } = createContext(store, { notes: MELODY });
-  const result = await analyzer(store).analyze({
-    contextId: stored.contextId,
-    responseMode: "compact",
-  });
-  assert.equal(result.sections, undefined);
+  const result = await analyzer(store).analyze({ contextId: stored.contextId });
+  // sectionIndex 是决策面：每段的 status/authority/summary 恒在，无需先猜一个模式。
   assert.equal(result.sectionIndex.style.status, "succeeded");
   assert.ok(result.sectionIndex.style.summary);
   assert.ok(Array.isArray(result.topFindings));
   assert.ok(Array.isArray(result.nextSteps));
+  // 完整明细的两条出路都必须在响应里指明，否则"被裁掉的东西怎么拿"就没有答案。
+  assert.ok(result.sectionIndex.style.details.tool);
+  assert.ok(result.artifactRef === undefined || typeof result.artifactRef === "object");
 });
 
 test("one call returns every requested section from a single range context", async () => {
@@ -140,7 +140,6 @@ test("composite style summary preserves the standalone style evidence", async ()
   const service = analyzer(store);
   const standalone = await service.style.profile({
     targets: [{ contextId: stored.contextId, occurrence: 0 }],
-    responseMode: "standard",
   });
   const composite = await service.analyze({
     contextId: stored.contextId,
@@ -234,7 +233,7 @@ test("every section carries a stateless detail pointer instead of a cursor", asy
   for (const [name, section] of Object.entries(result.sections)) {
     assert.ok(section.details, `${name} must expose a detail pointer`);
     assert.equal(section.details.tool, section.authority);
-    assert.equal(section.details.arguments.responseMode, "verbose");
+    assert.equal(section.details.arguments.responseMode, undefined);
     // 明细通过重跑分析器获得，因此没有可过期的 cursor。
     assert.equal(section.detailCursor, undefined);
   }
@@ -412,7 +411,8 @@ test("malformed requests are rejected before any analysis runs", async () => {
     { contextId: stored.contextId, include: ["nope"] },
     { contextId: stored.contextId, include: ["phrase", "phrase"] },
     { contextId: stored.contextId, phraseGapQuarter: 0 },
-    { contextId: stored.contextId, responseMode: "tiny" },
+    // responseMode 已删除：它现在是未知字段，必须被拒而不是被忽略。
+    { contextId: stored.contextId, responseMode: "standard" },
     { contextId: stored.contextId, budgets: { issues: 0 } },
     { contextId: stored.contextId, budgets: { unknown: 1 } },
     { contextId: stored.contextId, unknownField: true },
@@ -439,7 +439,6 @@ test("the byte budget drops item lists but never the summaries or next steps", a
   const result = await analyzer(store).analyze({
     contextId: stored.contextId,
     include: ["prosody"],
-    responseMode: "standard",
     budgets: { bytes: 8192 },
   });
 

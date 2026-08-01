@@ -14,6 +14,9 @@
 import { segmentPhrases } from "./expression-plan.js";
 import { blickToMusical } from "./musical-time.js";
 
+// 逐项列表统一预算（§4.4 规则 10）：超出的明细进 Artifact，不由调用方选择响应形状。
+const MAX_LIST_ITEMS = 100;
+
 export const HARMONIC_INCLUDES = Object.freeze([
   "metricalRoles",
   "chordCandidates",
@@ -69,7 +72,7 @@ export const HARMONIC_PROVENANCE = Object.freeze({
 // ---------- metricalRoles ----------
 
 // 每个音符的小节/拍位置与强弱角色。没有 meterMarks 就没有小节线，只能如实报 not_captured。
-export function analyzeMetricalRoles(loaded, responseMode, warnings) {
+export function analyzeMetricalRoles(loaded, warnings) {
   if (!loaded.meterMarks || loaded.meterMarks.length === 0) {
     warnings.push({
       code: "METER_NOT_CAPTURED",
@@ -102,12 +105,11 @@ export function analyzeMetricalRoles(loaded, responseMode, warnings) {
     offbeatCount: counts.offbeat ?? 0,
     ...(anacrusis ? { anacrusis } : {}),
   };
-  if (responseMode === "compact") return { status: "succeeded", summary };
-  const cap = responseMode === "verbose" ? items.length : 100;
+  const cap = MAX_LIST_ITEMS;
   if (items.length > cap) {
     warnings.push({
       code: "METRICAL_ROLES_TRUNCATED",
-      message: `metricalRoles reports the first ${cap} of ${items.length} notes; use responseMode:"verbose" for the full list.`,
+      message: `metricalRoles reports the first ${cap} of ${items.length} notes; read the sealed detail artifact for the full list.`,
     });
   }
   return {
@@ -165,11 +167,11 @@ export function analyzeChordCandidates(loaded, options, warnings) {
       message: `${ambiguousCount} of ${items.length} harmonic window(s) have a thin gap between the top two candidates; a single melody line cannot decide between them. Report the alternatives instead of the top score alone.`,
     });
   }
-  const cap = options.responseMode === "verbose" ? items.length : 100;
-  if (options.responseMode !== "compact" && items.length > cap) {
+  const cap = MAX_LIST_ITEMS;
+  if (items.length > cap) {
     warnings.push({
       code: "CHORD_CANDIDATES_TRUNCATED",
-      message: `chordCandidates reports the first ${cap} of ${items.length} windows; use responseMode:"verbose" for the full list.`,
+      message: `chordCandidates reports the first ${cap} of ${items.length} windows; read the sealed detail artifact for the full list.`,
     });
   }
   const summary = {
@@ -179,7 +181,6 @@ export function analyzeChordCandidates(loaded, options, warnings) {
     // 单旋律的根本限制：即使某个窗口只有一个候选，也不代表伴奏就是它。
     evidenceScope: "melody_only",
   };
-  if (options.responseMode === "compact") return { status: "succeeded", summary };
   return {
     status: "succeeded",
     summary,
@@ -340,7 +341,7 @@ function qualitySuffix(quality) {
 // 终止式只依据调性候选、句末音级、节拍位置和（若有）和弦候选进行启发式排序。
 // 单旋律无法证实终止式，confidence 只是排序分数。
 // 注意：这里自行做乐句切分，不依赖 phrases section 的输出——compact 模式不返回
-// phrases.items，但终止式在任何 responseMode 下都必须可用。
+// phrases.items，但终止式在任何情况下都必须可用。
 export function analyzeCadence(loaded, keyResult, chordSection, options, warnings) {
   const best = keyResult?.bestCandidate ?? null;
   if (!best) {
@@ -510,19 +511,16 @@ export function analyzeTensionResolution(loaded, keyResult, options, warnings) {
       evidenceScope: "melody_only",
     };
   }
-  const cap = options.responseMode === "verbose" ? items.length : 100;
-  if (options.responseMode !== "compact" && items.length > cap) {
+  const cap = MAX_LIST_ITEMS;
+  if (items.length > cap) {
     warnings.push({
       code: "TENSION_RESOLUTION_TRUNCATED",
-      message: `tensionResolution reports the first ${cap} of ${items.length} events; use responseMode:"verbose" for the full list.`,
+      message: `tensionResolution reports the first ${cap} of ${items.length} events; read the sealed detail artifact for the full list.`,
     });
   }
   const byKind = {};
   for (const item of items) byKind[item.kind] = (byKind[item.kind] ?? 0) + 1;
   const summary = { eventCount: items.length, byKind };
-  if (options.responseMode === "compact") {
-    return { status: "succeeded", summary, evidenceScope: "melody_only" };
-  }
   return {
     status: "succeeded",
     summary,

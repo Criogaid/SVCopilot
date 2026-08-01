@@ -409,11 +409,11 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   // 共享 target 的写入会同时改变所有 occurrence；规划阶段就如实声明。
   const requiresSharedTargetConfirmation =
     (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1;
-  const cap = input.responseMode === "verbose" ? planned.length : MAX_LIST_ITEMS;
-  if (input.responseMode !== "compact" && planned.length > cap) {
+  const cap = MAX_LIST_ITEMS;
+  if (planned.length > cap) {
     warnings.push({
       code: "PER_NOTE_TRUNCATED",
-      message: `perNote reports the first ${cap} of ${planned.length} notes; use responseMode:"verbose" for the full list. Summary counts always cover all notes.`,
+      message: `perNote reports the first ${cap} of ${planned.length} notes; read the sealed plan artifact for the full list. Summary counts always cover all notes.`,
     });
   }
   const checklist = [
@@ -501,27 +501,23 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
       revertedCount,
       maxAbsDeltaBlick: planned.reduce((max, item) => Math.max(max, Math.abs(item.deltaBlick)), 0),
     },
-    ...(input.responseMode === "compact"
-      ? {}
-      : {
-          perNote: planned.slice(0, cap).map((item) => ({
-            note: item.note.indexInGroup,
-            lyrics: item.note.lyrics,
-            originalOnsetBlick: item.note.absOnsetBlick,
-            plannedOnsetBlick: item.plannedAbsOnsetBlick,
-            deltaBlick: item.deltaBlick,
-            ...(input.quantizeDurations
-              ? {
-                  originalDurationBlick: item.note.durationBlick,
-                  plannedDurationBlick: item.plannedDurationBlick,
-                }
-              : {}),
-            gridIndex: item.gridIndex,
-            changed: item.changed,
-            ...(item.onsetReverted ? { onsetReverted: true, revertReason: item.revertReason } : {}),
-          })),
-          perNoteTruncated: planned.length > cap,
-        }),
+    perNote: planned.slice(0, cap).map((item) => ({
+      note: item.note.indexInGroup,
+      lyrics: item.note.lyrics,
+      originalOnsetBlick: item.note.absOnsetBlick,
+      plannedOnsetBlick: item.plannedAbsOnsetBlick,
+      deltaBlick: item.deltaBlick,
+      ...(input.quantizeDurations
+        ? {
+            originalDurationBlick: item.note.durationBlick,
+            plannedDurationBlick: item.plannedDurationBlick,
+          }
+        : {}),
+      gridIndex: item.gridIndex,
+      changed: item.changed,
+      ...(item.onsetReverted ? { onsetReverted: true, revertReason: item.revertReason } : {}),
+    })),
+    perNoteTruncated: planned.length > cap,
     apply: applyEnvelope,
     ...(planArtifactRef ? {} : { patchRequest }),
     ...(continuation ? { continuation } : {}),
@@ -538,7 +534,7 @@ function normalizeQuantizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrence", "notes", "grid", "strength", "swing", "quantizeDurations", "responseMode"],
+    ["contextId", "occurrence", "notes", "grid", "strength", "swing", "quantizeDurations"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -586,10 +582,6 @@ function normalizeQuantizeRequest(request) {
   if (request.quantizeDurations !== undefined && typeof request.quantizeDurations !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "quantizeDurations must be a boolean");
   }
-  const responseMode = request.responseMode ?? "standard";
-  if (!["compact", "standard", "verbose"].includes(responseMode)) {
-    throw codedError("INVALID_ARGUMENTS", "responseMode must be compact, standard, or verbose");
-  }
   return {
     contextId: request.contextId,
     occurrence: request.occurrence,
@@ -598,7 +590,6 @@ function normalizeQuantizeRequest(request) {
     strength,
     swing,
     quantizeDurations: request.quantizeDurations ?? false,
-    responseMode,
   };
 }
 
