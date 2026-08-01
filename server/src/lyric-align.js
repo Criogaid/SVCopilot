@@ -1,6 +1,6 @@
 import { canonicalHashHex } from "./canonical-json.js";
 import { artifactReference, planReference } from "./artifact-store.js";
-import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
+import { buildPlanArtifact } from "./plan-reference.js";
 
 import { ServiceTiming } from "./service-timing.js";
 import { MAX_PATCHES } from "./note-patch.js";
@@ -672,10 +672,12 @@ function buildAlignResponse(
         mutationRequest: patchRequest.arguments,
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
         occurrence: loaded.occurrenceOrdinal,
-        contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+        capsule: {
+          stored: loaded.stored,
+          occurrence: loaded.occurrence,
           // capsule 只封存被这批 patch 触及的音符；身份是组内 index（§3.1）。
           noteIndexes: submittable.map((patch) => patch.note),
-        }),
+        },
       });
       const planArtifact = artifactStore.seal({
         kind: "plan",

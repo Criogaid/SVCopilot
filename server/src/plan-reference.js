@@ -141,6 +141,11 @@ export function settlePlanLedger(planLedger, ledgerRef, result) {
  * @param {number} [options.occurrence]
  * @param {number} [options.expectedTimeOffsetBlick]
  * @param {object} [options.fingerprints]
+ * @param {{stored: object, occurrence: object, noteIndexes?: number[]}} [options.capsule]
+ *   要封存的 context capsule 来源。capsule **只能**在这里构造：以前
+ *   `buildPlanContextSnapshot` 是导出的，于是"构造 capsule"和"校验 capsule 是否完整"
+ *   分处两个模块，没有任何一处同时看得见两侧——`groupNoteCount` 被漏封存的缺陷正是
+ *   藏在这道缝里。现在唯一的入口就是这个函数，构造完立刻校验。
  * @returns {{ kind: "plan", payload: object }}
  */
 export function buildPlanArtifact({
@@ -150,8 +155,14 @@ export function buildPlanArtifact({
   occurrence,
   expectedTimeOffsetBlick,
   fingerprints = {},
-  contextSnapshot,
+  capsule,
 }) {
+  const contextSnapshot =
+    capsule === undefined
+      ? undefined
+      : buildPlanContextSnapshot(capsule.stored, capsule.occurrence, {
+          noteIndexes: capsule.noteIndexes,
+        });
   // capsule 完整性在**封存时**校验，而不是等 apply 走到一半。
   //
   // 这条校验（CAPSULE_REQUIREMENTS_BY_OPERATION + assertCapsuleSatisfies）此前只被
@@ -183,7 +194,11 @@ export function buildPlanArtifact({
 }
 
 // 选择器是组内 index（§3.1）。不传表示"封存全部指纹"。
-export function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {}) {
+//
+// **不导出**：capsule 的唯一构造入口是 buildPlanArtifact，它构造完立刻校验完整性。
+// 以前这个函数是导出的，于是五个 planner 各自构造 capsule、而校验器住在另一个模块里，
+// 两边谁也不认识谁——那道缝正是 groupNoteCount 缺陷藏身的地方。
+function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {}) {
   if (!stored || typeof stored.contextId !== "string" || !occurrence) {
     throw codedError("INVALID_ARGUMENTS", "plan context snapshot requires a stored context and occurrence");
   }

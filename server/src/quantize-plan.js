@@ -1,6 +1,6 @@
 import { canonicalHashHex } from "./canonical-json.js";
 import { artifactReference, planReference } from "./artifact-store.js";
-import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
+import { buildPlanArtifact } from "./plan-reference.js";
 
 import { MAX_PATCHES } from "./note-patch.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
@@ -445,9 +445,11 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           targetGroupUuid: loaded.occurrence.targetGroupUuid,
           occurrence: loaded.occurrenceOrdinal,
           fingerprints: {},
-          contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+          capsule: {
+            stored: loaded.stored,
+            occurrence: loaded.occurrence,
             noteIndexes: submittable.map((patch) => patch.note),
-          }),
+          },
       });
       const planArtifact = artifactStore.seal({
         kind: "plan",

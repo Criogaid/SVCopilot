@@ -1,6 +1,6 @@
 import { canonicalHashHex } from "./canonical-json.js";
 import { planReference } from "./artifact-store.js";
-import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
+import { buildPlanArtifact } from "./plan-reference.js";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
@@ -750,11 +750,13 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
           occurrence: loaded.scope.occurrenceOrdinal,
           expectedTimeOffsetBlick: loaded.timeOffsetBlick,
           fingerprints: { expectedNotes: applyRequests[0].arguments.target?.expectedNotes ?? [] },
-          contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.occurrence, {
+          capsule: {
+            stored: loaded.stored,
+            occurrence: loaded.occurrence,
             noteIndexes: (applyRequests[0].arguments.target?.expectedNotes ?? []).map(
               (fingerprint) => fingerprint.indexInGroup
             ),
-          }),
+          },
       });
       const planArtifact = artifactStore.seal({
         kind: "plan",

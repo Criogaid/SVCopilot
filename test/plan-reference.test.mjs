@@ -2,7 +2,6 @@ import assert from "node:assert";
 import { ArtifactStore } from "../server/src/artifact-store.js";
 import {
   buildPlanArtifact,
-  buildPlanContextSnapshot,
   resolvePlanReference,
 } from "../server/src/plan-reference.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
@@ -72,7 +71,7 @@ const sessionId = "sess_plan";
   const { payload } = buildPlanArtifact({
     targetTool: "sv_patch_notes",
     mutationRequest: { contextId: stored.contextId, patches: [] },
-    contextSnapshot: buildPlanContextSnapshot(stored, occurrence),
+    capsule: { stored, occurrence },
   });
   const artifact = artifactStore.seal({
     kind: "plan",
@@ -130,7 +129,7 @@ const sessionId = "sess_plan";
   const { payload } = buildPlanArtifact({
     targetTool: "sv_patch_notes",
     mutationRequest: { contextId: stored.contextId, patches: [] },
-    contextSnapshot: buildPlanContextSnapshot(stored, occurrence),
+    capsule: { stored, occurrence },
   });
   const artifact = artifactStore.seal({
     kind: "plan",
@@ -180,7 +179,7 @@ const sessionId = "sess_plan";
     const { payload } = buildPlanArtifact({
       targetTool,
       mutationRequest,
-      contextSnapshot: buildPlanContextSnapshot(stored, occurrence),
+      capsule: { stored, occurrence },
     });
     return artifactStore.seal({ kind: "plan", schemaVersion: "1", sessionId, payload });
   };
@@ -527,6 +526,7 @@ const sessionId = "sess_plan";
   assert.strictEqual(ledger.get(artifact.id).state, "sealed");
 }
 
+
 // capsule 必须独立封存 groupNoteCount，不能让消费者退化到用指纹条数推断。
 //
 // 这是一个真实缺陷的回归：capsule 通常只封存**被触及**的那几个音符指纹，而
@@ -561,8 +561,12 @@ const sessionId = "sess_plan";
   stored.context.occurrences.push(occurrence);
 
   // 只封存一个被触及的音符——这正是 planner 的常态（noteIndexes 只列出要改的）。
-  const capsule = buildPlanContextSnapshot(stored, occurrence, { noteIndexes: [5] });
-  const sealed = capsule.snapshot.context.occurrences[0];
+  const { payload } = buildPlanArtifact({
+    targetTool: "sv_patch_notes",
+    mutationRequest: { contextId: stored.contextId, patches: [] },
+    capsule: { stored, occurrence, noteIndexes: [5] },
+  });
+  const sealed = payload.contextSnapshot.snapshot.context.occurrences[0];
   assert.strictEqual(sealed.noteFingerprints.length, 1);
   // 组内总数与被封存的指纹条数是两件不同的事实，必须各自存在。
   assert.strictEqual(sealed.groupNoteCount, 9);
@@ -580,7 +584,7 @@ const sessionId = "sess_plan";
     observedAt: new Date(1000).toISOString(),
     context: { kind: "range", occurrences: [] },
   });
-  const occurrence = {
+  const complete = {
     occurrence: 0,
     trackIndex: 0,
     groupIndex: 0,
@@ -590,55 +594,39 @@ const sessionId = "sess_plan";
     sharedTargetOccurrences: [],
     noteFingerprints: [{ indexInGroup: 0, onsetBlick: 0, durationBlick: 100, pitch: 60 }],
   };
-  stored.context.occurrences.push(occurrence);
-  const good = buildPlanContextSnapshot(stored, occurrence);
+  stored.context.occurrences.push(complete);
 
   // 完整 capsule 正常封存。
   assert.ok(
     buildPlanArtifact({
       targetTool: "sv_restructure_notes",
       mutationRequest: { contextId: stored.contextId, operations: [] },
-      contextSnapshot: good,
-    }).payload
+      capsule: { stored, occurrence: complete },
+    }).payload.contextSnapshot
   );
 
-  // 结构编辑缺 groupNoteCount：越界判定失去依据。
-  const noCount = structuredClone(good);
-  delete noCount.snapshot.context.occurrences[0].groupNoteCount;
-  assert.throws(
-    () =>
-      buildPlanArtifact({
-        targetTool: "sv_restructure_notes",
-        mutationRequest: { contextId: stored.contextId, operations: [] },
-        contextSnapshot: noCount,
-      }),
-    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /groupNoteCount/.test(error.message)
-  );
-
-  // 曲线写入缺 timeOffsetBlick：曲线锚在音符位置上，没有它无法换算坐标。
-  const noOffset = structuredClone(good);
-  delete noOffset.snapshot.context.occurrences[0].timeOffsetBlick;
-  assert.throws(
-    () =>
-      buildPlanArtifact({
-        targetTool: "sv_patch_parameter_curves",
-        mutationRequest: { target: { contextId: stored.contextId }, curves: [] },
-        contextSnapshot: noOffset,
-      }),
-    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /timeOffsetBlick/.test(error.message)
-  );
-
-  // 缺目标身份：连"改的是哪个 NoteGroup"都不知道。
-  const noTarget = structuredClone(good);
-  delete noTarget.snapshot.context.occurrences[0].targetGroupUuid;
+  // 缺目标身份：连"改的是哪个 NoteGroup"都不知道，因此不该封成一个可提交的计划。
+  const { targetGroupUuid: _dropped, ...noTarget } = complete;
   assert.throws(
     () =>
       buildPlanArtifact({
         targetTool: "sv_patch_notes",
         mutationRequest: { contextId: stored.contextId, patches: [] },
-        contextSnapshot: noTarget,
+        capsule: { stored, occurrence: noTarget },
       }),
     (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /target/.test(error.message)
+  );
+
+  // 曲线写入缺 timeOffsetBlick：曲线锚在音符位置上，没有它无法换算 group-local 坐标。
+  const { timeOffsetBlick: _noOffset, ...noOffset } = complete;
+  assert.throws(
+    () =>
+      buildPlanArtifact({
+        targetTool: "sv_patch_parameter_curves",
+        mutationRequest: { target: { contextId: stored.contextId }, curves: [] },
+        capsule: { stored, occurrence: noOffset },
+      }),
+    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE" && /timeOffsetBlick/.test(error.message)
   );
 }
 

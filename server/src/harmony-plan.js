@@ -1,6 +1,6 @@
 import { canonicalHashHex } from "./canonical-json.js";
 import { artifactReference, planReference } from "./artifact-store.js";
-import { buildPlanArtifact, buildPlanContextSnapshot } from "./plan-reference.js";
+import { buildPlanArtifact } from "./plan-reference.js";
 
 import { MAX_OPERATIONS } from "./note-structure.js";
 import { analyzeKey } from "./phrase-analysis.js";
@@ -670,10 +670,12 @@ function buildHarmonyResponse(
         mutationRequest: restructureRequest.arguments,
         targetGroupUuid: loaded.target.targetGroupUuid,
         occurrence: loaded.targetOrdinal,
-        contextSnapshot: buildPlanContextSnapshot(loaded.stored, loaded.target, {
+        capsule: {
+          stored: loaded.stored,
+          occurrence: loaded.target,
           // harmony 往空目标里插音符，因此不引用目标组的任何既有音符。
           noteIndexes: [],
-        }),
+        },
       });
       const planArtifact = artifactStore.seal({
         kind: "plan",

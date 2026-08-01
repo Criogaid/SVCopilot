@@ -149,7 +149,7 @@ export function assertCapsuleSatisfies(operation, capsule) {
  * 对应证据，仍然是 PLAN_CAPSULE_INCOMPLETE。
  *
  * @param {string} operation
- * @param {object} capsule - buildPlanContextSnapshot 产出的 snapshot（含 context.occurrences[0]）
+ * @param {object} capsule - 已封存的 capsule snapshot（store entry 形状，含 context.occurrences[0]）
  * @param {number} epoch
  * @returns {void}
  */

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { ArtifactStore, planReference } from "../server/src/artifact-store.js";
 import { NoteStructureService } from "../server/src/note-structure.js";
-import { buildPlanArtifact, buildPlanContextSnapshot } from "../server/src/plan-reference.js";
+import { buildPlanArtifact } from "../server/src/plan-reference.js";
 import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
 
 const Q = 705600;
@@ -469,7 +469,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
     },
     targetGroupUuid: occurrence.targetGroupUuid,
     occurrence: 0,
-    contextSnapshot: buildPlanContextSnapshot(entry, occurrence),
+    capsule: { stored: entry, occurrence },
   });
   const reference = planReference(
     artifactStore.seal({
