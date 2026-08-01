@@ -683,7 +683,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
           ...(expectedNotes.length > 0 ? { expectedNotes } : {}),
         },
         operations: compiled.operations.map((operation) => operation.applyOperation),
-        dryRun: true,
+        action: "dry_run",
         atomic: true,
       }
     : null;
@@ -729,7 +729,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   const checklist = [
     "Review every gesture's anchor pitch and depth before applying; the anchor defaults to the note target pitch (group-relative semitone).",
     "This plan only ADDS new owned curves; it never deletes or overwrites existing pitch controls (that is a separate transaction needing explicit fingerprints).",
-    "Apply through apply.arguments (sv_patch_pitch_controls) with dryRun:true first, then commit the identical arguments.",
+    "Apply through apply.arguments (sv_patch_pitch_controls) with action dry_run first, then commit the identical arguments.",
     "Pitch values are group-relative semitones, NOT cents; do not mix with pitchDelta automation.",
     "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
   ];
@@ -786,7 +786,6 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
   return {
     ok: true,
     status: hasOperations ? "planned" : "no_change",
-    dryRun: true,
     effects: "none",
     planId,
     contextId: loaded.stored.contextId,

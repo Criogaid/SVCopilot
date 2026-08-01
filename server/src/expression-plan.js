@@ -1209,7 +1209,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
       arguments: {
         target: { ...target, ...(expectedNotes.length > 0 ? { expectedNotes } : {}) },
         curves: callOperations.map(curveOf),
-        dryRun: true,
+        action: "dry_run",
         atomic: true,
         undoLabel: `sv_plan_expression ${planId} (${callIndex + 1}/${compiled.applyCallCount})`,
       },
@@ -1253,7 +1253,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     ? [
         "Review every operation's parameter, unit, and value range before applying.",
         "replace mode overwrites existing control points inside each operation range; the planner does not read the host and did not check for existing points (use sv_get_parameter_curve if unsure).",
-        "Apply through the returned applyRequests (sv_patch_parameter_curves) with dryRun:true first, then commit each call.",
+        "Apply through the returned applyRequests (sv_patch_parameter_curves) with action dry_run first, then commit each call.",
         "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
       ]
     : ["No melodic intent target remained after special-event filtering; no host write is needed."];
@@ -1331,7 +1331,6 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
   return {
     ok: true,
     status: hasOperations ? "planned" : "no_change",
-    dryRun: true,
     effects: "none",
     planId,
     contextId: loaded.stored.contextId,

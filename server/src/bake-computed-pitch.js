@@ -2,6 +2,7 @@ import { getStoredComputedPitch } from "./musical-range.js";
 import { codedError, isRecord } from "./pitch-control.js";
 import { ServiceTiming } from "./service-timing.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { dryRunFromAction } from "./mutation-action.js";
 
 // sv_bake_computed_pitch —— 把宿主 computed pitch 显式固化为一条 SVCopilot 自有的
 // PitchControlCurve（主计划 P1-C Phase 4）。
@@ -64,9 +65,8 @@ export class BakeComputedPitchService {
         allowSharedTargetMutation: input.allowSharedTargetMutation === true,
       },
       operations: plan.operations,
-      dryRun: false,
+      action: "commit",
       atomic: true,
-      responseMode: "standard",
     });
     return formatBakeResponse(loaded, input, plan, patchResult, timer.finish());
   }
@@ -389,7 +389,7 @@ function formatBakeResponse(loaded, input, plan, patchResult, timings) {
         checklist: [
           "This bakes the host's computed pitch into ONE new svcopilot-owned curve; the host may still be recomputing (see coverage).",
           "Existing pitchDelta automation is preserved; the baked curve and pitchDelta both affect pitch — audit for double-counting if pitchDelta drove the computed pitch.",
-          "Commit the identical request with dryRun:false to write inside one Undo with read-back and reverse compensation.",
+          "Commit the identical request with action commit to write inside one Undo with read-back and reverse compensation.",
           "Musical quality is human-only; audition the result.",
         ],
       },
@@ -428,7 +428,7 @@ function normalizeBakeRequest(request) {
       "maxPoints",
       "pitchDeltaHandling",
       "allowSharedTargetMutation",
-      "dryRun",
+      "action",
       "responseMode",
     ],
     "request"
@@ -503,7 +503,7 @@ function normalizeBakeRequest(request) {
     maxPoints: checkedInteger(request.maxPoints, 8, MAX_BAKE_POINTS, MAX_BAKE_POINTS, "maxPoints"),
     pitchDeltaHandling,
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
-    dryRun: request.dryRun === true,
+    dryRun: dryRunFromAction(request.action),
     responseMode: ["compact", "standard", "verbose"].includes(request.responseMode) ? request.responseMode : "standard",
   };
 }

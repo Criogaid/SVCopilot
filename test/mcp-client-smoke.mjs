@@ -333,6 +333,7 @@ try {
     await facadeCall({
       name: "sv_edit_phrase",
       arguments: {
+        action: "commit",
         target: { contextId: "ctx_schema", occurrence: 0 },
         structureOperations: [{ op: "splitt" }],
       },
@@ -988,7 +989,10 @@ try {
   // sv_patch_notes 公开契约：dry-run 无副作用，真实写入带补偿语义与逐项读回。
   const patchTool = served.get("sv_patch_notes");
   assert.equal(patchTool.inputSchema.properties.atomic.default, true);
-  assert.equal(patchTool.inputSchema.properties.dryRun.default, false);
+  // action 没有默认值：省略它是 schema 错误，不是"默认提交"。
+  assert.equal(patchTool.inputSchema.properties.dryRun, undefined);
+  assert.deepEqual(patchTool.inputSchema.properties.action.enum, ["dry_run", "commit"]);
+  assert.equal(patchTool.inputSchema.properties.action.default, undefined);
   assert.ok(patchTool.inputSchema.properties.patches.items.properties.set.properties.detuneCents);
 
   const patchSnapshot = parseToolResult(
@@ -1012,7 +1016,7 @@ try {
   const patchPlan = parseToolResult(
     await facadeCall({
       name: "sv_patch_notes",
-      arguments: { ...patchArguments, dryRun: true },
+      arguments: { ...patchArguments, action: "dry_run" },
     })
   );
   assert.equal(okOf(patchPlan), true);
@@ -1022,7 +1026,10 @@ try {
   assert.equal(patchPlan.data.plannedChangedNotes, 1);
 
   const patchApplied = parseToolResult(
-    await facadeCall({ name: "sv_patch_notes", arguments: patchArguments })
+    await facadeCall({
+      name: "sv_patch_notes",
+      arguments: { ...patchArguments, action: "commit" },
+    })
   );
   assert.equal(okOf(patchApplied), true);
   assert.equal(patchApplied.status, "succeeded");
@@ -1058,6 +1065,7 @@ try {
         patches: [
           { note: 0, expected: { lyrics: "さ" }, set: { lyrics: "x" } },
         ],
+        action: "commit",
       },
     })
   );
@@ -1171,7 +1179,7 @@ try {
             set: { lyrics: "仮" },
           },
         ],
-        dryRun: true,
+        action: "dry_run",
         waitFor: "none",
       },
     })
@@ -1195,7 +1203,7 @@ try {
             atBlick: rangeNote.onsetBlick + Math.floor(rangeNote.durationBlick / 2),
           },
         ],
-        dryRun: true,
+        action: "dry_run",
         waitFor: "none",
       },
     })
@@ -1256,7 +1264,7 @@ try {
             ],
           },
         ],
-        dryRun: true,
+        action: "dry_run",
       },
     })
   );
@@ -1318,6 +1326,7 @@ try {
     await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
+        action: "commit",
         target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
         curves: [
           {
@@ -1345,6 +1354,7 @@ try {
     await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
+        action: "commit",
         target: {
           trackIndex: 0,
           groupIndex: 0,
@@ -1393,7 +1403,7 @@ try {
             points: [{ blick: 0, value: 0 }],
           },
         ],
-        dryRun: true,
+        action: "dry_run",
       },
     })
   );
@@ -1414,7 +1424,7 @@ try {
           range: { fromBlick: 0, toBlick: Q },
           points: [{ blick: 0, value: 0 }],
         })),
-        dryRun: true,
+        action: "dry_run",
       },
     })
   );
@@ -1429,6 +1439,7 @@ try {
     await facadeCall({
       name: "sv_patch_parameter_curves",
       arguments: {
+        action: "commit",
         target: { trackIndex: 0, groupIndex: 0, allowSharedTargetMutation: true },
         curves: [
           {
@@ -1451,6 +1462,7 @@ try {
     await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
+        action: "commit",
         contextId: structureSnapshot.contextId,
         waitFor: "none",
         operations: [
@@ -1479,6 +1491,7 @@ try {
     await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
+        action: "commit",
         contextId: afterSplit.contextId,
         waitFor: "none",
         operations: [
@@ -1508,6 +1521,7 @@ try {
     await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
+        action: "commit",
         contextId: insertSnapshot.contextId,
         waitFor: "none",
         operations: [
@@ -1526,6 +1540,7 @@ try {
     await facadeCall({
       name: "sv_restructure_notes",
       arguments: {
+        action: "commit",
         contextId: deleteSnapshot.contextId,
         waitFor: "none",
         operations: [

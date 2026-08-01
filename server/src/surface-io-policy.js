@@ -291,6 +291,10 @@ export const BANNED_REQUEST_FIELDS = Object.freeze([
   "occurrenceId",
   "sourceOccurrenceId",
   "targetOccurrenceId",
+  // dryRun 是**布尔**，因此有默认值，而默认值在写操作上指向错误的方向：省略它就
+  // 等于同意写入。`action` 是无默认的 enum，所以「忘了填」在 schema 层就被挡住，
+  // 不会变成一次真实写入。两者不能并存——那会让同一个请求有两处说法。
+  "dryRun",
 ]);
 
 /**
@@ -298,7 +302,6 @@ export const BANNED_REQUEST_FIELDS = Object.freeze([
  * 与 root-envelope 的 LEGACY 表同理：登记让「还欠多少」可数，且门禁会拒绝过期条目。
  */
 export const LEGACY_REQUEST_FIELDS = Object.freeze({
-  dryRun: "§10.6：统一为 action: dry_run | commit（B2）",
   responseMode: "§3.6：响应形状由契约规定，不由调用方选择（B2）",
   cursor: "§4.1：offset 分页降级为待数据评估（C2）",
   usePlanRef: "§4.3：inline apply 取消后该开关一并删除（C1）",

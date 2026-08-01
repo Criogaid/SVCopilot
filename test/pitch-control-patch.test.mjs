@@ -47,7 +47,7 @@ test("dry-run plans add/update/delete with zero host writes and zero Undo", asyn
   const result = await service.patch({
     contextId: snapshot.contextId,
     occurrence: 0,
-    dryRun: true,
+    action: "dry_run",
     operations: [
       { op: "add", control: { kind: "point", positionBlick: 3 * Q, pitchSemitone: 65 } },
       { op: "update", controlId: point.controlId, expectedFingerprint: point.fingerprint, set: { pitchSemitone: 61 } },
@@ -74,6 +74,7 @@ test("add/update/delete commits in one Undo with read-back verification and cont
   const point = byKind(snapshot, "point");
   const curve = byKind(snapshot, "curve");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -112,6 +113,7 @@ test("a no-op update reports no_change with zero Undo and zero host writes", asy
   const snapshot = await snapshotWithControls(snapshots);
   const point = byKind(snapshot, "point");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -134,6 +136,7 @@ test("operations cannot target a control added earlier in the same request", asy
   const { model, snapshots, service } = createFixture({ controls: [] });
   const snapshot = await snapshotWithControls(snapshots);
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -153,6 +156,7 @@ test("stale expectedFingerprint fails with zero writes", async () => {
   });
   const snapshot = await snapshotWithControls(snapshots);
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -175,6 +179,7 @@ test("identical duplicates are reported ambiguous, never first-matched", async (
   const snapshot = await snapshotWithControls(snapshots);
   const point = byKind(snapshot, "point");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
@@ -193,6 +198,7 @@ test("a changed group fingerprint conflicts before any write", async () => {
   const point = byKind(snapshot, "point");
   const groupFingerprint = snapshot.data.tracks[0].groups[0].pitchControlGroupFingerprint;
   const ok = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     target: { expectedPitchControlFingerprint: groupFingerprint },
@@ -203,6 +209,7 @@ test("a changed group fingerprint conflicts before any write", async () => {
 
   const snapshot2 = await snapshotWithControls(snapshots);
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot2.contextId,
     occurrence: 0,
     target: { expectedPitchControlFingerprint: groupFingerprint },
@@ -222,6 +229,7 @@ test("a moved group reference fails STALE_CONTEXT via expectedTimeOffsetBlick", 
   const snapshot = await snapshotWithControls(snapshots);
   const point = byKind(snapshot, "point");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     target: { expectedTimeOffsetBlick: 2 * BAR },
@@ -241,6 +249,7 @@ test("shared target requires explicit confirmation before any write", async () =
   const snapshot = await snapshotWithControls(snapshots);
   const point = snapshot.data.pitchControls.find((c) => c.occurrence === 0);
   const refused = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [{ op: "delete", controlId: point.controlId, expectedFingerprint: point.fingerprint }],
@@ -251,6 +260,7 @@ test("shared target requires explicit confirmation before any write", async () =
   assert.equal(model.undoCount, 0);
 
   const confirmed = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     target: { allowSharedTargetMutation: true },
@@ -272,6 +282,7 @@ test("atomic rollback restores the full set and scriptData after a mid-delete fa
   // 第一次 removePitchControl（delete op）失败：此时 add 已成功、组已变化。
   model.failures.push({ method: "removePitchControl", remainingSkips: 0, code: "ARGUMENT_MISMATCH" });
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -302,6 +313,7 @@ test("a multi-field update journals its inverse before the first setter", async 
   model.failures.push({ method: "setPitch", remainingSkips: 0, code: "ARGUMENT_MISMATCH" });
 
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -333,6 +345,7 @@ test("journal capture failure happens before opening an Undo record", async () =
   model.failures.push({ method: "clone", remainingSkips: 0, code: "HOST_CALL_FAILED" });
 
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -361,6 +374,7 @@ test("a silently-ignored setter is caught by read-back and rolled back", async (
   const point = byKind(snapshot, "point");
   model.ignoreSetters.add("setPitch");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -386,6 +400,7 @@ test("a host timeout during write reports outcome_unknown and never auto-retries
     message: "Timeout waiting for SynthV bridge",
   });
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -406,6 +421,7 @@ test("a curve round-trips its anchor and points through an update", async () => 
   const snapshot = await snapshotWithControls(snapshots);
   const curve = byKind(snapshot, "curve");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -438,6 +454,7 @@ test("cross-kind update fields are rejected, not silently ignored", async () => 
   const snapshot = await snapshotWithControls(snapshots);
   const point = byKind(snapshot, "point");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [
@@ -454,6 +471,7 @@ test("atomic:false is rejected explicitly rather than silently ignored", async (
   const { snapshots, service } = createFixture({ controls: [] });
   const snapshot = await snapshotWithControls(snapshots);
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     atomic: false,
@@ -481,6 +499,7 @@ test("a moved anchored note fails STALE_CONTEXT via expectedNotes before any wri
     detuneCents: anchor.detune,
   };
   const ok = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     target: { expectedNotes: [expectedNote] },
@@ -494,6 +513,7 @@ test("a moved anchored note fails STALE_CONTEXT via expectedNotes before any wri
   const snapshot2 = await snapshotWithControls(snapshots);
   const point2 = snapshot2.data.pitchControls.find((c) => c.kind === "point");
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot2.contextId,
     occurrence: 0,
     target: { expectedNotes: [expectedNote] },
@@ -521,6 +541,7 @@ test("a verified write keeps effects:verified when post-commit processing observ
     message: "Timeout waiting for SynthV bridge",
   });
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     waitFor: "computedPitch",
@@ -547,6 +568,7 @@ test("reorder during rollback restores the full pre-transaction set", async () =
   const point = byKind(snapshot, "point");
   model.failures.push({ method: "removePitchControl", remainingSkips: 0, code: "ARGUMENT_MISMATCH" });
   const result = await service.patch({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     operations: [

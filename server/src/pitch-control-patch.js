@@ -17,6 +17,7 @@ import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { createHostScope } from "./snapshot.js";
+import { dryRunFromAction } from "./mutation-action.js";
 
 // sv_patch_pitch_controls —— PitchControl 的原子事务写面（主计划 P1-C）。
 //
@@ -1177,7 +1178,7 @@ function normalizeRequest(request) {
     target: normalizeTarget(request.target),
     operations: request.operations.map((operation, index) => normalizeOperation(operation, index)),
     atomic: true,
-    dryRun: request.dryRun === true,
+    dryRun: dryRunFromAction(request.action),
     responseMode,
     waitFor,
     timeoutMs: clampInteger(request.timeoutMs, 0, 30_000, 10_000),

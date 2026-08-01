@@ -69,7 +69,7 @@ test("a 373-note group resolves scoped targets without reading every note", asyn
       { note: 0, set: { lyrics: "x" } },
       { note: 372, set: { lyrics: "y" } },
     ],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });

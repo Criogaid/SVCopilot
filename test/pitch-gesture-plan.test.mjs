@@ -102,14 +102,14 @@ test("planner output is schema-valid and plannable against the live host (dry-ru
       { type: "release", note: nid(snapshot, 2), depthSemitone: 0.4 },
     ],
   });
-  // apply.arguments 逐字（含 dryRun:true）喂给真实事务核：应 dry_run 且零写、零 Undo。
+  // apply.arguments 逐字（含 action: "dry_run"）喂给真实事务核：应 dry_run 且零写、零 Undo。
   const dryRun = await patch.patch(plan.apply.arguments);
   assert.equal(dryRun.ok, true);
   assert.equal(dryRun.status, "dry_run");
   assert.equal(model.undoCount, 0);
   assert.equal(model.controls.length, 0);
   // 再去掉 dryRun 提交：应成功且读回验证通过，生成自有 curve。
-  const commit = await patch.patch({ ...plan.apply.arguments, dryRun: false });
+  const commit = await patch.patch({ ...plan.apply.arguments, action: "commit" });
   assert.equal(commit.ok, true);
   assert.equal(commit.status, "succeeded");
   assert.equal(commit.effects, "verified");

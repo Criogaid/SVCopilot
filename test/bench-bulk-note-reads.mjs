@@ -27,7 +27,7 @@ async function runScenario({ indices }, { bulk }) {
     contextId: fixture.contextId,
     occurrence: 0,
     patches: indices.map((index) => ({ note: index, set: { lyrics: `b${index}` } })),
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });

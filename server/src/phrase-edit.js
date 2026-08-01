@@ -15,6 +15,7 @@ import { readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
+import { dryRunFromAction } from "./mutation-action.js";
 
 const MAX_CURVES = 16;
 const MAX_NOTE_PATCHES = 200;
@@ -1366,7 +1367,7 @@ function normalizeRequest(request) {
     structureOperations,
     curves,
     voicePatch,
-    dryRun: request.dryRun === true,
+    dryRun: dryRunFromAction(request.action),
     atomic: request.atomic !== false,
     waitFor,
     responseMode,

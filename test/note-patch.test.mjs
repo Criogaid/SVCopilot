@@ -181,7 +181,7 @@ test("sv_patch_notes dryRun plans a diff without any host side effect", async ()
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
-    dryRun: true,
+    action: "dry_run",
     patches: [
       { note: nid(snapshot, 0), set: { lyrics: "ka", pitch: 61 } },
       { note: nid(snapshot, 2), set: { lyrics: "u" } },
@@ -210,6 +210,7 @@ test("sv_patch_notes dryRun plans a diff without any host side effect", async ()
 test("sv_patch_notes applies multi-field patches deterministically and verifies read-back", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "phonemes",
     timeoutMs: 100,
@@ -259,6 +260,7 @@ test("sv_patch_notes applies multi-field patches deterministically and verifies 
 test("sv_patch_notes rejects expected mismatches before any write", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       { note: nid(snapshot, 0), expected: { lyrics: "wrong" }, set: { lyrics: "ka" } },
@@ -281,6 +283,7 @@ test("sv_patch_notes rejects expected mismatches before any write", async () => 
 test("sv_patch_notes reports no_change without undo records for a no-op set", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [{ note: nid(snapshot, 0), set: { lyrics: "a", pitch: 60 } }],
   });
@@ -297,6 +300,7 @@ test("sv_patch_notes atomic mode rolls back applied writes on mid-apply failure"
   const { model, service, snapshot } = await createFixture();
   injectFailure(model, "setLyrics", { code: "ARGUMENT_MISMATCH", message: "injected setLyrics failure" });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       { note: nid(snapshot, 0), set: { pitch: 61, detuneCents: 10 } },
@@ -326,6 +330,7 @@ test("sv_patch_notes atomic mode rolls back on read-back mismatch", async () => 
   // setPitch 静默不生效：写入被宿主忽略，读回验证必须失败并触发补偿。
   model.ignoreSetters.add("setPitch");
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [{ note: nid(snapshot, 0), set: { pitch: 61, lyrics: "ka" } }],
   });
@@ -343,6 +348,7 @@ test("sv_patch_notes non-atomic mode reports partial and leaves applied writes",
   const { model, service, snapshot } = await createFixture();
   injectFailure(model, "setLyrics", { code: "ARGUMENT_MISMATCH" });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     atomic: false,
     patches: [
@@ -364,6 +370,7 @@ test("sv_patch_notes reports outcome_unknown without compensation when the host 
   const { model, service, snapshot } = await createFixture();
   injectFailure(model, "setLyrics", { code: "HOST_DETACHED", message: "bridge detached" });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       { note: nid(snapshot, 0), set: { pitch: 61 } },
@@ -387,6 +394,7 @@ test("sv_patch_notes reports rollback_failed when compensation itself fails", as
   injectFailure(model, "setLyrics", { code: "ARGUMENT_MISMATCH" });
   injectFailure(model, "setPitch", { skip: 1, code: "ARGUMENT_MISMATCH", message: "rollback write refused" });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       { note: nid(snapshot, 0), set: { pitch: 61 } },
@@ -410,12 +418,14 @@ test("sv_patch_notes validates note indexes, duplicates, and field names", async
   // 「引用了别的上下文」不再是一种可能的输入：index 不携带 context/occurrence 前缀，
   // 因此那种请求在结构上无法表达，只剩下越界这一种失败。
   const outOfRange = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [{ note: nid(snapshot, 9), set: { lyrics: "x" } }],
   });
   assert.equal(outOfRange.error.code, "NOTE_INDEX_OUT_OF_RANGE");
 
   const duplicate = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       { note: nid(snapshot, 0), set: { lyrics: "x" } },
@@ -426,6 +436,7 @@ test("sv_patch_notes validates note indexes, duplicates, and field names", async
 
   await assert.rejects(
     service.patchNotes({
+      action: "commit",
       contextId: snapshot.contextId,
       patches: [{ note: nid(snapshot, 0), set: { color: "red" } }],
     }),
@@ -433,6 +444,7 @@ test("sv_patch_notes validates note indexes, duplicates, and field names", async
   );
   await assert.rejects(
     service.patchNotes({
+      action: "commit",
       contextId: snapshot.contextId,
       patches: [{ note: nid(snapshot, 0), set: { pitch: 200 } }],
     }),
@@ -444,7 +456,7 @@ test("sv_patch_notes warns when onset changes may reorder notes", async () => {
   const { service, snapshot } = await createFixture();
   const result = await service.patchNotes({
     contextId: snapshot.contextId,
-    dryRun: true,
+    action: "dry_run",
     patches: [{ note: nid(snapshot, 0), set: { onsetBlick: 2116800 } }],
   });
   assert.ok(result.warnings.some((warning) => warning.code === "NOTE_ORDER_MAY_CHANGE"));
@@ -453,6 +465,7 @@ test("sv_patch_notes warns when onset changes may reorder notes", async () => {
 test("sv_patch_notes invalidates the context after a successful write", async () => {
   const { snapshots, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
@@ -464,6 +477,7 @@ test("sv_patch_notes invalidates the context after a successful write", async ()
 test("sv_patch_notes verifies null-prototype nested attributes from the pipe decoder", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [
@@ -491,6 +505,7 @@ test("sv_patch_notes does not echo typed-v2 sentinels in partial attribute write
   };
 
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [{ note: nid(snapshot, 0), set: { attributes: { dur: 1.25 } } }],
@@ -505,6 +520,7 @@ test("sv_patch_notes normalizes a typed empty attribute table before writing", a
   const { model, service, snapshot } = await createFixture();
   model.notes[0].attributes = {};
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [{ note: nid(snapshot, 0), set: { attributes: { muted: true } } }],
@@ -519,6 +535,7 @@ test("sv_patch_notes atomic mode rolls back when the read-back getter throws", a
   // 注入发生在快照之后：resolve 指纹 3 次，第 4 次才是写后读回验证。
   injectFailure(model, "getLyrics", { skip: 3, code: "UNKNOWN_HANDLE", message: "getter exploded" });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
   });
@@ -536,6 +553,7 @@ test("sv_patch_notes atomic mode rolls back when the read-back getter throws", a
 test("sv_patch_notes accepts fractional detuneCents", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [{ note: nid(snapshot, 0), set: { detuneCents: -7.5 } }],
@@ -566,6 +584,7 @@ test("sv_patch_notes reports rollback_failed when a merge-semantics host cannot 
   // pitch setter 被忽略触发回滚；attributes 已写入新 key，合并语义下无法删除。
   model.ignoreSetters.add("setPitch");
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       {
@@ -602,6 +621,7 @@ test("sv_patch_notes reports rollback_failed under an undocumented replace-seman
   };
   model.ignoreSetters.add("setPitch");
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       {
@@ -623,6 +643,7 @@ test("sv_patch_notes reports zero remaining changes after a verified rollback", 
   const { model, service, snapshot } = await createFixture();
   injectFailure(model, "setLyrics", { code: "ARGUMENT_MISMATCH" });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     patches: [
       { note: nid(snapshot, 0), set: { pitch: 61 } },
@@ -690,6 +711,7 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
 test("sv_patch_notes accepts a range context and resolves notes by group index", async () => {
   const { model, snapshots, service, contextId } = createRangeFixture();
   const result = await service.patchNotes({
+    action: "commit",
     contextId,
     patches: [{ note: 1, set: { lyrics: "ne", pitch: 65 } }],
     waitFor: "none",
@@ -711,6 +733,7 @@ test("sv_patch_notes accepts a range context and resolves notes by group index",
 test("sv_patch_notes range context enforces shared-target confirmation", async () => {
   const { model, service, contextId } = createRangeFixture({ shared: true });
   const refused = await service.patchNotes({
+    action: "commit",
     contextId,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     waitFor: "none",
@@ -723,6 +746,7 @@ test("sv_patch_notes range context enforces shared-target confirmation", async (
   assert.equal(model.undoCount, 0);
 
   const confirmed = await service.patchNotes({
+    action: "commit",
     contextId,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     allowSharedTargetMutation: true,
@@ -737,7 +761,7 @@ test("sv_patch_notes range context dry-run defers the shared-target scan with wa
   const result = await service.patchNotes({
     contextId,
     patches: [{ note: 0, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   });
   assert.equal(result.status, "dry_run");
@@ -755,6 +779,7 @@ test("sv_patch_notes separates an out-of-range index from an uncaptured one", as
   // （§3.2 规则 5）——越界靠重试永远不会成功，未捕获则需要重新捕获更宽的范围。
   const { service, contextId } = createRangeFixture();
   const outOfRange = await service.patchNotes({
+    action: "commit",
     contextId,
     patches: [{ note: 999, set: { lyrics: "x" } }],
     waitFor: "none",
@@ -768,6 +793,7 @@ test("sv_patch_notes range context detects stale fingerprints before writing", a
   const { model, service, contextId } = createRangeFixture();
   model.notes[0].lyrics = "changed-behind-context";
   const result = await service.patchNotes({
+    action: "commit",
     contextId,
     patches: [{ note: 0, set: { lyrics: "x" } }],
     waitFor: "none",
@@ -784,7 +810,7 @@ test("sv_patch_notes range preflight ignores unrelated note drift", async () => 
     contextId,
     occurrence: 0,
     patches: [{ note: 0, expected: { lyrics: "a" }, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   });
 
@@ -799,7 +825,7 @@ test("sv_patch_notes resolves notes by group index and keeps diffs free of redun
     contextId,
     occurrence: 0,
     patches: [{ note: 1, expected: { lyrics: "i" }, set: { lyrics: "ne" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   });
 
@@ -826,7 +852,7 @@ test("sv_patch_notes requires the note field in every patch", async () => {
         contextId,
         occurrence: 0,
         patches: [patch],
-        dryRun: true,
+        action: "dry_run",
         waitFor: "none",
       }),
       { code: "INVALID_ARGUMENTS" },
@@ -881,7 +907,7 @@ test("sv_patch_notes routes scoped preflight through one bulk read", async () =>
     contextId: legacy.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });
@@ -892,7 +918,7 @@ test("sv_patch_notes routes scoped preflight through one bulk read", async () =>
     contextId: bulk.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });
@@ -936,7 +962,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
     contextId: mismatch.contextId,
     occurrence: 0,
     patches: [{ note: 0, expected: { pitch: 99 }, set: { pitch: 61 } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   });
   // expected 冲突仍由指纹判定，且不因来自批量读取而变成宿主错误。
@@ -961,7 +987,7 @@ test("bulk reads leave expected-mismatch and stale detection unchanged", async (
     contextId: stale.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   });
   // 批量读到的指纹必须仍然参与过期判定，不能因为来自 internal op 就被当成权威现状。
@@ -977,7 +1003,7 @@ test("sv_patch_notes diagnostics expose phases and method aggregates only when r
     contextId: plainFixture.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   });
   assert.equal("diagnostics" in plain, false);
@@ -987,7 +1013,7 @@ test("sv_patch_notes diagnostics expose phases and method aggregates only when r
     contextId: diagnosticFixture.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });
@@ -1018,7 +1044,7 @@ test("sv_patch_notes reuses verified fingerprints for expected checks", async ()
         set: { lyrics: "x" },
       },
     ],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });
@@ -1033,7 +1059,7 @@ test("sv_patch_notes still reads attributes outside the verified fingerprint", a
     contextId: fixture.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { attributes: { muted: true } } }],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
     diagnostics: true,
   });
@@ -1045,6 +1071,7 @@ test("sv_patch_notes still reads attributes outside the verified fingerprint", a
 test("sv_patch_notes keeps post-write read-back after fingerprint reuse", async () => {
   const fixture = createRangeFixture();
   const result = await fixture.service.patchNotes({
+    action: "commit",
     contextId: fixture.contextId,
     occurrence: 0,
     patches: [{ note: 0, set: { lyrics: "x" } }],
@@ -1066,6 +1093,7 @@ test("sv_patch_notes keeps verified success when post-commit processing observat
     message: "Timeout waiting for SynthV bridge",
   });
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "phonemes",
     patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
@@ -1087,6 +1115,7 @@ test("sv_patch_notes keeps verified success when post-commit processing observat
 test("sv_patch_notes no_change keeps the context valid for reuse", async () => {
   const { model, snapshots, service, snapshot } = await createFixture();
   const noop = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [{ note: nid(snapshot, 0), set: { lyrics: "a" } }],
@@ -1096,6 +1125,7 @@ test("sv_patch_notes no_change keeps the context valid for reuse", async () => {
   assert.ok(snapshots.store.get(snapshot.contextId));
 
   const real = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [{ note: nid(snapshot, 0), set: { lyrics: "ka" } }],
@@ -1130,6 +1160,7 @@ test("sv_patch_notes tolerates float32 quantization on detune and attribute floa
     return originalCall(request);
   };
   const result = await service.patchNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     patches: [

@@ -322,7 +322,7 @@ test("every write recipe names the shared-target gate and the non-retryable outc
       `${id} must tell the model not to blind-retry outcome_unknown`
     );
     assert.ok(
-      recipe.steps.some((step) => step.arguments?.arguments?.dryRun === true),
+      recipe.steps.some((step) => step.arguments?.arguments?.action === "dry_run"),
       `${id} must dry-run before committing`
     );
   }

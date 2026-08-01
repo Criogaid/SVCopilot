@@ -348,7 +348,7 @@ async function runWalkthrough(client) {
       contextId: captured.result.contextId,
       occurrence: captured.group.occurrence,
       patches: [{ note: 0, set: { detuneCents: 7 } }],
-      dryRun: true,
+      action: "dry_run",
       waitFor: "none",
     })
   );
@@ -366,7 +366,7 @@ async function runWalkthrough(client) {
           },
         },
       ],
-      dryRun: true,
+      action: "dry_run",
     })
   );
   dryRuns.edit_phrase = structured(
@@ -376,7 +376,7 @@ async function runWalkthrough(client) {
         occurrence: captured.group.occurrence,
       },
       notePatches: [{ note: 0, set: { detuneCents: 5 } }],
-      dryRun: true,
+      action: "dry_run",
       waitFor: "none",
     })
   );
@@ -414,7 +414,7 @@ async function runWalkthrough(client) {
       { op: "delete", noteIndex: 3 },
       { op: "merge", notes: [5, 6] },
     ],
-    dryRun: true,
+    action: "dry_run",
     waitFor: "none",
   };
   const structureDryRun = structured(await facadeCall(client, "sv_restructure_notes", structureArgs));
@@ -540,7 +540,7 @@ async function runWalkthrough(client) {
       {
         contextId: captured.result.contextId,
         patches: [{ note: 999999, set: { detuneCents: 7 } }],
-        dryRun: true,
+        action: "dry_run",
       },
     ],
     sv_audition: ["sv_stop_audition", { id: "aud_missing" }],

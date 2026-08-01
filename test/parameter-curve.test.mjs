@@ -394,6 +394,8 @@ function fourCurveRequest(overrides = {}) {
       },
     ],
     atomic: true,
+    // action 无默认值（§10.6）；这些用例默认描述提交，dry-run 用例显式覆盖。
+    action: "commit",
     ...overrides,
   };
 }
@@ -404,11 +406,14 @@ const TARGET = { trackIndex: 0, groupIndex: 0 };
 // 却占全部 schema 的 10%，还让模型每次都要判断"该调哪个"。这些用例仍然描述"一条
 // 曲线"的行为，因此统一走复数端点并读 curves[0]，而不是保留一份并行契约。
 function oneCurve(request) {
-  const { target, dryRun, atomic, responseMode, undoLabel, ...curve } = request;
+  const { target, action, atomic, responseMode, undoLabel, ...curve } = request;
   return {
     target,
     curves: [curve],
-    ...(dryRun === undefined ? {} : { dryRun }),
+    // action 无默认值（§10.6）：省略即写入的旧 dryRun 语义已删除。这些用例里
+    // "不带 action" 表达的是提交，因此在辅助函数里补成 commit，而不是让每个调用点
+    // 都重复一遍。
+    action: action ?? "commit",
     ...(atomic === undefined ? {} : { atomic }),
     ...(undoLabel === undefined ? {} : { undoLabel }),
     responseMode: responseMode ?? "standard",
@@ -465,7 +470,7 @@ test("sv_patch_parameter_curves replace: dryRun has no side effects, real write 
     ],
   };
 
-  const plan = await service.patchCurves(oneCurve({ ...request, dryRun: true }));
+  const plan = await service.patchCurves(oneCurve({ ...request, action: "dry_run" }));
   assert.equal(plan.status, "dry_run");
   assert.equal(plan.curves[0].before.pointCount, 3);
   assert.equal(plan.curves[0].planned.pointCount, 2);
@@ -916,7 +921,7 @@ test("sv_patch_parameter_curves dry-run preflights four curves without writes or
     tension: model.batchPoints.tension.map((point) => [...point]),
   };
   const result = await createService(model).patchCurves(
-    fourCurveRequest({ dryRun: true, responseMode: "compact", undoLabel: "Tune Lead 1" })
+    fourCurveRequest({ action: "dry_run", responseMode: "compact", undoLabel: "Tune Lead 1" })
   );
 
   assert.equal(result.ok, true);
@@ -1088,7 +1093,7 @@ test("sv_patch_parameter_curves rejects typos before the host can apply its defa
     "definitelyNotAParameter",
     "toneShift",
   ]) {
-    const request = fourCurveRequest({ dryRun: true });
+    const request = fourCurveRequest({ action: "dry_run" });
     request.curves = [
       {
         parameter,
@@ -1114,7 +1119,7 @@ test("sv_patch_parameter_curves rejects typos before the host can apply its defa
 test("sv_patch_parameter_curves validates dynamic vocal modes and reports aliases", async () => {
   const model = addBatchCurves(createCurveModel());
   const service = createService(model);
-  const valid = fourCurveRequest({ dryRun: true, responseMode: "compact" });
+  const valid = fourCurveRequest({ action: "dry_run", responseMode: "compact" });
   valid.curves = [
     {
       parameter: "VOCALMODE_POWERFUL",
@@ -1128,7 +1133,7 @@ test("sv_patch_parameter_curves validates dynamic vocal modes and reports aliase
   assert.equal(validResult.curves[0].requestedParameter, "VOCALMODE_POWERFUL");
   assert.equal(validResult.curves[0].resolvedParameter, "vocalMode_Powerful");
 
-  const invalid = fourCurveRequest({ dryRun: true });
+  const invalid = fourCurveRequest({ action: "dry_run" });
   invalid.curves = [
     {
       parameter: "vocalMode_NoSuchMode",
@@ -1146,7 +1151,7 @@ test("sv_patch_parameter_curves validates dynamic vocal modes and reports aliase
 test("sv_patch_parameter_curves rejects a host fallback that disagrees with the whitelist", async () => {
   const model = addBatchCurves(createCurveModel());
   model.forceParameterFallback = "tension";
-  const request = fourCurveRequest({ dryRun: true });
+  const request = fourCurveRequest({ action: "dry_run" });
   request.curves = [request.curves[1]];
   const result = await createService(model).patchCurves(request);
 
@@ -1206,10 +1211,10 @@ test("sv_patch_parameter_curves measures ExecutionCoordinator wait separately", 
     },
     { now: () => clock }
   );
-  const first = service.patchCurves(fourCurveRequest({ dryRun: true }));
+  const first = service.patchCurves(fourCurveRequest({ action: "dry_run" }));
   await firstEntered;
   clock = 100;
-  const second = service.patchCurves(fourCurveRequest({ dryRun: true }));
+  const second = service.patchCurves(fourCurveRequest({ action: "dry_run" }));
   await Promise.resolve();
   clock = 1000;
   releaseFirst();
@@ -1227,7 +1232,7 @@ test("sv_patch_parameter_curves measures ExecutionCoordinator wait separately", 
 test("sv_patch_parameter_curves verbose includes point evidence and rejects duplicates", async () => {
   const model = addBatchCurves(createCurveModel());
   const verbose = await createService(model).patchCurves(
-    fourCurveRequest({ dryRun: true, responseMode: "verbose" })
+    fourCurveRequest({ action: "dry_run", responseMode: "verbose" })
   );
   assert.deepEqual(verbose.curves[0].before.points[0], {
     localBlick: 0,
@@ -1261,7 +1266,7 @@ test("range context resolves note anchors and musical positions in batch dry-run
   const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
-    dryRun: true,
+    action: "dry_run",
     responseMode: "standard",
     curves: [
       {
@@ -1328,7 +1333,7 @@ test("a one-curve dry-run reports semantic range and resolved point evidence", a
       to: { anchor: { note: 0, position: "end" } },
     },
     points: [{ anchor: { note: 0, position: "center" }, value: 1 }],
-    dryRun: true,
+    action: "dry_run",
   }));
   assert.equal(result.ok, true);
   assert.equal(result.curves[0].range.coordinate, "semantic");
@@ -1342,7 +1347,7 @@ test("semantic ranges support snapshot boundaries and adjacent-note gap anchors"
   const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
-    dryRun: true,
+    action: "dry_run",
     responseMode: "standard",
     curves: [
       {
@@ -1375,7 +1380,7 @@ test("musical positions reject a range context whose meter map changed", async (
   model.meterMarks = [{ position: 0, positionBlick: 0, numerator: 3, denominator: 4 }];
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1396,7 +1401,7 @@ test("semantic curve points reject duplicate resolved positions before writing",
   const { service, contextId } = createRangeContextService(model);
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1421,7 +1426,7 @@ test("note anchors reject stale fingerprints", async () => {
   noteState.pitch = 61;
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0 },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1461,7 +1466,7 @@ test("target.expectedNotes passes preflight when the anchor note is unchanged", 
       expectedTimeOffsetBlick: model.groupOnset,
       expectedNotes: [expectedNoteN0()],
     },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1490,7 +1495,7 @@ test("partial expectedNotes fingerprints fail INVALID_ARGUMENTS, not a false STA
       occurrence: 0,
       expectedNotes: [{ indexInGroup: 0, onsetBlick: 0 }],
     },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1522,7 +1527,7 @@ test("target.expectedNotes rejects duplicate note indexes before the fingerprint
       occurrence: 0,
       expectedNotes: [expectedNoteN0(), duplicateIdentity],
     },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1561,7 +1566,7 @@ test("expectedTimeOffsetBlick catches a reference move that note fingerprints ca
   // 只带 expectedNotes（本地指纹）：守卫看不到移动，提交"成功"——这正是被审计指出的漏洞形态。
   const fingerprintsOnly = await service.patchCurves({
     target: { contextId, occurrence: 0, expectedNotes: [expectedNoteN0()] },
-    dryRun: false,
+    action: "commit",
     curves: absoluteCurves,
   });
   assert.equal(fingerprintsOnly.ok, true);
@@ -1573,7 +1578,7 @@ test("expectedTimeOffsetBlick catches a reference move that note fingerprints ca
       expectedTimeOffsetBlick: capturedOffset,
       expectedNotes: [expectedNoteN0()],
     },
-    dryRun: false,
+    action: "commit",
     curves: absoluteCurves,
   });
   assert.equal(guarded.ok, false);
@@ -1589,7 +1594,7 @@ test("target.expectedNotes fails STALE_CONTEXT and writes nothing when the ancho
   noteState.onsetBlick = Q;
   const result = await service.patchCurves({
     target: { contextId, occurrence: 0, expectedNotes: [expectedNoteN0()] },
-    dryRun: false,
+    action: "commit",
     curves: [
       {
         parameter: "loudness",
@@ -1613,7 +1618,7 @@ test("shared target occurrences require explicit mutation confirmation", async (
   const { service, contextId } = createRangeContextService(model, { shared: true });
   const request = {
     target: { contextId, occurrence: 0 },
-    dryRun: true,
+    action: "dry_run",
     curves: [
       {
         parameter: "loudness",
@@ -1628,13 +1633,13 @@ test("shared target occurrences require explicit mutation confirmation", async (
   assert.ok(preview.warnings.some((warning) => warning.code === "SHARED_TARGET_DRY_RUN"));
   assert.equal(model.undoCount, 0);
 
-  const rejected = await service.patchCurves({ ...request, dryRun: false });
+  const rejected = await service.patchCurves({ ...request, action: "commit" });
   assert.equal(rejected.error.code, "SHARED_TARGET_REQUIRES_CONFIRMATION");
   assert.equal(model.undoCount, 0);
 
   const accepted = await service.patchCurves({
     ...request,
-    dryRun: false,
+    action: "commit",
     target: { ...request.target, allowSharedTargetMutation: true },
   });
   assert.equal(accepted.ok, true);
@@ -1646,6 +1651,7 @@ test("shared target mathematical no-op does not require mutation confirmation", 
   const model = createCurveModel();
   const { service, contextId } = createRangeContextService(model, { shared: true });
   const result = await service.patchCurves({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     curves: [
       {
@@ -1750,6 +1756,7 @@ test("mathematical no-op curve writes return no_change without undo records", as
     curves: [
       { parameter: "loudness", mode: "scale", amount: 1, range: { fromBlick: 0, toBlick: 2 * Q } },
     ],
+    action: "commit",
   });
   assert.equal(batch.status, "no_change");
   assert.equal(batch.undoRecords, 0);

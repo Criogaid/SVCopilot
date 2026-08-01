@@ -81,7 +81,8 @@ export function resolvePlanReference({
       mutationRequest.target.occurrence = 0;
     }
   }
-  mutationRequest.dryRun = action === "dry_run";
+  // 执行请求只带 action（§10.6）；dryRun 布尔已从整个 surface 删除。
+  mutationRequest.action = action;
   applyConfirmations(mutationRequest, expectedTargetTool, confirmations);
   applyExecutionOptions(mutationRequest, expectedTargetTool, executionOptions);
 

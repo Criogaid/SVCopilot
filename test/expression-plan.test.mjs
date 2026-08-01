@@ -88,7 +88,7 @@ function assertApplyRequestsWellFormed(result) {
   assert.ok(Array.isArray(result.applyRequests) && result.applyRequests.length >= 1);
   for (const request of result.applyRequests) {
     assert.equal(request.tool, "sv_patch_parameter_curves");
-    assert.equal(request.arguments.dryRun, true);
+    assert.equal(request.arguments.action, "dry_run");
     assert.equal(request.arguments.atomic, true);
     assert.ok(request.arguments.target.contextId);
     assert.equal(request.arguments.target.occurrence, 0);
@@ -133,7 +133,6 @@ test("explicit scoop compiles to a guarded pitchDelta replace operation", async 
   assert.equal(result.ok, true);
   assert.equal(result.status, "planned");
   assert.equal(result.effects, "none");
-  assert.equal(result.dryRun, true);
   assert.match(result.planId, /^plan_[0-9a-f]{16}$/);
   assert.equal(result.summary.operationCount, 1);
   const operation = result.operations[0];

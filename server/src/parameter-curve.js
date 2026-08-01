@@ -10,6 +10,7 @@ import {
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { decodeDense } from "./dense-codec.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { dryRunFromAction } from "./mutation-action.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
@@ -1941,9 +1942,6 @@ function normalizeBatchPatchRequest(request) {
       throw withCurveFailure(error, index, curve?.parameter, "validate");
     }
   });
-  if (request.dryRun !== undefined && typeof request.dryRun !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "dryRun must be a boolean");
-  }
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
@@ -1963,7 +1961,7 @@ function normalizeBatchPatchRequest(request) {
   return {
     target,
     curves,
-    dryRun: request.dryRun === true,
+    dryRun: dryRunFromAction(request.action),
     atomic: request.atomic !== false,
     responseMode,
     undoLabel: request.undoLabel ?? null,

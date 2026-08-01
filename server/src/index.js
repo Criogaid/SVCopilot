@@ -533,12 +533,19 @@ const PLAN_REF_SCHEMA = {
   minLength: 1,
   description: "The artifactId string from a planner's apply.planRef.",
 };
+// 每个 mutation 请求都必须显式说明自己要不要写（§10.6 / §13.4 规则 5）。
+//
+// 为什么不是 `dryRun` 布尔：布尔有默认值，而"默认值"在写操作上是错的方向——省略
+// 它就等于同意写入。旧 schema 的 `dryRun: {default: false}` 让"我忘了填"和"我确实
+// 要提交"变成同一个请求。enum 没有默认值，因此 schema 层就能挡住漏填。
+const ACTION_SCHEMA = {
+  enum: ["dry_run", "commit"],
+  description:
+    "Required. dry_run validates and reports the planned diff without any host write; commit writes and keeps every live preflight check. There is no default — a write must be asked for explicitly.",
+};
 const PLAN_EXECUTION_PROPERTIES = {
   planRef: PLAN_REF_SCHEMA,
-  action: {
-    enum: ["dry_run", "commit"],
-    description: "Required with planRef. dry_run never writes; commit keeps all live preflight checks.",
-  },
+  action: ACTION_SCHEMA,
   confirmations: {
     type: "object",
     additionalProperties: false,
@@ -907,7 +914,7 @@ export const TOOLS = [
   {
     name: "sv_patch_notes",
     description:
-      'Patch fields of existing notes identified by 0-based note index within the resolved NoteGroup. Provide occurrence when a range context has multiple vocal occurrences. For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (dryRun returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. diagnostics:true adds phase timings and aggregate host method counts without logging musical values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
+      'Patch fields of existing notes identified by 0-based note index within the resolved NoteGroup. Provide occurrence when a range context has multiple vocal occurrences. For range contexts a shared target NoteGroup is scanned project-wide at commit and requires allowSharedTargetMutation:true. Validates everything before writing, produces a plannedDiff (action dry_run returns it without side effects), writes inside undo boundaries, reads every value back, and with atomic:true compensates verified failures by restoring journaled previous values. diagnostics:true adds phase timings and aggregate host method counts without logging musical values. atomicity is "verified_compensation", not ACID: status distinguishes succeeded, rolled_back, rollback_failed, partial, and outcome_unknown.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -979,11 +986,7 @@ export const TOOLS = [
             required: ["note", "set"],
           },
         },
-        dryRun: {
-          type: "boolean",
-          default: false,
-          description: "Validate and return plannedDiff without any host write.",
-        },
+        action: ACTION_SCHEMA,
         atomic: {
           type: "boolean",
           default: true,
@@ -1000,7 +1003,10 @@ export const TOOLS = [
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
-      oneOf: [{ required: ["contextId", "patches"] }, { required: ["planRef", "action"] }],
+      oneOf: [
+        { required: ["contextId", "patches", "action"] },
+        { required: ["planRef", "action"] },
+      ],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
@@ -1229,7 +1235,7 @@ export const TOOLS = [
   {
     name: "sv_plan_expression",
     description:
-      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into a unified apply envelope: read apply.tool and submit apply.arguments verbatim to that tool (dryRun first, then commit through its hardened transaction kernel). Non-adjacent gesture clusters on one parameter need several sequential calls, so apply.callCount/apply.additionalCalls list them in order and apply.expectedUserUndoSteps reports the resulting Undo record count honestly — they are separate transactions, so a later failure does not roll back earlier commits. The legacy applyRequests array carries the identical payload and is deprecated. Each apply target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. Intent-derived gestures never anchor on breath notes (lyrics "br", no singable pitch — their duration still separates phrases; explicit gestures may still target them deliberately). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
+      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into a unified apply envelope: read apply.tool and submit apply.arguments verbatim to that tool (action dry_run first, then action commit through its hardened transaction kernel). Non-adjacent gesture clusters on one parameter need several sequential calls, so apply.callCount/apply.additionalCalls list them in order and apply.expectedUserUndoSteps reports the resulting Undo record count honestly — they are separate transactions, so a later failure does not roll back earlier commits. The legacy applyRequests array carries the identical payload and is deprecated. Each apply target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. Intent-derived gestures never anchor on breath notes (lyrics "br", no singable pitch — their duration still separates phrases; explicit gestures may still target them deliberately). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1991,7 +1997,7 @@ export const TOOLS = [
             required: ["parameter", "mode", "range"],
           },
         },
-        dryRun: { type: "boolean", default: false },
+        action: ACTION_SCHEMA,
         atomic: { type: "boolean", default: true },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
         undoLabel: {
@@ -2000,14 +2006,17 @@ export const TOOLS = [
           description: "Audit metadata only; the SynthV Undo API cannot display custom labels.",
         },
       },
-      oneOf: [{ required: ["target", "curves"] }, { required: ["planRef", "action"] }],
+      oneOf: [
+        { required: ["target", "curves", "action"] },
+        { required: ["planRef", "action"] },
+      ],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
     name: "sv_patch_pitch_controls",
     description:
-      "Atomically add, update, or delete PitchControlPoint/PitchControlCurve objects on one note group occurrence (SynthV 2.1+). Every operation resolves its target by expectedFingerprint (never by stale index — the host re-sorts on every add/remove), re-reads the group UUID and the live group fingerprint before writing, opens one host Undo interval, writes in place, then verifies by host read-back (pitch within 1e-4 semitone, BLICK/point-count exact). New objects are tagged with the svcopilot.* ownership namespace; external objects keep their scriptData. On any failure after the first write, every touched control is restored in reverse order with read-back (verified compensation, not ACID). Units are explicit and must not be mixed: position=group-local integer BLICK, pitch=group-relative semitone, curve points relative to the curve anchor — never cents. dryRun and no_change perform zero host writes and create zero Undo. Requires a range context from sv_snapshot_range include:[\"pitchControls\"]; shared targets need allowSharedTargetMutation:true. If a client collapses the nested operation/kind types to unknown, read svcopilot://schemas/sv_patch_pitch_controls for the exact validated input schema.",
+      "Atomically add, update, or delete PitchControlPoint/PitchControlCurve objects on one note group occurrence (SynthV 2.1+). Every operation resolves its target by expectedFingerprint (never by stale index — the host re-sorts on every add/remove), re-reads the group UUID and the live group fingerprint before writing, opens one host Undo interval, writes in place, then verifies by host read-back (pitch within 1e-4 semitone, BLICK/point-count exact). New objects are tagged with the svcopilot.* ownership namespace; external objects keep their scriptData. On any failure after the first write, every touched control is restored in reverse order with read-back (verified compensation, not ACID). Units are explicit and must not be mixed: position=group-local integer BLICK, pitch=group-relative semitone, curve points relative to the curve anchor — never cents. action dry_run and no_change perform zero host writes and create zero Undo. Requires a range context from sv_snapshot_range include:[\"pitchControls\"]; shared targets need allowSharedTargetMutation:true. If a client collapses the nested operation/kind types to unknown, read svcopilot://schemas/sv_patch_pitch_controls for the exact validated input schema.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2118,7 +2127,7 @@ export const TOOLS = [
             ],
           },
         },
-        dryRun: { type: "boolean", default: false },
+        action: ACTION_SCHEMA,
         atomic: {
           type: "boolean",
           const: true,
@@ -2135,7 +2144,7 @@ export const TOOLS = [
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
       oneOf: [
-        { required: ["contextId", "occurrence", "operations"] },
+        { required: ["contextId", "occurrence", "operations", "action"] },
         { required: ["planRef", "action"] },
       ],
     },
@@ -2144,12 +2153,15 @@ export const TOOLS = [
   {
     name: "sv_plan_pitch_gesture",
     description:
-      'Compile explicit pitch gestures (transition, attack, release, vibrato) anchored to snapshot notes into a reviewable apply envelope for sv_patch_pitch_controls. Pure in-memory and deterministic: it reads only the range context (notes/tempo/quarter) and never touches the host. Exact lowercase "br" is the officially documented non-melodic breath event: specialEventPolicy defaults to warn_and_skip, include is an explicit low-level opt-in, and error rejects the whole plan. Skips are structured and an all-skipped request returns no_change with no apply. Intent durations may be expressed in seconds (converted via the tempo map), quarters, or noteRatio; all output coordinates are group-local integer BLICK and group-relative semitones (NOT cents). Every generated curve is a new svcopilot-owned object with bounded, non-overshooting shapes and explicit clamp warnings; the planner only ADDS curves and never deletes or overwrites existing pitch controls. apply.arguments carries expectedNotes/expectedTimeOffsetBlick/expectedPitchOffsetSemitone drift guards — submit it verbatim to sv_patch_pitch_controls with dryRun:true first. If a client collapses the nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
+      'Compile explicit pitch gestures (transition, attack, release, vibrato) anchored to snapshot notes into a reviewable apply envelope for sv_patch_pitch_controls. Pure in-memory and deterministic: it reads only the range context (notes/tempo/quarter) and never touches the host. Exact lowercase "br" is the officially documented non-melodic breath event: specialEventPolicy defaults to warn_and_skip, include is an explicit low-level opt-in, and error rejects the whole plan. Skips are structured and an all-skipped request returns no_change with no apply. Intent durations may be expressed in seconds (converted via the tempo map), quarters, or noteRatio; all output coordinates are group-local integer BLICK and group-relative semitones (NOT cents). Every generated curve is a new svcopilot-owned object with bounded, non-overshooting shapes and explicit clamp warnings; the planner only ADDS curves and never deletes or overwrites existing pitch controls. apply.arguments carries expectedNotes/expectedTimeOffsetBlick/expectedPitchOffsetSemitone drift guards — submit it verbatim to sv_patch_pitch_controls with action dry_run first. If a client collapses the nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        ...PLAN_EXECUTION_PROPERTIES,
+        // 这里**没有** PLAN_EXECUTION_PROPERTIES：本工具是只读规划器
+        // （readOnlyHint:true），它产出 planRef 而不是消费 planRef。以前误把执行属性
+        // 展开进来，等于对外宣称可以拿 planRef 提交，而服务端从不读它——一个永远
+        // 不会被执行的入参比没有这个入参更糟。
         contextId: { type: "string", minLength: 1 },
         occurrence: {
           type: "integer",
@@ -2321,10 +2333,10 @@ export const TOOLS = [
           description: "Only preserve is supported; clearing pitchDelta requires a cross-type transaction this version does not implement.",
         },
         allowSharedTargetMutation: { type: "boolean", default: false },
-        dryRun: { type: "boolean", default: false },
+        action: ACTION_SCHEMA,
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
-      required: ["contextId"],
+      required: ["contextId", "action"],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
@@ -2486,14 +2498,14 @@ export const TOOLS = [
           description:
             "Partial patch of NoteGroupReference getVoice/setVoice state. Static fields are enumerated above; every patched field must still be observable in this occurrence's getVoice result, otherwise UNKNOWN_VOICE_PARAMETER.",
         },
-        dryRun: { type: "boolean", default: false },
+        action: ACTION_SCHEMA,
         atomic: { type: "boolean", default: true },
         waitFor: { enum: ["none", "phonemes", "computedAttributes"], default: "none" },
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
         responseMode: { enum: ["compact", "standard", "verbose"], default: "standard" },
       },
-      required: ["target"],
+      required: ["target", "action"],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
@@ -2568,13 +2580,16 @@ export const TOOLS = [
             required: ["op"],
           },
         },
-        dryRun: { type: "boolean", default: false },
+        action: ACTION_SCHEMA,
         atomic: { type: "boolean", default: true },
         waitFor: { enum: ["none", "phonemes", "computedAttributes"] },
         timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
         pollIntervalMs: { type: "integer", minimum: 20, maximum: 2000 },
       },
-      oneOf: [{ required: ["contextId", "operations"] }, { required: ["planRef", "action"] }],
+      oneOf: [
+        { required: ["contextId", "operations", "action"] },
+        { required: ["planRef", "action"] },
+      ],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },

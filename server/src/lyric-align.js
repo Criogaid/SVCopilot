@@ -604,7 +604,7 @@ function buildAlignResponse(
             contextId: loaded.stored.contextId,
             occurrence: loaded.occurrenceOrdinal,
             patches: submittable,
-            dryRun: true,
+            action: "dry_run",
             atomic: true,
           },
         }
@@ -738,7 +738,6 @@ function buildAlignResponse(
   return {
     ok: true,
     status: patchRequest ? "planned" : "no_change",
-    dryRun: true,
     effects: "none",
     planId,
     contextId: loaded.stored.contextId,

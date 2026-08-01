@@ -179,7 +179,7 @@ test("sv_restructure_notes dryRun plans without side effects", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
     contextId: snapshot.contextId,
-    dryRun: true,
+    action: "dry_run",
     operations: [
       { op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 65, lyrics: "e" } },
       { op: "delete", noteIndex: nid(snapshot, 0) },
@@ -195,6 +195,7 @@ test("sv_restructure_notes dryRun plans without side effects", async () => {
 test("sv_restructure_notes inserts a note at the sorted position", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [
@@ -213,6 +214,7 @@ test("sv_restructure_notes inserts a note at the sorted position", async () => {
 test("sv_restructure_notes delete honors expected preconditions", async () => {
   const { model, service, snapshot } = await createFixture();
   const mismatch = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     operations: [{ op: "delete", noteIndex: nid(snapshot, 1), expected: { lyrics: "wrong" } }],
   });
@@ -221,6 +223,7 @@ test("sv_restructure_notes delete honors expected preconditions", async () => {
   assert.equal(model.groupNotes.length, 3);
 
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [{ op: "delete", noteIndex: nid(snapshot, 1), expected: { lyrics: "i" } }],
@@ -232,6 +235,7 @@ test("sv_restructure_notes delete honors expected preconditions", async () => {
 test("sv_restructure_notes splits a note with an extender second half", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [{ op: "split", noteIndex: nid(snapshot, 0), atBlick: Q / 4 }],
@@ -249,6 +253,7 @@ test("sv_restructure_notes splits a note with an extender second half", async ()
 test("sv_restructure_notes merges consecutive notes and can concat lyrics", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [
@@ -264,6 +269,7 @@ test("sv_restructure_notes merges consecutive notes and can concat lyrics", asyn
 test("sv_restructure_notes rejects non-consecutive merges before writing", async () => {
   const { model, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     operations: [{ op: "merge", notes: [nid(snapshot, 0), nid(snapshot, 2)] }],
   });
@@ -278,6 +284,7 @@ test("sv_restructure_notes atomic mode restores structure on mid-apply failure",
   // 第一个 addNote（insert）成功；第二个 addNote（split 的第二个音符）失败。
   model.failures.push({ method: "addNote", remainingSkips: 1, code: "ARGUMENT_MISMATCH" });
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     operations: [
       { op: "insert", note: { onsetBlick: 5 * Q, durationBlick: Q, pitch: 65, lyrics: "e" } },
@@ -299,6 +306,7 @@ test("sv_restructure_notes atomic mode restores structure on mid-apply failure",
 test("sv_restructure_notes invalidates the context after a successful write", async () => {
   const { snapshots, service, snapshot } = await createFixture();
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [{ op: "delete", noteIndex: nid(snapshot, 0) }],
@@ -312,6 +320,7 @@ test("sv_restructure_notes detects silently ignored setters via field read-back"
   // 宿主静默忽略 setDuration：merge 后 first 时长不变，仅数量验证会漏掉。
   model.ignoreSetters.add("setDuration");
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [{ op: "merge", notes: [nid(snapshot, 0), nid(snapshot, 1)] }],
@@ -331,6 +340,7 @@ test("sv_restructure_notes rolls back when the verification getter throws", asyn
   // 注入点：快照后 getNumNotes 依次是 initialNoteCount(1) → verify(2)。
   model.failures.push({ method: "getNumNotes", remainingSkips: 1, code: "UNKNOWN_HANDLE" });
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     operations: [{ op: "delete", noteIndex: nid(snapshot, 0) }],
   });
@@ -347,6 +357,7 @@ test("sv_restructure_notes verifies inserted phoneme and language overrides", as
   const { model, service, snapshot } = await createFixture();
   model.ignoreSetters.add("setPhonemes");
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [
@@ -453,7 +464,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
           note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67, lyrics: "go" },
         },
       ],
-      dryRun: true,
+      action: "dry_run",
       atomic: true,
     },
     targetGroupUuid: occurrence.targetGroupUuid,
@@ -486,6 +497,7 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
 test("sv_restructure_notes accepts a range context and resolves notes by group index", async () => {
   const { model, snapshots, service, contextId } = createRangeFixture();
   const result = await service.restructureNotes({
+    action: "commit",
     contextId,
     operations: [
       { op: "split", noteIndex: 1, atBlick: Q + Q / 2 },
@@ -508,6 +520,7 @@ test("sv_restructure_notes insert-only on a multi-occurrence range needs an occu
     extraOccurrence: true,
   });
   const ambiguous = await service.restructureNotes({
+    action: "commit",
     contextId,
     operations: [{ op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67 } }],
     waitFor: "none",
@@ -518,6 +531,7 @@ test("sv_restructure_notes insert-only on a multi-occurrence range needs an occu
   assert.equal(model.groupNotes.length, 3);
 
   const explicit = await service.restructureNotes({
+    action: "commit",
     contextId,
     occurrence: 0,
     operations: [{ op: "insert", note: { onsetBlick: 3 * Q, durationBlick: Q, pitch: 67, lyrics: "go" } }],
@@ -531,6 +545,7 @@ test("sv_restructure_notes insert-only on a multi-occurrence range needs an occu
 test("sv_restructure_notes range context enforces shared-target confirmation", async () => {
   const { model, service, contextId } = createRangeFixture({ shared: true });
   const refused = await service.restructureNotes({
+    action: "commit",
     contextId,
     operations: [{ op: "delete", noteIndex: 0 }],
     waitFor: "none",
@@ -542,6 +557,7 @@ test("sv_restructure_notes range context enforces shared-target confirmation", a
   assert.equal(model.undoCount, 0);
 
   const confirmed = await service.restructureNotes({
+    action: "commit",
     contextId,
     operations: [{ op: "delete", noteIndex: 0 }],
     allowSharedTargetMutation: true,
@@ -556,6 +572,7 @@ test("sv_restructure_notes rejects a merge whose notes stopped being adjacent af
   // 同请求先 insert 一个落在 n0/n1 之间的音符：计划期指纹判定 n0/n1 相邻，
   // 执行期活动 index 已变为 1 和 3。旧实现会把新音符静默埋进合并时值并报 succeeded。
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "none",
     operations: [
@@ -586,6 +603,7 @@ test("sv_restructure_notes keeps verified success when post-commit processing ob
     message: "Timeout waiting for SynthV bridge",
   });
   const result = await service.restructureNotes({
+    action: "commit",
     contextId: snapshot.contextId,
     waitFor: "phonemes",
     timeoutMs: 100,

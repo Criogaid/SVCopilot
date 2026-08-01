@@ -43,7 +43,7 @@ const sessionId = "sess_plan";
     allowSharedTargetMutation: true,
     atomic: true,
     waitFor: "none",
-    dryRun: false,
+    action: "commit",
   });
 }
 

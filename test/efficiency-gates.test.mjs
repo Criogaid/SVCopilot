@@ -312,6 +312,40 @@ test("a planner success envelope fits the compact budget without its detail payl
   assert.equal(result.applyRequests, undefined);
 });
 
+test("every mutation requires an explicit action and no schema takes dryRun", () => {
+  // §10.6 / §13.4 规则 5：写入意图必须显式。`dryRun` 是布尔，因此带默认值，而在写
+  // 操作上默认值指向错误的方向——省略它就等于同意写入。`action` 是无默认 enum，
+  // 所以「忘了填」在 schema 层就被拒绝，而不是变成一次真实写入。
+  //
+  // 这条门禁同时查两侧：dryRun 不得回来，且每条 mutation 路径都必须 require action。
+  // 只查前者不够——把 action 加进 properties 但忘了加进 required，会让漏填重新变成
+  // 「Ajv 放行、服务端默认提交」。
+  const { operations } = buildOperationCatalog(TOOLS);
+  const offenders = [];
+  const notRequired = [];
+  for (const entry of operations.values()) {
+    const names = new Set();
+    collectPropertyNames(entry.inputSchema, names);
+    if (names.has("dryRun")) offenders.push(entry.operation);
+    const schema = entry.inputSchema;
+    if (!schema.properties?.action) continue;
+    // action 存在时，它必须出现在每一个 required 分支里（顶层 required，或 oneOf 的
+    // 每一支）。任何一支漏掉，那条路径就还能不带 action 提交。
+    const branches = Array.isArray(schema.oneOf)
+      ? schema.oneOf.map((branch) => branch.required ?? [])
+      : [schema.required ?? []];
+    if (!branches.every((required) => required.includes("action"))) {
+      notRequired.push(entry.operation);
+    }
+  }
+  assert.deepEqual(offenders, [], `dryRun must not come back: ${offenders.join(", ")}`);
+  assert.deepEqual(
+    notRequired,
+    [],
+    `these operations accept action but do not require it on every path: ${notRequired.join(", ")}`
+  );
+});
+
 test("no response echoes a context-prefixed occurrence identity", async () => {
   // 请求侧的门禁（surface-io-policy 的 BANNED_REQUEST_FIELDS）只看 input schema，
   // 因此挡不住"请求收 ordinal、响应仍回字符串"这种半迁移状态——而那恰恰是最坏的

@@ -159,7 +159,7 @@ test("a single lyric change produces one guarded patch", async () => {
     set: { lyrics: "saw" },
   });
   assert.equal(result.patchRequest.tool, "sv_patch_notes");
-  assert.equal(result.patchRequest.arguments.dryRun, true);
+  assert.equal(result.patchRequest.arguments.action, "dry_run");
   assert.equal(result.patchRequest.arguments.atomic, true);
   assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
   assert.equal(result.patchRequest.arguments.occurrence, 0);

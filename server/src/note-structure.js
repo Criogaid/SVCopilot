@@ -5,6 +5,7 @@ import {
 } from "./context-target.js";
 import { waitForProcessing } from "./processing.js";
 import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
+import { dryRunFromAction } from "./mutation-action.js";
 
 // 结构操作按调用方顺序逐个执行；每步都在执行时读取活动 index，避免删除导致的漂移。
 // MAX_OPERATIONS 导出供 harmony 规划器对齐单次可提交批量上限。
@@ -664,9 +665,6 @@ function normalizeRequest(request) {
   if (!["none", "phonemes", "computedAttributes"].includes(waitFor)) {
     throw codedError("INVALID_ARGUMENTS", "waitFor must be none, phonemes, or computedAttributes");
   }
-  if (request.dryRun !== undefined && typeof request.dryRun !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "dryRun must be a boolean");
-  }
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
@@ -690,7 +688,7 @@ function normalizeRequest(request) {
     operations,
     occurrence: request.occurrence,
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
-    dryRun: request.dryRun === true,
+    dryRun: dryRunFromAction(request.action),
     atomic: request.atomic !== false,
     waitFor,
     timeoutMs: clampInteger(request.timeoutMs, 0, 30_000, 10_000),

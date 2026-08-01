@@ -7,6 +7,7 @@ import {
 import { settlePlanLedger } from "./plan-reference.js";
 import { createOperationDiagnostics } from "./operation-diagnostics.js";
 import { waitForProcessing } from "./processing.js";
+import { dryRunFromAction } from "./mutation-action.js";
 
 // 字段表同时决定确定性写入顺序：先时间/音高结构，再文本，再表达属性。
 const FIELD_SPECS = [
@@ -849,9 +850,6 @@ function normalizeRequest(request) {
   if (!["none", "phonemes", "computedAttributes"].includes(waitFor)) {
     throw codedError("INVALID_ARGUMENTS", "waitFor must be none, phonemes, or computedAttributes");
   }
-  if (request.dryRun !== undefined && typeof request.dryRun !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "dryRun must be a boolean");
-  }
   if (request.atomic !== undefined && typeof request.atomic !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "atomic must be a boolean");
   }
@@ -878,7 +876,7 @@ function normalizeRequest(request) {
     patches,
     occurrence: request.occurrence,
     allowSharedTargetMutation: request.allowSharedTargetMutation === true,
-    dryRun: request.dryRun === true,
+    dryRun: dryRunFromAction(request.action),
     atomic: request.atomic !== false,
     diagnostics: request.diagnostics === true,
     waitFor,

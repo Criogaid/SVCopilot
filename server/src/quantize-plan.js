@@ -372,7 +372,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
             contextId: loaded.stored.contextId,
             occurrence: loaded.occurrenceOrdinal,
             patches: submittable,
-            dryRun: true,
+            action: "dry_run",
             atomic: true,
           },
         }
@@ -384,7 +384,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           patchCapPerCall: MAX_PATCHES,
           remainingChangedCount,
           workflow: [
-            "Commit the returned patchRequest (dryRun first, then dryRun:false).",
+            "Commit the returned patchRequest (action dry_run first, then action commit).",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
             "Re-run sv_quantize_notes with the same grid/strength/swing options against the fresh contextId and its current occurrence ordinal: already-quantized notes come back unchanged, so the next round plans exactly the remaining patches. The short-lived continuation identity verifies the target UUID before planning the next slice.",
             "Repeat until the response carries no continuation (or reports status no_change).",
@@ -418,7 +418,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   }
   const checklist = [
     "Review perNote deltas; quantization is a deterministic grid snap, not a musical judgment (no humanize is provided).",
-    "Apply through the returned patchRequest (sv_patch_notes) with dryRun:true first, then commit; expected onset/duration preconditions guard against post-snapshot drift.",
+    "Apply through the returned patchRequest (sv_patch_notes) with action dry_run first, then commit; expected onset/duration preconditions guard against post-snapshot drift.",
   ];
   if (revertedCount > 0) {
     checklist.push(
@@ -477,7 +477,6 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   return {
     ok: true,
     status: patchRequest ? "planned" : "no_change",
-    dryRun: true,
     effects: "none",
     planId,
     contextId: loaded.stored.contextId,

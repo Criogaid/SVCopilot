@@ -16,7 +16,7 @@
 //   3. cd server && node ../tools/bench-live-bulk-reads.mjs
 //   4. 读 tools/out/live-bulk-perf-<ts>.json，把 gate 结论抄进实施计划。
 //
-// 安全边界：**只读**。全部 patch 都是 `dryRun: true`，脚本在每次运行后断言宿主
+// 安全边界：**只读**。全部 patch 都是 `action: "dry_run"`，脚本在每次运行后断言宿主
 // setter 与 Undo 计数为 0；任一场景出现非零就整体判失败并说明。不写工程、不改选区、
 // 不碰 PitchControl。本脚本是测量工具，不进 npm test。
 
@@ -189,7 +189,7 @@ async function measureMode({ host, fixture, indices, useBulk }) {
         // 走完整的指纹比对路径,而不是走 no_change 短路。
         set: { detuneCents: 7 },
       })),
-      dryRun: true,
+      action: "dry_run",
       waitFor: "none",
       diagnostics: true,
     });

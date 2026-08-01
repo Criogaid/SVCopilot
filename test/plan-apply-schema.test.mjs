@@ -146,7 +146,7 @@ test("served sv_patch_notes schema exposes diagnostics and scoped note reference
       contextId: "ctx_test",
       occurrence: 0,
       patches: [{ note: 0, set: { lyrics: "test" } }],
-      dryRun: true,
+      action: "dry_run",
       diagnostics: true,
     }),
     true,
@@ -309,12 +309,12 @@ test("served curve schemas accept dense-table-v1 points on batch and phrase writ
   };
   assertValid(
     compile(schemas.sv_patch_parameter_curves),
-    { target, curves: [curve] },
+    { target, curves: [curve], action: "dry_run" },
     "batch curve dense points"
   );
   assertValid(
     compile(schemas.sv_edit_phrase),
-    { target, curves: [curve] },
+    { target, curves: [curve], action: "dry_run" },
     "phrase curve dense points"
   );
 });

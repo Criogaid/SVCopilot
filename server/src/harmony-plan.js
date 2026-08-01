@@ -584,7 +584,7 @@ function buildHarmonyResponse(
             contextId: loaded.stored.contextId,
             occurrence: loaded.targetOrdinal,
             operations: submittable,
-            dryRun: true,
+            action: "dry_run",
             atomic: true,
           },
         }
@@ -703,7 +703,6 @@ function buildHarmonyResponse(
   return {
     ok: true,
     status: restructureRequest ? "planned" : "no_change",
-    dryRun: true,
     effects: "none",
     planId,
     contextId: loaded.stored.contextId,

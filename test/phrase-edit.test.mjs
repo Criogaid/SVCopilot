@@ -363,13 +363,14 @@ function fullRequest(contextId, overrides = {}) {
     ],
     voicePatch: { paramTension: 0.4, vocalModeParams: { Clear: 0.5 } },
     waitFor: "none",
+    action: "commit",
     ...overrides,
   };
 }
 
 test("sv_edit_phrase dry-run verifies a detached clone without project mutations", async () => {
   const { model, service, contextId } = createPhraseModel();
-  const result = await service.edit(fullRequest(contextId, { dryRun: true }));
+  const result = await service.edit(fullRequest(contextId, { action: "dry_run" }));
   assert.equal(result.ok, true);
   assert.equal(result.status, "dry_run");
   assert.equal(result.effects, "none");
@@ -384,6 +385,7 @@ test("sv_edit_phrase dry-run verifies a detached clone without project mutations
 test("sv_edit_phrase returns no_change without creating an empty Undo", async () => {
   const { model, service, contextId } = createPhraseModel({ capturedNoteCount: 1 });
   const result = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     curves: [
       {
@@ -412,6 +414,7 @@ test("sv_edit_phrase returns no_change without creating an empty Undo", async ()
 test("sv_edit_phrase keeps simplify on detached preflight because its effect is host-defined", async () => {
   const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     curves: [
       {
@@ -461,6 +464,7 @@ test("sv_edit_phrase commits note, structure, curve, and voice changes in one Un
 test("sv_edit_phrase keeps note bindings stable when an onset patch reorders notes", async () => {
   const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0, expectedGroupUuid: "phrase-original" },
     notePatches: [
       {
@@ -483,6 +487,7 @@ test("sv_edit_phrase keeps note bindings stable when an onset patch reorders not
 test("sv_edit_phrase validates merge adjacency after earlier structure operations", async () => {
   const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     structureOperations: [
       {
@@ -506,6 +511,7 @@ test("sv_edit_phrase validates merge adjacency after earlier structure operation
 test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mismatches", async () => {
   const quantized = createPhraseModel({ quantizeVoice: true });
   const succeeded = await quantized.service.edit({
+    action: "commit",
     target: { contextId: quantized.contextId, occurrence: 0 },
     voicePatch: { paramTension: 0.3 },
   });
@@ -520,6 +526,7 @@ test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mis
 
   const invalid = createPhraseModel();
   const rejected = await invalid.service.edit({
+    action: "commit",
     target: { contextId: invalid.contextId, occurrence: 0 },
     voicePatch: { paramTension: "high" },
   });
@@ -531,6 +538,7 @@ test("sv_edit_phrase accepts float32 voice read-back and rejects scalar type mis
 test("sv_edit_phrase voice-only commit skips shared-target scanning and detached clones", async () => {
   const shared = createPhraseModel({ shared: true });
   const result = await shared.service.edit({
+    action: "commit",
     target: { contextId: shared.contextId, occurrence: 0 },
     voicePatch: { paramTension: 0.4 },
   });
@@ -547,6 +555,7 @@ test("sv_edit_phrase fast curve and voice path rolls journals back without a clo
   const fixture = createPhraseModel();
   fixture.model.failSetVoiceOnce = true;
   const result = await fixture.service.edit({
+    action: "commit",
     target: { contextId: fixture.contextId, occurrence: 0 },
     curves: [
       {
@@ -571,6 +580,7 @@ test("sv_edit_phrase fast curve and voice path rolls journals back without a clo
 test("sv_edit_phrase does not roll back a verified commit when processing observation fails", async () => {
   const { model, service, contextId } = createPhraseModel({ failProcessing: true });
   const result = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     notePatches: [{ note: 0, set: { lyrics: "where" } }],
     waitFor: "phonemes",
@@ -588,7 +598,7 @@ test("sv_edit_phrase does not roll back a verified commit when processing observ
 test("sv_edit_phrase requires confirmation before mutating a shared project target", async () => {
   const { model, service, contextId } = createPhraseModel({ shared: true });
   const preview = await service.edit(
-    fullRequest(contextId, { dryRun: true })
+    fullRequest(contextId, { action: "dry_run" })
   );
   assert.equal(preview.ok, true);
   assert.ok(preview.warnings.some((warning) => warning.code === "SHARED_TARGET_DRY_RUN"));
@@ -645,6 +655,7 @@ test("sv_edit_phrase rejects overlapping or duplicate note edits before host acc
   const { model, service, contextId } = createPhraseModel();
   const note = 0;
   const overlapping = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     notePatches: [{ note, set: { lyrics: "where" } }],
     structureOperations: [{ op: "delete", noteIndex: note }],
@@ -653,6 +664,7 @@ test("sv_edit_phrase rejects overlapping or duplicate note edits before host acc
   assert.equal(model.undoCount, 0);
 
   const duplicate = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     notePatches: [
       { note, set: { lyrics: "where" } },
@@ -678,6 +690,7 @@ test("sv_edit_phrase rejects stale range fingerprints before Undo or live mutati
 test("sv_edit_phrase rejects unobservable voice fields without project effects", async () => {
   const { model, service, contextId } = createPhraseModel();
   const result = await service.edit({
+    action: "commit",
     target: { contextId, occurrence: 0 },
     voicePatch: { singerName: "Not Observable" },
   });
@@ -712,7 +725,7 @@ test("sv_edit_phrase sends only requested attributes when old values contain typ
     structureOperations: [],
     curves: [],
     waitFor: "none",
-    dryRun: true,
+    action: "dry_run",
   });
 
   assert.equal(result.ok, true, JSON.stringify(result));

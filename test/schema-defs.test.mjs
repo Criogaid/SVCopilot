@@ -110,6 +110,7 @@ test("a deduped schema accepts and rejects exactly what the expanded one does", 
     // 合法：BLICK 范围 + 显式点。
     {
       target,
+      action: "dry_run",
       curves: [
         {
           parameter: "loudness",
@@ -122,6 +123,7 @@ test("a deduped schema accepts and rejects exactly what the expanded one does", 
     // 合法：语义范围 + note anchor（正是被提取成 $defs 的那些片段）。
     {
       target,
+      action: "dry_run",
       curves: [
         {
           parameter: "tension",
@@ -137,6 +139,7 @@ test("a deduped schema accepts and rejects exactly what the expanded one does", 
     // 非法：anchor 缺 position（required 必须穿过 $ref 继续生效）。
     {
       target,
+      action: "dry_run",
       curves: [
         {
           parameter: "tension",
@@ -149,6 +152,7 @@ test("a deduped schema accepts and rejects exactly what the expanded one does", 
     // 非法：anchor 里多出未知字段（additionalProperties:false 必须继续生效）。
     {
       target,
+      action: "dry_run",
       curves: [
         {
           parameter: "tension",
@@ -164,6 +168,7 @@ test("a deduped schema accepts and rejects exactly what the expanded one does", 
     // 非法：ratio 超界（数值约束必须继续生效）。
     {
       target,
+      action: "dry_run",
       curves: [
         {
           parameter: "tension",

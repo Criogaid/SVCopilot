@@ -52,6 +52,7 @@ test("a valid computed pitch bakes into one owned curve with coverage and fit ev
   const { model, snapshots, bake } = createFixture({ computedPitchValues: smoothContour(FRAMES) });
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
   });
@@ -88,6 +89,7 @@ test("nonzero pitch offset converts absolute computed pitch to group-relative", 
   });
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
   });
@@ -102,7 +104,8 @@ test("all-null computed pitch writes nothing and reports INSUFFICIENT_COMPUTED_P
   });
   const snapshot = await snapshotAll(snapshots);
   await assert.rejects(
-    bake.bake({ contextId: snapshot.contextId, occurrence: 0 }),
+    bake.bake({
+      action: "commit", contextId: snapshot.contextId, occurrence: 0 }),
     (error) => {
       assert.equal(error.code, "INSUFFICIENT_COMPUTED_PITCH");
       assert.equal(error.details.finiteFrames, 0);
@@ -118,7 +121,8 @@ test("coverage below the threshold writes nothing", async () => {
   const { model, snapshots, bake } = createFixture({ computedPitchValues: partial });
   const snapshot = await snapshotAll(snapshots);
   await assert.rejects(
-    bake.bake({ contextId: snapshot.contextId, occurrence: 0 }),
+    bake.bake({
+      action: "commit", contextId: snapshot.contextId, occurrence: 0 }),
     (error) => error.code === "INSUFFICIENT_COMPUTED_PITCH"
   );
   assert.equal(model.controls.length, 0);
@@ -131,7 +135,7 @@ test("dry-run reports the planned curve and coverage with zero writes", async ()
   const result = await bake.bake({
     contextId: snapshot.contextId,
     occurrence: 0,
-    dryRun: true,
+    action: "dry_run",
   });
   assert.equal(result.ok, true);
   assert.equal(result.status, "dry_run");
@@ -152,7 +156,7 @@ test("a point budget cannot silently relax the requested fit tolerance", async (
     bake.bake({
       contextId: snapshot.contextId,
       occurrence: 0,
-      dryRun: true,
+      action: "dry_run",
       toleranceSemitone: 0.001,
       maxPoints: 8,
     }),
@@ -187,6 +191,7 @@ test("replace_owned deletes the previous owned curve in range and adds the new o
   });
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     strategy: "replace_owned",
@@ -214,6 +219,7 @@ test("replace_owned preserves external controls while replacing owned ones", asy
   });
   const snapshot = await snapshotAll(snapshots);
   const result = await bake.bake({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     strategy: "replace_owned",
@@ -235,6 +241,7 @@ test("replace_explicit deletes only the caller-confirmed control", async () => {
   const snapshot = await snapshotAll(snapshots);
   const dropControl = snapshot.data.pitchControls.find((c) => c.ownership.scriptDataKeys.includes("mm_Flag") && c.pitch?.groupRelativeSemitone === 62);
   const result = await bake.bake({
+    action: "commit",
     contextId: snapshot.contextId,
     occurrence: 0,
     strategy: "replace_explicit",
@@ -251,6 +258,7 @@ test("pitchDeltaHandling clear is rejected explicitly, not silently ignored", as
   const snapshot = await snapshotAll(snapshots);
   await assert.rejects(
     bake.bake({
+      action: "commit",
       contextId: snapshot.contextId,
       occurrence: 0,
       pitchDeltaHandling: "clear",
@@ -266,7 +274,8 @@ test("missing computed pitch capture fails with COMPUTED_PITCH_NOT_CAPTURED", as
     include: ["notes"],
   });
   await assert.rejects(
-    bake.bake({ contextId: snapshot.contextId, occurrence: 0 }),
+    bake.bake({
+      action: "commit", contextId: snapshot.contextId, occurrence: 0 }),
     (error) => error.code === "COMPUTED_PITCH_NOT_CAPTURED"
   );
 });
