@@ -223,10 +223,11 @@ const COMPARE_SIDE_SCHEMA = {
   additionalProperties: false,
   properties: {
     contextId: { type: "string", minLength: 1 },
-    occurrenceId: {
-      type: "string",
-      minLength: 1,
-      description: "Optional when the context has exactly one occurrence with computed pitch.",
+    occurrence: {
+      type: "integer",
+      minimum: 0,
+      description:
+        "0-based occurrence ordinal; indexes the full occurrences array. Optional when exactly one occurrence has computed pitch.",
     },
   },
   required: ["contextId"],
@@ -1142,10 +1143,11 @@ export const TOOLS = [
           minLength: 1,
           description: "compare_to_target only: range context from sv_snapshot_range.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "compare_to_target only; optional with exactly one computed-pitch occurrence.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "compare_to_target only: 0-based occurrence ordinal; optional with exactly one computed-pitch occurrence.",
         },
         before: { ...COMPARE_SIDE_SCHEMA, description: "compare_contexts only: baseline snapshot." },
         after: { ...COMPARE_SIDE_SCHEMA, description: "compare_contexts only: edited snapshot." },
@@ -1497,10 +1499,11 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range captured with notes.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional when the context has exactly one occurrence with notes.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal within the context; indexes the full occurrences array. Optional when exactly one occurrence has notes.",
         },
         include: {
           type: "array",
@@ -1597,10 +1600,11 @@ export const TOOLS = [
                 minLength: 1,
                 description: "Range context from sv_snapshot_range captured with notes.",
               },
-              occurrenceId: {
-                type: "string",
-                minLength: 1,
-                description: "Optional when the context has exactly one occurrence with notes.",
+              occurrence: {
+                type: "integer",
+                minimum: 0,
+                description:
+                  "0-based occurrence ordinal within the context; indexes the full occurrences array. Optional when exactly one occurrence has notes.",
               },
               label: {
                 type: "string",
@@ -1662,10 +1666,11 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range captured with notes.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional when the context has exactly one occurrence with notes.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal within the context; indexes the full occurrences array. Optional when exactly one occurrence has notes.",
         },
         checks: {
           type: "array",
@@ -1875,10 +1880,11 @@ export const TOOLS = [
           minLength: 1,
           description: "Range context from sv_snapshot_range captured with notes.",
         },
-        occurrenceId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional when the context has exactly one occurrence with notes.",
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "0-based occurrence ordinal within the context; indexes the full occurrences array. Optional when exactly one occurrence has notes.",
         },
         include: {
           type: "array",

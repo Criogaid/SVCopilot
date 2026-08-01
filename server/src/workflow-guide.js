@@ -28,6 +28,8 @@ const EXAMPLE = {
   beforeContextId: "c_EXAMPLE_BEFORE",
   afterContextId: "c_EXAMPLE_AFTER",
   occurrenceId: "c_EXAMPLE:t:0:r:0",
+  // 已迁移到 ordinal 身份的 operation 用 0-based occurrence 序号（§3.1）。
+  occurrence: 0,
   targetOccurrenceId: "c_EXAMPLE:t:1:r:0",
   // 已迁移到 fingerprint 身份的 operation 用组内 index 引用音符（§3.1）。
   noteIndex: 0,
@@ -265,7 +267,7 @@ const RECIPES = [
         tool: "sv_analyze_vocal_context",
         purpose:
           "One call returning phrase, prosody, style, and computed-pitch evidence together. Prefer this over calling the four analyzers separately — it is the same analysis cores, fewer calls, and nothing is silently skipped.",
-        arguments: { contextId: EXAMPLE.contextId, occurrenceId: EXAMPLE.occurrenceId },
+        arguments: { contextId: EXAMPLE.contextId, occurrence: EXAMPLE.occurrence },
         acceptable: ["succeeded (read summary.evidence for how complete it is)"],
         nonRetryable: [
           "AMBIGUOUS_CONTEXT — pass occurrenceId; do not guess which occurrence was meant",
@@ -335,7 +337,7 @@ const RECIPES = [
         arguments: {
           mode: "compare_to_target",
           contextId: EXAMPLE.contextId,
-          occurrenceId: EXAMPLE.occurrenceId,
+          occurrence: EXAMPLE.occurrence,
           responseMode: "verbose",
         },
         optional: true,
@@ -944,8 +946,8 @@ const RECIPES = [
         purpose: "Diff before against after on the identical grid by score position.",
         arguments: {
           mode: "compare_contexts",
-          before: { contextId: EXAMPLE.beforeContextId, occurrenceId: EXAMPLE.occurrenceId },
-          after: { contextId: EXAMPLE.afterContextId, occurrenceId: EXAMPLE.occurrenceId },
+          before: { contextId: EXAMPLE.beforeContextId, occurrence: EXAMPLE.occurrence },
+          after: { contextId: EXAMPLE.afterContextId, occurrence: EXAMPLE.occurrence },
         },
         acceptable: ["ok", "insufficient_data"],
         readingRules: [

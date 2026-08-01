@@ -846,7 +846,7 @@ test("compare resolves occurrences honestly across error paths", async () => {
     service.compare({ mode: "compare_to_target", contextId: ambiguous.stored.contextId }),
     (error) => {
       assert.equal(error.code, "AMBIGUOUS_CONTEXT");
-      assert.equal(error.details.candidateOccurrences.length, 2);
+      assert.deepEqual(error.details.candidates, [0, 1]);
       return true;
     }
   );
@@ -854,9 +854,9 @@ test("compare resolves occurrences honestly across error paths", async () => {
     service.compare({
       mode: "compare_to_target",
       contextId: ambiguous.stored.contextId,
-      occurrenceId: "ctx_bogus:t:9:r:9",
+      occurrence: 9,
     }),
-    (error) => error.code === "UNKNOWN_OCCURRENCE"
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
 
   const noNotes = createStoredContext(store, { values: new Array(10).fill(60) });

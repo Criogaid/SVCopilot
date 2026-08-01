@@ -13,6 +13,7 @@ import {
   summarizeExcludedVocalEvents,
 } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 // sv_analyze_phrase：只读乐理分析（调性候选 / 音级 / 乐句 / 统计）。
 //
@@ -93,7 +94,7 @@ export class PhraseAnalysisService {
       status: "succeeded",
       contextId: loaded.stored.contextId,
       occurrence: {
-        occurrenceId: loaded.occurrence.occurrenceId,
+        occurrence: loaded.occurrenceOrdinal,
         trackIndex: loaded.occurrence.trackIndex,
         groupIndex: loaded.occurrence.groupIndex,
         targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -130,32 +131,19 @@ function resolveAnalysisSource(store, input) {
       'sv_analyze_phrase needs a range context from sv_snapshot_range with include ["notes"]'
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
-  );
-  let occurrence = null;
-  if (input.occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === input.occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    input.occurrence,
+    {
+      eligible: (item) =>
+        Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0,
+      noneCode: "NOTES_NOT_CAPTURED",
+      noneMessage:
+        'sv_analyze_phrase needs note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+      ambiguousMessage:
+        "range context has multiple occurrences with notes; pass one occurrence ordinal",
     }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'sv_analyze_phrase needs note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId"
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
-  }
+  );
   const quarterBlick = stored.context.quarterBlick;
   if (!Number.isSafeInteger(quarterBlick) || quarterBlick <= 0) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
@@ -210,6 +198,7 @@ function resolveAnalysisSource(store, input) {
   return {
     stored,
     occurrence,
+    occurrenceOrdinal: ordinal,
     inputNoteCount: allNotes.length,
     notes,
     breathNotes,
@@ -563,7 +552,7 @@ function normalizeAnalyzeRequest(request) {
     request,
     [
       "contextId",
-      "occurrenceId",
+      "occurrence",
       "include",
       "phraseGapQuarter",
       "responseMode",
@@ -579,10 +568,13 @@ function normalizeAnalyzeRequest(request) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence must be a non-negative occurrence ordinal when provided"
+    );
   }
   let include;
   if (request.include === undefined) {
@@ -642,7 +634,7 @@ function normalizeAnalyzeRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     include,
     phraseGapQuarter,
     responseMode,

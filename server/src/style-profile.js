@@ -4,6 +4,7 @@ import { ServiceTiming } from "./service-timing.js";
 import { isBreathEventLyrics } from "./vocal-event-semantics.js";
 import { getVocalModeNames } from "./voice-parameters.js";
 import { unknownContextError } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 // sv_style_profile：工程级风格统计聚合（HANDOFF §7 P2 / 研究提示 Layer B）。
 //
@@ -100,35 +101,17 @@ function resolveProfileTarget(store, target, index) {
       `${label}: sv_style_profile needs a range context from sv_snapshot_range with include ["notes"]`
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
-  );
-  let occurrence = null;
-  if (target.occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === target.occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError(
-        "UNKNOWN_OCCURRENCE",
-        `${label}: occurrenceId is not part of the supplied contextId`
-      );
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    target.occurrence,
+    {
+      eligible: (item) =>
+        Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0,
+      noneCode: "NOTES_NOT_CAPTURED",
+      noneMessage: `${label}: sv_style_profile needs note fingerprints; re-run sv_snapshot_range with include ["notes"]`,
+      ambiguousMessage: `${label}: range context has multiple occurrences with notes; pass one occurrence ordinal`,
     }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      `${label}: sv_style_profile needs note fingerprints; re-run sv_snapshot_range with include ["notes"]`
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      `${label}: range context has multiple occurrences with notes; provide occurrenceId`
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
-  }
+  );
   const quarterBlick = stored.context.quarterBlick;
   if (!Number.isSafeInteger(quarterBlick) || quarterBlick <= 0) {
     throw codedError("INVALID_CONTEXT", `${label}: context is missing a usable SV.QUARTER timebase`);
@@ -148,7 +131,16 @@ function resolveProfileTarget(store, target, index) {
     .sort((left, right) => left.absOnsetBlick - right.absOnsetBlick);
   const notes = allNotes.filter((note) => !isBreathEventLyrics(note.lyrics));
   const breathNotes = allNotes.filter((note) => isBreathEventLyrics(note.lyrics));
-  return { index, label: target.label ?? null, stored, occurrence, notes, breathNotes, quarterBlick };
+  return {
+    index,
+    label: target.label ?? null,
+    stored,
+    occurrence,
+    occurrenceOrdinal: ordinal,
+    notes,
+    breathNotes,
+    quarterBlick,
+  };
 }
 
 // ---------- 逐 target 剖面 ----------
@@ -160,7 +152,7 @@ function buildTargetProfile(loaded, input, warnings) {
     label: loaded.label,
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.occurrenceOrdinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -573,15 +565,18 @@ function normalizeProfileRequest(request) {
   const targets = request.targets.map((target, index) => {
     const label = `targets[${index}]`;
     if (!isRecord(target)) throw codedError("INVALID_ARGUMENTS", `${label} must be an object`);
-    assertKnownKeys(target, ["contextId", "occurrenceId", "label"], label);
+    assertKnownKeys(target, ["contextId", "occurrence", "label"], label);
     if (typeof target.contextId !== "string" || target.contextId.length === 0) {
       throw codedError("INVALID_ARGUMENTS", `${label}.contextId must be a non-empty string`);
     }
     if (
-      target.occurrenceId !== undefined &&
-      (typeof target.occurrenceId !== "string" || target.occurrenceId.length === 0)
+      target.occurrence !== undefined &&
+      (!Number.isSafeInteger(target.occurrence) || target.occurrence < 0)
     ) {
-      throw codedError("INVALID_ARGUMENTS", `${label}.occurrenceId must be a non-empty string when provided`);
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `${label}.occurrence must be a non-negative occurrence ordinal when provided`
+      );
     }
     if (
       target.label !== undefined &&
@@ -589,16 +584,16 @@ function normalizeProfileRequest(request) {
     ) {
       throw codedError("INVALID_ARGUMENTS", `${label}.label must be a 1-64 character string when provided`);
     }
-    return { contextId: target.contextId, occurrenceId: target.occurrenceId, label: target.label };
+    return { contextId: target.contextId, occurrence: target.occurrence, label: target.label };
   });
   // 重复 target 会让聚合统计重复计数，直接拒绝。
   const seen = new Set();
   for (let index = 0; index < targets.length; index += 1) {
-    const key = `${targets[index].contextId}\u0000${targets[index].occurrenceId ?? ""}`;
+    const key = `${targets[index].contextId}\u0000${targets[index].occurrence ?? ""}`;
     if (seen.has(key)) {
       throw codedError(
         "INVALID_ARGUMENTS",
-        `targets[${index}] duplicates an earlier target (same contextId and occurrenceId); duplicates would double-count aggregate statistics`
+        `targets[${index}] duplicates an earlier target (same contextId and occurrence); duplicates would double-count aggregate statistics`
       );
     }
     seen.add(key);

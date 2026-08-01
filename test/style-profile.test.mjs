@@ -307,7 +307,7 @@ test("profile resolves contexts honestly across error paths", async () => {
     service.profile({ targets: [{ contextId: ambiguous.stored.contextId }] }),
     (error) => {
       assert.equal(error.code, "AMBIGUOUS_CONTEXT");
-      assert.equal(error.details.candidateOccurrences.length, 2);
+      assert.equal(error.details.candidates.length, 2);
       return true;
     }
   );

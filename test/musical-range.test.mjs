@@ -680,7 +680,8 @@ test("range snapshot stores computed pitch for sv_compare_computed_pitch", async
     contextId: snap.contextId,
   });
   assert.equal(result.ok, true);
-  assert.equal(result.occurrence.occurrenceId, occurrence.occurrenceId);
+  // 对外身份是 ordinal（§3.1）；occurrenceId 只是 Context 内部存储键。
+  assert.equal(result.occurrence.occurrence, 0);
   assert.ok(result.summary.validFrameCount > 0);
   assert.ok(Number.isFinite(result.summary.maeCent));
   assert.equal(result.provenance.pitchSource, "computedPitch");

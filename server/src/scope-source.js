@@ -204,6 +204,75 @@ function fromCapsule(capsule, requestedOrdinal) {
   });
 }
 
+/**
+ * 按 ordinal 选定 occurrence，供**所有** range-scoped operation 共用。
+ *
+ * 为什么必须共用一处：以前每个消费者各写一遍「显式 id → find / 省略 → 唯一候选 →
+ * 否则 AMBIGUOUS_CONTEXT」，于是同一件事有十几份实现，错误码与候选形状各自漂移。
+ * ordinal 迁移把这件事收成一个参数化函数：唯一变化的是「什么算合格候选」。
+ *
+ * 三条语义是契约（§3.1）：
+ * 1. 显式 ordinal 索引**完整** occurrences 数组，与是否合格无关——按合格情况过滤会
+ *    让同一个 Context 在不同请求里给出不同编号。
+ * 2. 省略时只在恰好一个合格候选时自动选择。
+ * 3. 多个合格候选时 AMBIGUOUS_CONTEXT，候选是 **ordinal 列表**，不是字符串 id。
+ *
+ * @param {object[]} occurrences - Context 的完整 occurrences 数组
+ * @param {number|undefined} requestedOrdinal
+ * @param {object} options
+ * @param {(occurrence: object) => boolean} options.eligible - 省略 ordinal 时的候选判据
+ * @param {string} options.noneCode - 零合格候选时的错误码
+ * @param {string} options.noneMessage
+ * @param {string} options.ambiguousMessage
+ * @param {string} [options.ineligibleCode] - 显式 ordinal 指向不合格 occurrence 时的码
+ * @param {string} [options.ineligibleMessage]
+ * @returns {{ occurrence: object, ordinal: number }}
+ */
+export function selectOccurrenceByOrdinal(
+  occurrences,
+  requestedOrdinal,
+  { eligible, noneCode, noneMessage, ambiguousMessage, ineligibleCode, ineligibleMessage } = {}
+) {
+  const all = Array.isArray(occurrences) ? occurrences : [];
+  if (requestedOrdinal !== undefined) {
+    if (!Number.isSafeInteger(requestedOrdinal) || requestedOrdinal < 0) {
+      throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer", {
+        got: requestedOrdinal,
+      });
+    }
+    const occurrence = all[requestedOrdinal];
+    if (!occurrence) {
+      throw codedError(
+        "OCCURRENCE_INDEX_OUT_OF_RANGE",
+        "occurrence ordinal is outside the context",
+        { got: requestedOrdinal, max: all.length - 1 }
+      );
+    }
+    // 显式点名一个不合格的 occurrence 与「越界」不是一回事：前者存在但用不了，
+    // 需要不同的补救动作，因此码也必须不同。
+    if (eligible && !eligible(occurrence) && ineligibleCode) {
+      throw codedError(ineligibleCode, ineligibleMessage, { got: requestedOrdinal });
+    }
+    return { occurrence, ordinal: requestedOrdinal };
+  }
+  const candidates = [];
+  for (const [ordinal, occurrence] of all.entries()) {
+    if (!eligible || eligible(occurrence)) candidates.push({ occurrence, ordinal });
+  }
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0) {
+    throw codedError(noneCode ?? "INVALID_CONTEXT", noneMessage ?? "context has no usable occurrence");
+  }
+  const error = codedError(
+    "AMBIGUOUS_CONTEXT",
+    ambiguousMessage ?? "context has multiple occurrences; pass one occurrence ordinal"
+  );
+  // 候选是 ordinal 列表：模型拿到的就是它下一步该填进 `occurrence` 的值。
+  error.details = { candidates: candidates.map((entry) => entry.ordinal) };
+  error.candidateOrdinals = error.details.candidates;
+  throw error;
+}
+
 function selectOccurrence(all, requestedOrdinal) {
   if (requestedOrdinal !== undefined) {
     if (!Number.isSafeInteger(requestedOrdinal) || requestedOrdinal < 0) {

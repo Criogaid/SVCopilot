@@ -142,12 +142,12 @@ test("composite style summary preserves the standalone style evidence", async ()
   const { stored, occurrenceId } = createContext(store, { notes });
   const service = analyzer(store);
   const standalone = await service.style.profile({
-    targets: [{ contextId: stored.contextId, occurrenceId }],
+    targets: [{ contextId: stored.contextId, occurrence: 0 }],
     responseMode: "standard",
   });
   const composite = await service.analyze({
     contextId: stored.contextId,
-    occurrenceId,
+    occurrence: 0,
     include: ["style"],
   });
   const target = standalone.targets[0];
@@ -242,11 +242,8 @@ test("every section carries a stateless detail pointer instead of a cursor", asy
     assert.equal(section.detailCursor, undefined);
   }
   assert.equal(result.sections.phrase.details.arguments.contextId, stored.contextId);
-  assert.equal(result.sections.phrase.details.arguments.occurrenceId, occurrenceId);
-  assert.equal(
-    result.sections.style.details.arguments.targets[0].occurrenceId,
-    occurrenceId
-  );
+  assert.equal(result.sections.phrase.details.arguments.occurrence, 0);
+  assert.equal(result.sections.style.details.arguments.targets[0].occurrence, 0);
 });
 
 test("include selects sections and keeps a deterministic order", async () => {
@@ -397,8 +394,8 @@ test("request-level problems fail the whole call instead of faking partial resul
     (error) => error.code === "UNKNOWN_CONTEXT"
   );
   await assert.rejects(
-    () => analyzer(store).analyze({ contextId: stored.contextId, occurrenceId: "ctx_x:t:9:r:9" }),
-    (error) => error.code === "UNKNOWN_OCCURRENCE"
+    () => analyzer(store).analyze({ contextId: stored.contextId, occurrence: 9 }),
+    (error) => error.code === "OCCURRENCE_INDEX_OUT_OF_RANGE"
   );
   // 多个候选 occurrence 必须要求调用方明确指定，而不是自己挑一个。
   await assert.rejects(

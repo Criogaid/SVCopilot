@@ -6,6 +6,7 @@ import {
   isBreathEventLyrics as isBreathLyrics,
 } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 // sv_validate_lyrics_prosody：咬字/韵律校验器（黑盒审计 M-02 / 研究提示 Layer C）。
 //
@@ -83,32 +84,19 @@ function resolveValidateSource(store, input) {
       'sv_validate_lyrics_prosody needs a range context from sv_snapshot_range with include ["notes"]'
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
-  );
-  let occurrence = null;
-  if (input.occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === input.occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    input.occurrence,
+    {
+      eligible: (item) =>
+        Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0,
+      noneCode: "NOTES_NOT_CAPTURED",
+      noneMessage:
+        'sv_validate_lyrics_prosody needs note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+      ambiguousMessage:
+        "range context has multiple occurrences with notes; pass one occurrence ordinal",
     }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'sv_validate_lyrics_prosody needs note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId"
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
-  }
+  );
   const quarterBlick = stored.context.quarterBlick;
   if (!Number.isSafeInteger(quarterBlick) || quarterBlick <= 0) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
@@ -134,6 +122,7 @@ function resolveValidateSource(store, input) {
   return {
     stored,
     occurrence,
+    ordinal,
     notes,
     quarterBlick,
     meterMarks: stored.context.meterMarks ?? null,
@@ -454,7 +443,7 @@ function buildValidateResponse(loaded, input, issues, coverage, warnings, timing
     status: "succeeded",
     contextId: loaded.stored.contextId,
     occurrence: {
-      occurrenceId: loaded.occurrence.occurrenceId,
+      occurrence: loaded.ordinal,
       trackIndex: loaded.occurrence.trackIndex,
       groupIndex: loaded.occurrence.groupIndex,
       targetGroupUuid: loaded.occurrence.targetGroupUuid,
@@ -479,15 +468,18 @@ function buildValidateResponse(loaded, input, issues, coverage, warnings, timing
 
 function normalizeValidateRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(request, ["contextId", "occurrenceId", "checks", "responseMode"], "request");
+  assertKnownKeys(request, ["contextId", "occurrence", "checks", "responseMode"], "request");
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence must be a non-negative occurrence ordinal when provided"
+    );
   }
   let checks;
   if (request.checks === undefined) {
@@ -511,7 +503,7 @@ function normalizeValidateRequest(request) {
   }
   return {
     contextId: request.contextId,
-    occurrenceId: request.occurrenceId,
+    occurrence: request.occurrence,
     checks,
     responseMode,
   };

@@ -1,6 +1,7 @@
 import { getStoredComputedPitch } from "./musical-range.js";
 import { secondsAtBlick } from "./musical-time.js";
 import { ServiceTiming } from "./service-timing.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import {
   analyzeVocalEventSequence,
   summarizeExcludedVocalEvents,
@@ -94,7 +95,7 @@ export class ComputedPitchCompareService {
 // ---------- 上下文与 occurrence 解析（纯数据） ----------
 
 function loadTargetSource(store, input) {
-  const source = resolveCompareSource(store, input.contextId, input.occurrenceId, "request");
+  const source = resolveCompareSource(store, input.contextId, input.occurrence, "request");
   return { ...source };
 }
 
@@ -102,10 +103,10 @@ function loadContextsSources(store, input, warnings) {
   const before = resolveCompareSource(
     store,
     input.before.contextId,
-    input.before.occurrenceId,
+    input.before.occurrence,
     "before"
   );
-  const after = resolveCompareSource(store, input.after.contextId, input.after.occurrenceId, "after");
+  const after = resolveCompareSource(store, input.after.contextId, input.after.occurrence, "after");
   // 两侧必须共享同一采样栅格：过去的曲线无法重采样，栅格不同就不存在诚实的逐帧对齐。
   const grids = [before.series, after.series];
   if (
@@ -141,7 +142,7 @@ function loadContextsSources(store, input, warnings) {
   return { before, after };
 }
 
-function resolveCompareSource(store, contextId, occurrenceId, label) {
+function resolveCompareSource(store, contextId, requestedOrdinal, label) {
   const stored = store.get(contextId);
   if (!stored) {
     throw unknownContextError(store, contextId, label);
@@ -160,31 +161,17 @@ function resolveCompareSource(store, contextId, occurrenceId, label) {
       `${label} context has no stored computed pitch; re-run sv_snapshot_range with include ["computedPitch"]`
     );
   }
-  let occurrence = null;
-  if (occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", `${label} occurrenceId is not part of the context`);
-    }
-  } else {
-    const candidates = occurrences.filter((item) => Object.hasOwn(map, item.occurrenceId));
-    if (candidates.length === 1) {
-      occurrence = candidates[0];
-    } else if (candidates.length === 0) {
-      throw codedError(
-        "COMPUTED_PITCH_NOT_CAPTURED",
-        `${label} context captured no computed pitch for any occurrence`
-      );
-    } else {
-      const error = codedError(
-        "AMBIGUOUS_CONTEXT",
-        `${label} context has multiple occurrences with computed pitch; provide occurrenceId`
-      );
-      error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-      error.details = { candidateOccurrences: error.candidateOccurrences };
-      throw error;
-    }
-  }
+  // 候选判据是"该 occurrence 捕获了 computed pitch"——与其它分析器的"有音符指纹"
+  // 不同，因此判据由调用方给出而不是写进选择器。显式点名一个没有 computed pitch 的
+  // occurrence 与越界是两回事：前者存在但这项分析用不了。
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(occurrences, requestedOrdinal, {
+    eligible: (item) => Object.hasOwn(map, item.occurrenceId),
+    noneCode: "COMPUTED_PITCH_NOT_CAPTURED",
+    noneMessage: `${label} context captured no computed pitch for any occurrence`,
+    ambiguousMessage: `${label} context has multiple occurrences with computed pitch; pass one occurrence ordinal`,
+    ineligibleCode: "COMPUTED_PITCH_NOT_CAPTURED",
+    ineligibleMessage: `${label} occurrence exists but captured no computed pitch; re-run sv_snapshot_range with include ["computedPitch"]`,
+  });
   const series = getStoredComputedPitch(stored, occurrence.occurrenceId);
   if (!series) {
     throw codedError(
@@ -192,13 +179,13 @@ function resolveCompareSource(store, contextId, occurrenceId, label) {
       `${label} occurrence has no stored computed pitch; re-run sv_snapshot_range with include ["computedPitch"]`
     );
   }
-  return { stored, occurrence, series };
+  return { stored, occurrence, ordinal, series };
 }
 
 // ---------- compare_to_target ----------
 
 async function runTargetAnalysis(loaded, input, warnings, timer) {
-  const { stored, occurrence, series } = loaded;
+  const { stored, occurrence, ordinal, series } = loaded;
   const context = stored.context;
   const partition = buildNoteSpanPartition(occurrence);
   if (partition.inputNoteCount === 0) {
@@ -246,7 +233,7 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
     status: "succeeded",
     mode: "compare_to_target",
     contextId: stored.contextId,
-    occurrence: publicOccurrence(occurrence),
+    occurrence: publicOccurrence(occurrence, ordinal),
     inputNoteCount: partition.inputNoteCount,
     melodicNoteCount: spans.length,
     excludedEvents: partition.excludedEvents,
@@ -1125,9 +1112,9 @@ function noMelodicEvidence(partition, side = "request") {
 
 // ---------- 输出辅助 ----------
 
-function publicOccurrence(occurrence) {
+function publicOccurrence(occurrence, ordinal) {
   return {
-    occurrenceId: occurrence.occurrenceId,
+    occurrence: ordinal,
     trackIndex: occurrence.trackIndex,
     groupIndex: occurrence.groupIndex,
     targetGroupUuid: occurrence.targetGroupUuid,
@@ -1141,7 +1128,7 @@ function publicSide(side) {
     contextId: side.stored.contextId,
     observedAt: side.stored.observedAt,
     snapshotToken: side.stored.snapshotToken ?? null,
-    occurrence: publicOccurrence(side.occurrence),
+    occurrence: publicOccurrence(side.occurrence, side.ordinal),
   };
 }
 
@@ -1163,7 +1150,7 @@ function normalizeCompareRequest(request) {
     [
       "mode",
       "contextId",
-      "occurrenceId",
+      "occurrence",
       "before",
       "after",
       "metrics",
@@ -1198,18 +1185,18 @@ function normalizeCompareRequest(request) {
       throw codedError("INVALID_ARGUMENTS", "compare_to_target does not accept before/after");
     }
     requireContextId(request.contextId, "contextId");
-    requireOptionalOccurrenceId(request.occurrenceId, "occurrenceId");
+    requireOptionalOrdinal(request.occurrence, "occurrence");
     return {
       mode,
       contextId: request.contextId,
-      occurrenceId: request.occurrenceId,
+      occurrence: request.occurrence,
       metrics,
       analysis,
       anomalySortBy,
       responseMode,
     };
   }
-  if (request.contextId !== undefined || request.occurrenceId !== undefined) {
+  if (request.contextId !== undefined || request.occurrence !== undefined) {
     throw codedError(
       "INVALID_ARGUMENTS",
       "compare_contexts takes before/after objects, not a top-level contextId"
@@ -1222,10 +1209,10 @@ function normalizeCompareRequest(request) {
 
 function normalizeSide(value, label) {
   if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", `${label} must be an object`);
-  assertKnownKeys(value, ["contextId", "occurrenceId"], label);
+  assertKnownKeys(value, ["contextId", "occurrence"], label);
   requireContextId(value.contextId, `${label}.contextId`);
-  requireOptionalOccurrenceId(value.occurrenceId, `${label}.occurrenceId`);
-  return { contextId: value.contextId, occurrenceId: value.occurrenceId };
+  requireOptionalOrdinal(value.occurrence, `${label}.occurrence`);
+  return { contextId: value.contextId, occurrence: value.occurrence };
 }
 
 function normalizeMetrics(value) {
@@ -1396,9 +1383,12 @@ function requireContextId(value, label) {
   }
 }
 
-function requireOptionalOccurrenceId(value, label) {
-  if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must be a non-empty string when provided`);
+function requireOptionalOrdinal(value, label) {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `${label} must be a non-negative occurrence ordinal when provided`
+    );
   }
 }
 

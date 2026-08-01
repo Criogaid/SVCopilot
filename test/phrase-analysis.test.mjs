@@ -501,7 +501,8 @@ test("analysis resolves contexts honestly across error paths", async () => {
     service.analyze({ contextId: ambiguous.stored.contextId }),
     (error) => {
       assert.equal(error.code, "AMBIGUOUS_CONTEXT");
-      assert.equal(error.details.candidateOccurrences.length, 2);
+      // 候选是 ordinal 列表：模型拿到的就是它下一步该填进 `occurrence` 的值。
+      assert.deepEqual(error.details.candidates, [0, 1]);
       return true;
     }
   );

@@ -25,6 +25,7 @@ import { project, registerProjection } from "./response-projection.js";
 import { ServiceTiming } from "./service-timing.js";
 import { StyleProfileService } from "./style-profile.js";
 import { unknownContextError } from "./snapshot.js";
+import { selectOccurrenceByOrdinal } from "./scope-source.js";
 
 const SECTIONS = ["phrase", "prosody", "style", "computedPitch"];
 const PROJECTION_KIND = "vocal-context-analysis";
@@ -206,38 +207,27 @@ function resolveTarget(store, input) {
       'sv_analyze_vocal_context needs a range context from sv_snapshot_range with include ["notes"]'
     );
   }
-  const occurrences = Array.isArray(stored.context.occurrences) ? stored.context.occurrences : [];
-  const candidates = occurrences.filter(
-    (item) => Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0
-  );
-  let occurrence = null;
-  if (input.occurrenceId !== undefined) {
-    occurrence = occurrences.find((item) => item.occurrenceId === input.occurrenceId) ?? null;
-    if (!occurrence) {
-      throw codedError("UNKNOWN_OCCURRENCE", "occurrenceId is not part of the supplied contextId");
+  const { occurrence, ordinal } = selectOccurrenceByOrdinal(
+    stored.context.occurrences,
+    input.occurrence,
+    {
+      eligible: (item) =>
+        Array.isArray(item.noteFingerprints) && item.noteFingerprints.length > 0,
+      noneCode: "NOTES_NOT_CAPTURED",
+      noneMessage:
+        'sv_analyze_vocal_context needs note fingerprints; re-run sv_snapshot_range with include ["notes"]',
+      ambiguousMessage:
+        "range context has multiple occurrences with notes; pass one occurrence ordinal",
     }
-  } else if (candidates.length === 1) {
-    occurrence = candidates[0];
-  } else if (candidates.length === 0) {
-    throw codedError(
-      "NOTES_NOT_CAPTURED",
-      'sv_analyze_vocal_context needs note fingerprints; re-run sv_snapshot_range with include ["notes"]'
-    );
-  } else {
-    const error = codedError(
-      "AMBIGUOUS_CONTEXT",
-      "range context has multiple occurrences with notes; provide occurrenceId"
-    );
-    error.candidateOccurrences = candidates.map((item) => item.occurrenceId);
-    error.details = { candidateOccurrences: error.candidateOccurrences };
-    throw error;
-  }
+  );
   return {
     contextId: stored.contextId,
-    occurrenceId: occurrence.occurrenceId,
+    // 复合分析把同一个 target 转发给四个分析器，因此这里存的必须是它们如今接受的
+    // 身份：ordinal。存字符串 id 会让每个 argumentsFor 各自再翻译一次。
+    occurrence: ordinal,
     captureRange: stored.context.range,
     publicOccurrence: {
-      occurrenceId: occurrence.occurrenceId,
+      occurrence: ordinal,
       trackIndex: occurrence.trackIndex,
       groupIndex: occurrence.groupIndex,
       targetGroupUuid: occurrence.targetGroupUuid,
@@ -253,7 +243,7 @@ const SECTION_RUNNERS = {
     tool: "sv_analyze_phrase",
     argumentsFor: (input, target) => ({
       contextId: target.contextId,
-      occurrenceId: target.occurrenceId,
+      occurrence: target.occurrence,
       include: ["key", "phrases", "statistics"],
       phraseGapQuarter: input.phraseGapQuarter,
       responseMode: "standard",
@@ -266,7 +256,7 @@ const SECTION_RUNNERS = {
     tool: "sv_validate_lyrics_prosody",
     argumentsFor: (_input, target) => ({
       contextId: target.contextId,
-      occurrenceId: target.occurrenceId,
+      occurrence: target.occurrence,
       responseMode: "standard",
     }),
     run: (service, args) => service.prosody.validate(args),
@@ -276,7 +266,7 @@ const SECTION_RUNNERS = {
     phase: "styleMs",
     tool: "sv_style_profile",
     argumentsFor: (input, target) => ({
-      targets: [{ contextId: target.contextId, occurrenceId: target.occurrenceId }],
+      targets: [{ contextId: target.contextId, occurrence: target.occurrence }],
       phraseGapQuarter: input.phraseGapQuarter,
       responseMode: "standard",
     }),
@@ -289,7 +279,7 @@ const SECTION_RUNNERS = {
     argumentsFor: (_input, target) => ({
       mode: "compare_to_target",
       contextId: target.contextId,
-      occurrenceId: target.occurrenceId,
+      occurrence: target.occurrence,
       responseMode: "standard",
     }),
     run: (service, args) => service.computedPitch.compare(args),
@@ -548,7 +538,7 @@ function nextSteps(sections, findings, target) {
         },
         include: ["notes", "computedPitch"],
       },
-      then: "Use the new contextId and occurrenceId with sv_analyze_vocal_context.",
+      then: "Use the new contextId and occurrence ordinal with sv_analyze_vocal_context.",
       note: "Missing computed pitch means NOT ENOUGH DATA TO ANALYZE — never report it as zero error.",
     });
   } else if (
@@ -560,7 +550,7 @@ function nextSteps(sections, findings, target) {
       tool: "sv_wait_for_processing",
       arguments: {
         contextId: target.contextId,
-        occurrenceId: target.occurrenceId,
+        occurrence: target.occurrence,
         kind: "computedPitch",
       },
       then: "Re-run sv_snapshot_range, then sv_analyze_vocal_context again.",
@@ -581,7 +571,7 @@ function nextSteps(sections, findings, target) {
     steps.push({
       reason: "prosody_errors_present",
       tool: "sv_align_lyrics",
-      arguments: { contextId: target.contextId, occurrenceId: target.occurrenceId, lyrics: "<replacement lyric text>" },
+      arguments: { contextId: target.contextId, occurrence: target.occurrence, lyrics: "<replacement lyric text>" },
       then: "Review the plan, dry-run apply.arguments, then commit.",
       note: `${prosodyErrors.length} error-severity lyric issue(s); sv_patch_notes or sv_restructure_notes may fit better for targeted fixes.`,
     });
@@ -592,7 +582,7 @@ function nextSteps(sections, findings, target) {
       tool: "sv_validate_lyrics_prosody",
       arguments: {
         contextId: target.contextId,
-        occurrenceId: target.occurrenceId,
+        occurrence: target.occurrence,
         checks: ["specialLyricChains"],
         responseMode: "verbose",
       },
@@ -604,7 +594,7 @@ function nextSteps(sections, findings, target) {
     steps.push({
       reason: "pitch_anomaly_segments_present",
       tool: "sv_plan_expression",
-      arguments: { contextId: target.contextId, occurrenceId: target.occurrenceId },
+      arguments: { contextId: target.contextId, occurrence: target.occurrence },
       then: "Anchor gestures on the anomalous notes, dry-run, then commit through apply.",
       note: "Anomaly segments are objective deviation measurements, not a verdict that the singing is wrong. A human decides whether the deviation is intentional.",
     });
@@ -685,17 +675,20 @@ function normalizeRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrenceId", "include", "phraseGapQuarter", "responseMode", "budgets"],
+    ["contextId", "occurrence", "include", "phraseGapQuarter", "responseMode", "budgets"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
     throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
   }
   if (
-    request.occurrenceId !== undefined &&
-    (typeof request.occurrenceId !== "string" || request.occurrenceId.length === 0)
+    request.occurrence !== undefined &&
+    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrenceId must be a non-empty string when provided");
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "occurrence must be a non-negative occurrence ordinal when provided"
+    );
   }
   let include = SECTIONS;
   if (request.include !== undefined) {
@@ -748,7 +741,14 @@ function normalizeRequest(request) {
     budgets.perNote = 0;
     budgets.anomalySegments = Math.min(budgets.anomalySegments, 5);
   }
-  return { contextId: request.contextId, occurrenceId: request.occurrenceId, include, phraseGapQuarter, responseMode, budgets };
+  return {
+    contextId: request.contextId,
+    occurrence: request.occurrence,
+    include,
+    phraseGapQuarter,
+    responseMode,
+    budgets,
+  };
 }
 
 function assertKnownKeys(value, allowed, label) {
