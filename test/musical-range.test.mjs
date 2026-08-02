@@ -4,7 +4,11 @@ import test from "node:test";
 import { ArtifactStore } from "../server/src/artifact-store.js";
 import { ComputedPitchCompareService } from "../server/src/computed-pitch-compare.js";
 import { decodeDense } from "../server/src/dense-codec.js";
-import { RangeSnapshotService, getStoredComputedPitch } from "../server/src/musical-range.js";
+import {
+  RANGE_PAGE_LIMITS,
+  RangeSnapshotService,
+  getStoredComputedPitch,
+} from "../server/src/musical-range.js";
 import { StyleProfileService } from "../server/src/style-profile.js";
 import { blickToMusical, musicalToBlick, normalizeMusicalPoint } from "../server/src/musical-time.js";
 
@@ -223,6 +227,12 @@ test("range detail seals a self-contained hash-bound artifact with dense Automat
   assert.equal(decodedNotes[0].lyrics, result.data.notes[0].lyrics);
   assert.equal(decodedNotes[0]["musical.bar"], result.data.notes[0].musical.bar);
   assert.equal(decodedNotes[0].restBeforeBlick, result.data.notes[0].restBeforeBlick);
+  assert.equal(artifact.payload.context.noteIdentitySource, "data.notes");
+  assert.equal(
+    Object.hasOwn(artifact.payload.context.occurrences[0], "noteFingerprints"),
+    false,
+    "range detail must not repeat fingerprints already encoded in dense notes"
+  );
 });
 
 test("range snapshot converts 1-based bar/beat to blick and back across meter changes", async () => {
@@ -457,6 +467,7 @@ test("range snapshot returns one editable context with all tuning includes", asy
     ],
     automationParameters: ["tension"],
     computedPitchSampling: { frames: 4 },
+    budgets: { bytes: RANGE_PAGE_LIMITS.maximums.bytes },
   });
 
   // 96-bit Base64URL 短 ID，不再是 UUID 文本。
@@ -556,6 +567,7 @@ test("range snapshot enforces global Automation and computed-pitch capture limit
 });
 
 test("range snapshot returns captured items inline and pages by byte budget", async () => {
+  assert.equal(RANGE_PAGE_LIMITS.defaults.bytes, 8 * 1024);
   const model = createRangeModel();
   const service = createService(model);
   // responseMode 已删除（§10.6 规则 14）：不再有「摘要档」与「明细档」之分。

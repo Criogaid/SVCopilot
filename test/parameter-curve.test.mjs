@@ -988,6 +988,42 @@ test("sv_patch_parameter_curves commits and verifies four curves in one Undo int
   }
 });
 
+test("large successful curve transactions move per-curve evidence into one detail artifact", async () => {
+  const model = addBatchCurves(createCurveModel());
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const sessionId = "sess_curve_detail";
+  const service = new ParameterCurveService(
+    { withExclusive: (task) => task(model.host) },
+    { now: () => 1000, artifactStore, sessionId }
+  );
+  const curves = Array.from({ length: 30 }, (_, index) => ({
+    parameter: "loudness",
+    mode: "replace",
+    range: { fromBlick: index * 1000, toBlick: index * 1000 + 100 },
+    points: [{ blick: index * 1000, value: index / 10 }],
+  }));
+  const result = await service.patchCurves({
+    action: "dry_run",
+    target: { ...TARGET, expectedGroupUuid: "curve-group" },
+    curves,
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.detailsOmitted, true);
+  assert.equal(result.curves, undefined);
+  assert.equal(result.curveSummary.total, 30);
+  assert.equal(result.curveSummary.statuses.planned, 30);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 16 * 1024);
+  const detail = artifactStore.resolve({
+    artifactId: result.detailRef.artifactId,
+    expectedKind: "curve-transaction-detail",
+    sessionId,
+  });
+  assert.equal(detail.payload.curves.length, 30);
+  assert.ok(detail.payload.curves.every((curve) => curve.before && curve.planned));
+  assert.equal(model.undoCount, 0);
+});
+
 test("sv_patch_parameter_curves rolls every touched curve back when a later write fails", async () => {
   const model = addBatchCurves(createCurveModel());
   const beforeLoudness = model.points.map((point) => [...point]);
@@ -1237,7 +1273,7 @@ test("sv_patch_parameter_curves measures ExecutionCoordinator wait separately", 
   assert.equal(secondResult.timings.serviceTotalMs, 900);
 });
 
-test("sv_patch_parameter_curves reports point-count evidence and rejects duplicates", async () => {
+test("sv_patch_parameter_curves reports point-count evidence and rejects overlapping aliases", async () => {
   const model = addBatchCurves(createCurveModel());
   const planned = await createService(model).patchCurves(
     fourCurveRequest({ action: "dry_run" })
@@ -1255,16 +1291,81 @@ test("sv_patch_parameter_curves reports point-count evidence and rejects duplica
   duplicate.curves[1].parameter = "LOUDNESS";
   const duplicateResult = await createService(model).patchCurves(duplicate);
   assert.equal(duplicateResult.ok, false);
-  assert.equal(duplicateResult.error.code, "DUPLICATE_PARAMETER");
+  assert.equal(duplicateResult.error.code, "OVERLAPPING_CURVE_RANGES");
   assert.equal(duplicateResult.effects, "none");
   assert.equal(duplicateResult.undoRecords, 0);
   assert.equal(duplicateResult.target.groupUuid, "curve-group");
-  assert.equal(duplicateResult.curves[0].status, "not_attempted");
+  assert.equal(duplicateResult.curves[0].status, "not_applied");
   assert.equal(duplicateResult.curves[0].resolvedParameter, "loudness");
   assert.equal(duplicateResult.curves[1].status, "failed");
   assert.equal(duplicateResult.curves[1].resolvedParameter, "loudness");
   assert.equal(duplicateResult.error.resolvedParameter, "loudness");
   assert.ok(Number.isFinite(duplicateResult.timings.serviceTotalMs));
+});
+
+test("same Automation parameter may use disjoint ranges in one Undo transaction", async () => {
+  const model = createCurveModel();
+  const result = await createService(model).patchCurves({
+    target: TARGET,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q / 2 },
+        points: [{ blick: 0, value: 2 }],
+      },
+      {
+        parameter: "LOUDNESS",
+        mode: "replace",
+        range: { fromBlick: Q + 1, toBlick: 2 * Q },
+        points: [{ blick: 2 * Q, value: 3 }],
+      },
+    ],
+    action: "commit",
+    atomic: true,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.undoRecords, 1);
+  assert.equal(result.undo.expectedUserUndoSteps, 1);
+  assert.equal(model.undoCount, 2);
+  assert.ok(result.curves.every((curve) => curve.verified === true));
+  assert.deepEqual(model.points, [
+    [0, 2],
+    [Q, 0.5],
+    [2 * Q, 3],
+  ]);
+});
+
+test("disjoint ranges of one parameter roll back together when a later range fails", async () => {
+  const model = createCurveModel();
+  const before = structuredClone(model.points);
+  model.failures.push({ method: "remove", remainingSkips: 1, code: "INJECTED_FAILURE" });
+  const result = await createService(model).patchCurves({
+    target: TARGET,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q / 2 },
+        points: [{ blick: 0, value: 2 }],
+      },
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: Q + 1, toBlick: 2 * Q },
+        points: [{ blick: 2 * Q, value: 3 }],
+      },
+    ],
+    action: "commit",
+    atomic: true,
+  });
+
+  assert.equal(result.status, "rolled_back");
+  assert.equal(result.effects, "reverted");
+  assert.equal(result.rollback.verified, true);
+  assert.equal(result.undoRecords, 1);
+  assert.deepEqual(model.points, before);
 });
 
 test("sv_patch_parameter_curves expands a planRef without consulting SnapshotService", async () => {

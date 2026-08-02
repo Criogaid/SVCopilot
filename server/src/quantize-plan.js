@@ -498,23 +498,27 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
       revertedCount,
       maxAbsDeltaBlick: planned.reduce((max, item) => Math.max(max, Math.abs(item.deltaBlick)), 0),
     },
-    perNote: planned.slice(0, cap).map((item) => ({
-      note: item.note.indexInGroup,
-      lyrics: item.note.lyrics,
-      originalOnsetBlick: item.note.absOnsetBlick,
-      plannedOnsetBlick: item.plannedAbsOnsetBlick,
-      deltaBlick: item.deltaBlick,
-      ...(input.quantizeDurations
-        ? {
-            originalDurationBlick: item.note.durationBlick,
-            plannedDurationBlick: item.plannedDurationBlick,
-          }
-        : {}),
-      gridIndex: item.gridIndex,
-      changed: item.changed,
-      ...(item.onsetReverted ? { onsetReverted: true, revertReason: item.revertReason } : {}),
-    })),
-    perNoteTruncated: planned.length > cap,
+    ...(patchRequest || revertedCount > 0
+      ? {
+          perNote: planned.slice(0, cap).map((item) => ({
+            note: item.note.indexInGroup,
+            lyrics: item.note.lyrics,
+            originalOnsetBlick: item.note.absOnsetBlick,
+            plannedOnsetBlick: item.plannedAbsOnsetBlick,
+            deltaBlick: item.deltaBlick,
+            ...(input.quantizeDurations
+              ? {
+                  originalDurationBlick: item.note.durationBlick,
+                  plannedDurationBlick: item.plannedDurationBlick,
+                }
+              : {}),
+            gridIndex: item.gridIndex,
+            changed: item.changed,
+            ...(item.onsetReverted ? { onsetReverted: true, revertReason: item.revertReason } : {}),
+          })),
+          perNoteTruncated: planned.length > cap,
+        }
+      : {}),
     apply: sealedEnvelope,
     ...(continuation ? { continuation } : {}),
     review: { requiresHumanReview: revertedCount > 0, requiresSharedTargetConfirmation, checklist },

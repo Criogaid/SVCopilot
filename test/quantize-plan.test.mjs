@@ -275,10 +275,10 @@ test("set.onsetBlick is written in group-local coordinates when the occurrence h
 test("already-quantized ranges report no_change without an actionable apply envelope", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, {
-    notes: [
-      { onsetBlick: 0, durationBlick: Q },
-      { onsetBlick: Q, durationBlick: Q },
-    ],
+    notes: Array.from({ length: 20 }, (_, index) => ({
+      onsetBlick: index * Q,
+      durationBlick: Q,
+    })),
   });
   const result = await createService(store).plan({
     contextId: stored.contextId,
@@ -287,6 +287,17 @@ test("already-quantized ranges report no_change without an actionable apply enve
   assert.equal(result.status, "no_change");
   assert.equal(result.apply, null);
   assert.equal(result.continuation, undefined);
+  assert.equal(result.perNote, undefined);
+  assert.equal(result.perNoteTruncated, undefined);
+  assert.deepEqual(result.summary, {
+    noteCount: 20,
+    changedCount: 0,
+    changedOnsets: 0,
+    changedDurations: 0,
+    revertedCount: 0,
+    maxAbsDeltaBlick: 0,
+  });
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 2 * 1024);
 });
 
 test("plans above the patch cap return the first 200 plus a continuation workflow", async () => {

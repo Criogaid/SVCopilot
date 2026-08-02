@@ -256,13 +256,39 @@ test("a two-operation describe that fits returns both with no deferral", async (
   assert.equal("deferred" in payload, false);
 });
 
+test("sv_describe batches many small contracts while preserving the byte budget", async () => {
+  const { operations } = buildOperationCatalog(TOOLS);
+  const requested = [...operations.values()]
+    .sort(
+      (left, right) =>
+        Buffer.byteLength(JSON.stringify(left), "utf8") -
+        Buffer.byteLength(JSON.stringify(right), "utf8")
+    )
+    .slice(0, MAX_DESCRIBE_OPERATIONS)
+    .map((entry) => entry.operation);
+  const response = await withClient((client) =>
+    client.callTool({
+      name: DESCRIBE_OPERATION_TOOL,
+      arguments: { operations: requested },
+    })
+  );
+  assert.notEqual(response.isError, true);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(response.structuredContent), "utf8") <= MAX_DESCRIBE_BYTES
+  );
+  const returned = response.structuredContent.data.operations.map((item) => item.operation);
+  const deferred =
+    response.structuredContent.data.deferred?.operations.map((item) => item.operation) ?? [];
+  assert.ok(returned.length > 2, "batching must improve on the former two-operation cap");
+  assert.deepEqual([...returned, ...deferred].sort(), [...requested].sort());
+});
+
 test("sv_describe bounds its request and rejects unknown operations", async () => {
   await withClient(async (client) => {
-    // 实测最大 4 个 schema 合计远超 16 KiB 门禁，因此上限是 2。
-    assert.equal(MAX_DESCRIBE_OPERATIONS, 2);
+    assert.equal(MAX_DESCRIBE_OPERATIONS, 16);
     const tooMany = await client.callTool({
       name: DESCRIBE_OPERATION_TOOL,
-      arguments: { operations: ["ping", "snapshot", "snapshot_range"] },
+      arguments: { operations: new Array(MAX_DESCRIBE_OPERATIONS + 1).fill("ping") },
     });
     assert.equal(tooMany.isError, true);
     assert.equal(tooMany.structuredContent.error.code, "INVALID_ARGUMENTS");

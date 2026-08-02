@@ -155,6 +155,7 @@ test("a comparison starts variant A immediately and returns without blocking", a
   assert.equal(result.ok, true);
   assert.equal(result.data.currentVariant, "a");
   assert.equal(result.data.state, "playing_a");
+  assert.equal(result.data.terminal, false);
   assert.deepEqual(result.data.order, ["a", "b"]);
   // 立即返回：B 尚未播放。
   assert.deepEqual(model.solo, [true, false, false]);
@@ -192,6 +193,7 @@ test("the comparison completes with restore evidence and no content Undo", async
 
   const final = await harness.compare.get({ comparisonId: started.data.comparisonId });
   assert.equal(final.data.state, "restored");
+  assert.equal(final.data.terminal, true);
   assert.equal(final.data.reason, "completed");
   assert.deepEqual(
     final.data.playedVariants.map((entry) => entry.label),

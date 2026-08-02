@@ -570,6 +570,7 @@ test("auto-stop schedules without holding the host queue and restores at the end
   });
   assert.equal(started.data.endPolicy, "auto_stop");
   assert.equal(started.data.state, "playing");
+  assert.equal(started.data.terminal, false);
   assert.equal(harness.timer().delay, 2_000);
   assert.equal(model.status, "playing");
 
@@ -578,6 +579,7 @@ test("auto-stop schedules without holding the host queue and restores at the end
   await harness.timer().callback();
   const terminal = await harness.service.get({ auditionId: started.data.auditionId });
   assert.equal(terminal.status, "restored");
+  assert.equal(terminal.data.terminal, true);
   assert.equal(terminal.data.autoStop.timerDelayMs, 120);
   assert.equal(terminal.data.autoStop.queueDelayMs, 0);
   assert.ok(Math.abs(terminal.data.autoStop.overrunMs - 120) < 1e-6);

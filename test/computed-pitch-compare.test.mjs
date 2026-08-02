@@ -232,7 +232,7 @@ test("official br events are excluded from computed-pitch coverage and melodic d
     result.perNote.items.map((item) => item.lyrics),
     ["word"]
   );
-  assert.equal(result.transitions.length, 0);
+  assert.deepEqual(result.transitions, { count: 0, returned: 0, truncated: false, items: [] });
   assert.ok(!result.warnings.some((warning) => warning.code === "LOW_COMPUTED_PITCH_COVERAGE"));
 });
 
@@ -296,7 +296,7 @@ test("GF-SYN-005: transition reports overshoot, arrival, and settling", async ()
     mode: "compare_to_target",
     contextId: stored.contextId,
   });
-  const transition = result.transitions[0];
+  const transition = result.transitions.items[0];
   assert.equal(transition.direction, "up");
   assert.equal(transition.status, "ok");
   approx(transition.overshootCent, 30, 1e-6);
@@ -304,6 +304,34 @@ test("GF-SYN-005: transition reports overshoot, arrival, and settling", async ()
   approx(transition.arrivalMs, 25, 1e-6);
   assert.equal(transition.settled, true);
   approx(transition.settlingMs, 25, 1e-6);
+});
+
+test("transition detail is bounded by default and reports an honest total", async () => {
+  const store = createStore();
+  const noteCount = 30;
+  const { stored } = createStoredContext(store, {
+    values: Array.from({ length: noteCount }, (_, index) => 60 + (index % 2)),
+    intervalBlick: Q,
+    notes: Array.from({ length: noteCount }, (_, index) => ({
+      onsetBlick: index * Q,
+      durationBlick: Q,
+      pitch: 60 + (index % 2),
+    })),
+  });
+
+  const result = await createService(store).compare({
+    mode: "compare_to_target",
+    contextId: stored.contextId,
+    metrics: { perNote: false, vibrato: false, anomalySegments: false },
+    analysis: { minValidFramesPerNote: 1, centerMinFrames: 1 },
+  });
+
+  assert.equal(result.transitions.count, noteCount - 1);
+  assert.equal(result.transitions.returned, 20);
+  assert.equal(result.transitions.truncated, true);
+  assert.equal(result.transitions.items.length, 20);
+  assert.ok(result.warnings.some((warning) => warning.code === "TRANSITIONS_TRUNCATED"));
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 16 * 1024);
 });
 
 test("per-note vibrato is measured from the computed-pitch series", async () => {

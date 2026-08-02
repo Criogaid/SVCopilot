@@ -5,6 +5,10 @@ import { buildPlanArtifact } from "./plan-reference.js";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import { COMPACT_MAX_BYTES } from "./response-budget.js";
+import {
+  MAX_CURVE_OPERATIONS_PER_TRANSACTION,
+  MAX_EXPECTED_NOTES_PER_TRANSACTION,
+} from "./parameter-curve.js";
 import { ServiceTiming } from "./service-timing.js";
 import {
   analyzeVocalEventSequence,
@@ -102,18 +106,7 @@ export const INTENT_PRESETS = Object.freeze({
 });
 const MAX_GESTURES = 32;
 const MAX_POINTS_PER_CURVE = 2000;
-// 一次响应最多交接多少个 apply 调用。
-//
-// 上限的来源是两条硬约束，不是审美：
-//   1. §4.4 规则 8：compact success envelope <= 16 KiB。每个 apply 调用都要在信封里
-//      带一个 planRef 与一条 undoLabel，实测 16 次调用刚好贴住预算。
-//   2. ArtifactStore 的 maxEntries 配额（默认 128）是**整个会话共享**的。K 次调用
-//      封存 K 个 plan artifact，因此一次不封顶的规划可以独占甚至耗尽配额——耗尽之后
-//      seal 抛错，而旧代码的兜底是把整份 mutation payload 内联回响应（实测 320 KB，
-//      超预算 20 倍）。封顶把"配额耗尽"变成一件规划期就能如实上报的事。
-//
-// 超出的簇按 continuation 交回调用方分轮提交，与 quantize/lyric/harmony 同一模式。
-const MAX_APPLY_CALLS = 16;
+const INLINE_PLAN_DETAIL_MAX_BYTES = 8 * 1024;
 
 const PROVENANCE = Object.freeze({
   planner: "deterministic_gesture_compiler",
@@ -1005,6 +998,7 @@ function compileOperations(gestures, loaded, input, warnings) {
     (left, right) =>
       left.range.fromBlick - right.range.fromBlick || left.parameter.localeCompare(right.parameter)
   );
+  assertDisjointCompiledRanges(operations);
   const totalPoints = operations.reduce((sum, operation) => sum + operation.points.length, 0);
   if (totalPoints > input.constraints.maxTotalPoints) {
     const error = codedError(
@@ -1014,19 +1008,33 @@ function compileOperations(gestures, loaded, input, warnings) {
     error.details = { totalPoints, maxTotalPoints: input.constraints.maxTotalPoints };
     throw error;
   }
-  // sv_patch_parameter_curves 一次请求内每个参数只允许出现一次（DUPLICATE_PARAMETER），
-  // 而同参数的不相邻表现手法簇必须保持独立 range——把整段并成一个 replace 会抹掉簇间
-  // 既有控制点。因此按"每参数第 j 个簇"分区成 K 次批量调用（通常 K=1），每次调用
-  // 内参数唯一；K>1 时产生 K 个 Undo 记录，在 review 中如实声明。
-  const clusterIndexByParameter = new Map();
-  let applyCallCount = operations.length > 0 ? 1 : 0;
-  for (const operation of operations) {
-    const index = clusterIndexByParameter.get(operation.parameter) ?? 0;
-    operation.applyCallIndex = index;
-    clusterIndexByParameter.set(operation.parameter, index + 1);
-    applyCallCount = Math.max(applyCallCount, index + 1);
+  if (operations.length > MAX_CURVE_OPERATIONS_PER_TRANSACTION) {
+    throw codedError(
+      "PLAN_TOO_FRAGMENTED",
+      `the plan needs ${operations.length} disjoint curve ranges but one transaction accepts at most ${MAX_CURVE_OPERATIONS_PER_TRANSACTION}; narrow the range or reduce gestures`
+    );
   }
-  return { operations, totalPoints, applyCallCount };
+  return { operations, totalPoints };
+}
+
+function assertDisjointCompiledRanges(operations) {
+  const previousByParameter = new Map();
+  for (const operation of operations) {
+    const previous = previousByParameter.get(operation.parameter);
+    if (previous && operation.range.fromBlick <= previous.range.toBlick) {
+      const error = codedError(
+        "PLAN_CONFLICT",
+        `${operation.parameter}: compiled curve ranges overlap or touch after boundary guards; combine nearby gestures or increase their separation`
+      );
+      error.details = {
+        parameter: operation.parameter,
+        previousRange: previous.range,
+        currentRange: operation.range,
+      };
+      throw error;
+    }
+    previousByParameter.set(operation.parameter, operation);
+  }
 }
 
 function clusterBySpanOverlap(gestures) {
@@ -1211,26 +1219,33 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     targetGroupUuid: loaded.occurrence.targetGroupUuid,
     curves: compiled.operations.map(curveOf),
   }).slice(0, 16)}`;
-  const applyRequests = [];
-  // 只构造前 MAX_APPLY_CALLS 次调用；其余簇进 continuation（见常量注释）。
-  const submittableCallCount = Math.min(compiled.applyCallCount, MAX_APPLY_CALLS);
-  const deferredCallCount = compiled.applyCallCount - submittableCallCount;
-  for (let callIndex = 0; callIndex < submittableCallCount; callIndex += 1) {
-    const callOperations = compiled.operations.filter(
-      (operation) => operation.applyCallIndex === callIndex
+  const expectedNotes = expectedNotesFor(compiled.operations);
+  if (expectedNotes.length > MAX_EXPECTED_NOTES_PER_TRANSACTION) {
+    const error = codedError(
+      "PLAN_TOO_FRAGMENTED",
+      `the plan anchors ${expectedNotes.length} notes but one transaction accepts at most ${MAX_EXPECTED_NOTES_PER_TRANSACTION}; narrow the range or reduce gestures`
     );
-    const expectedNotes = expectedNotesFor(callOperations);
-    applyRequests.push({
-      tool: "sv_patch_parameter_curves",
-      arguments: {
-        target: { ...target, ...(expectedNotes.length > 0 ? { expectedNotes } : {}) },
-        curves: callOperations.map(curveOf),
-        action: "dry_run",
-        atomic: true,
-        undoLabel: `sv_plan_expression ${planId} (${callIndex + 1}/${submittableCallCount})`,
-      },
-    });
+    error.details = {
+      expectedNotes: expectedNotes.length,
+      maxExpectedNotes: MAX_EXPECTED_NOTES_PER_TRANSACTION,
+    };
+    throw error;
   }
+  const applyRequests =
+    compiled.operations.length > 0
+      ? [
+          {
+            tool: "sv_patch_parameter_curves",
+            arguments: {
+              target: { ...target, ...(expectedNotes.length > 0 ? { expectedNotes } : {}) },
+              curves: compiled.operations.map(curveOf),
+              action: "dry_run",
+              atomic: true,
+              undoLabel: `sv_plan_expression ${planId}`,
+            },
+          },
+        ]
+      : [];
   const publicGestures = gestures.map((gesture) => ({
     gestureId: gesture.gestureId,
     type: gesture.type,
@@ -1261,57 +1276,23 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     stats: operation.stats,
     clampedCount: operation.clampedCount,
     fromGestures: operation.fromGestures,
-    applyCallIndex: operation.applyCallIndex,
   }));
   const hasOperations = applyRequests.length > 0;
   const checklist = hasOperations
     ? [
         "Review every operation's parameter, unit, and value range before applying.",
         "replace mode overwrites existing control points inside each operation range; the planner does not read the host and did not check for existing points (use sv_get_parameter_curve if unsure).",
-        "Apply through apply.arguments (sv_patch_parameter_curves) with action dry_run first, then commit each apply call.",
+        "Apply through apply.arguments (sv_patch_parameter_curves) with action dry_run first, then commit the same sealed plan as one transaction and one Undo step.",
         "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
       ]
     : ["No melodic intent target remained after special-event filtering; no host write is needed."];
-  if (applyRequests.length > 1) {
-    checklist.push(
-      `This plan needs ${applyRequests.length} sequential batch calls (a parameter has multiple disjoint gesture clusters), producing ${applyRequests.length} Undo records instead of one.`
-    );
-  }
   if (requiresSharedTargetConfirmation) {
     checklist.push(
       "The target NoteGroup is shared by multiple occurrences; commit requires target.allowSharedTargetMutation:true and affects every occurrence."
     );
   }
 
-  // 超过 MAX_APPLY_CALLS 的簇不静默丢弃，也不硬塞进信封：按 continuation 交回调用方，
-  // 与 quantize/lyric/harmony 同一模式。deferred 的簇在下一轮重新规划时自然重新出现，
-  // 因为 planner 是纯函数——它对同一 Context 与同一请求恒定给出同一批簇。
-  const continuation =
-    deferredCallCount > 0
-      ? {
-          reason: "APPLY_CALL_CAP",
-          applyCallCapPerPlan: MAX_APPLY_CALLS,
-          remainingCallCount: deferredCallCount,
-          workflow: [
-            "Submit apply.arguments with action dry_run, then the identical arguments with action commit; repeat for each apply.additionalCalls entry in order.",
-            "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
-            "Re-run sv_plan_expression with the same gestures/intent against the fresh contextId: already-written curves come back as the same values, so the next round plans the remaining clusters.",
-            "Repeat until the response carries no continuation.",
-          ],
-        }
-      : null;
-  if (continuation) {
-    checklist.push(
-      `This plan needed ${compiled.applyCallCount} batch calls but the per-plan cap is ${MAX_APPLY_CALLS}; ${deferredCallCount} cluster call(s) are deferred to a later round (see continuation).`
-    );
-    warnings.push({
-      code: "PLAN_EXCEEDS_APPLY_CALL_CAP",
-      message: `${compiled.applyCallCount} sequential batch calls exceed the ${MAX_APPLY_CALLS}-call per-plan cap; apply carries the first ${applyRequests.length} and ${deferredCallCount} remain. Follow continuation.workflow: commit these, re-snapshot, re-plan. Each round is its own transaction and Undo record.`,
-    });
-  }
-
   const planArtifactRefs = [];
-  // 租期：K 次调用各自封存一个 artifact，最早到期的那个决定整份交接还能用多久。
   let planExpiresAt = null;
   if (artifactStore && sessionId && applyRequests.length > 0) {
     try {
@@ -1344,8 +1325,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
         }
       }
     } catch (error) {
-      // 部分封存必须整批释放：留下半套 planRef 会让调用方以为可以提交一部分，
-      // 而那一部分对应的 Undo 边界与其余调用是分开的。
+      // 封存失败不得降级成内联 mutation；若 seal 后的引用组装抛错，也释放孤立 artifact。
       for (const artifactId of planArtifactRefs) {
         artifactStore.release({ artifactId, sessionId });
       }
@@ -1384,14 +1364,12 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
       totalPoints: compiled.totalPoints,
       applyCallCount: applyRequests.length,
       expectedUserUndoSteps: applyRequests.length,
-      ...(deferredCallCount > 0 ? { plannedCallCount: compiled.applyCallCount } : {}),
       parameters: [...new Set(compiled.operations.map((operation) => operation.parameter))],
     },
     gestures: publicGestures,
     operations: operationsMeta,
     ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
     apply: sealedEnvelope,
-    ...(continuation ? { continuation } : {}),
     review: {
       requiresHumanAudition: true,
       requiresSharedTargetConfirmation,
@@ -1413,16 +1391,17 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
 }
 
 // gestures/operations 是唯一随计划规模无界增长的两段（373 音符实测约 12 KiB）。
-// §4.4 规则 8/10：compact success envelope ≤ 16 KiB，超预算的明细进 Artifact。
+// 明细超过半个 compact 信封时就进 Artifact，为 summary / apply / review 和 MCP 外层
+// 信封留出余量；16 KiB 仍是完整成功响应的硬上限。
 //
 // 按项数截断在这里没有意义——体积主要来自每项的字段数而不是项数，任何"刚好合适"
 // 的项数上限都会在下一次字段增补后再次失效。因此按**实际字节**判定。
 //
-// Artifact 是**按需**封存的：装得下就内联，一个 artifact 都不占。无条件预封存会白白
-// 消耗 ArtifactStore 配额（并可能挤掉真正需要的 plan artifact），而绝大多数计划都装得下。
+// Artifact 是**按需**封存的：小计划继续内联，一个 artifact 都不占。无条件预封存会白白
+// 消耗 ArtifactStore 配额（并可能挤掉真正需要的 plan artifact）。
 function applyPlanByteBudget(response, warnings, detail) {
   const size = Buffer.byteLength(JSON.stringify(response), "utf8");
-  if (size <= COMPACT_MAX_BYTES) return response;
+  if (size <= INLINE_PLAN_DETAIL_MAX_BYTES) return response;
   const { artifactStore, sessionId, sourceEpoch, planId, gestures, operations } = detail;
   if (!artifactStore || !sessionId) return response;
   let detailRef = null;
@@ -1450,7 +1429,7 @@ function applyPlanByteBudget(response, warnings, detail) {
   delete trimmed.operations;
   warnings.push({
     code: "RESPONSE_BUDGET_APPLIED",
-    message: `The full response was ${size} bytes, over the ${COMPACT_MAX_BYTES}-byte envelope budget; gestures and operations moved to detailRef. summary, apply, and review are complete.`,
+    message: `The full response was ${size} bytes, over the ${INLINE_PLAN_DETAIL_MAX_BYTES}-byte inline-detail budget (${COMPACT_MAX_BYTES}-byte hard envelope); gestures and operations moved to detailRef. summary, apply, and review are complete.`,
   });
   return trimmed;
 }

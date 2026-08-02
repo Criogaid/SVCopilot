@@ -100,6 +100,7 @@ export class AuditionCompareService {
       data: {
         comparisonId,
         state: comparison.state,
+        terminal: false,
         transitionHistory: comparison.transitionHistory,
         order: input.order,
         range: { fromBlick: input.fromBlick, toBlick: input.toBlick },
@@ -146,6 +147,7 @@ export class AuditionCompareService {
       data: {
         comparisonId: comparison.id,
         state: comparison.state,
+        terminal: false,
         transitionHistory: comparison.transitionHistory,
         currentVariant: comparison.input.order[comparison.currentVariantIndex] ?? null,
         playedVariants: comparison.playedVariants,
@@ -341,6 +343,7 @@ export class AuditionCompareService {
       data: {
         comparisonId: comparison.id,
         state: comparison.state,
+        terminal: true,
         reason,
         transitionHistory: comparison.transitionHistory,
         order: comparison.input.order,
@@ -368,6 +371,7 @@ export class AuditionCompareService {
       data: {
         comparisonId: comparison.id,
         state: comparison.state,
+        terminal: true,
         transitionHistory: comparison.transitionHistory,
         failedVariant: comparison.input.order[index] ?? null,
         variantResult: result,

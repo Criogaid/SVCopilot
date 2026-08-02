@@ -115,12 +115,21 @@ function assertApplyRequestsWellFormed(result) {
       assert.equal(typeof expected.onsetBlick, "number");
       assert.equal(typeof expected.pitch, "number");
     }
-    const parameters = request.arguments.curves.map((curve) => curve.parameter);
-    assert.equal(new Set(parameters).size, parameters.length, "parameters unique per call");
+    const rangesByParameter = new Map();
     for (const curve of request.arguments.curves) {
       const normalized = normalizeCurveInput(curve);
       assert.equal(normalized.mode, "replace");
       assert.ok(normalized.points.length >= 2);
+      const key = normalized.parameter.toLowerCase();
+      const ranges = rangesByParameter.get(key) ?? [];
+      ranges.push(normalized.range);
+      rangesByParameter.set(key, ranges);
+    }
+    for (const ranges of rangesByParameter.values()) {
+      ranges.sort((left, right) => left.fromBlick - right.fromBlick);
+      for (let index = 1; index < ranges.length; index += 1) {
+        assert.ok(ranges[index].fromBlick > ranges[index - 1].toBlick);
+      }
     }
   }
 }
@@ -368,7 +377,7 @@ test("overlapping gestures on one parameter merge additively into one operation"
   approx(onsetPoint.value, -30);
 });
 
-test("disjoint clusters of one parameter partition into sequential apply calls", async () => {
+test("disjoint clusters of one parameter share one sealed transaction", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, {
     notes: [
@@ -384,10 +393,11 @@ test("disjoint clusters of one parameter partition into sequential apply calls",
     ],
   });
   assert.equal(result.summary.operationCount, 2);
-  assert.equal(result.summary.applyCallCount, 2);
-  assert.equal(result.summary.expectedUserUndoSteps, 2);
-  assert.equal(1 + (result.apply.additionalCalls?.length ?? 0), 2);
-  assert.ok(result.review.checklist.some((item) => /2 sequential batch calls/.test(item)));
+  assert.equal(result.summary.applyCallCount, 1);
+  assert.equal(result.summary.expectedUserUndoSteps, 1);
+  assert.equal(result.apply.additionalCalls, undefined);
+  assert.equal(sealedRequest(result, 0).arguments.curves.length, 2);
+  assert.ok(result.review.checklist.some((item) => /one transaction and one Undo/.test(item)));
   assertApplyRequestsWellFormed(result);
 });
 
@@ -823,7 +833,13 @@ test("an over-budget plan moves gestures and operations to detailRef, never drop
       },
       { type: "vibrato", notes: [62, 121, 178, 237, 296], depthCents: 15 },
       { type: "vibrato", notes: [314, 336], depthCents: 18 },
-      { type: "scoop", targets: [[87, 22], [203, 24], [274, 18], [302, 28]] },
+      {
+        type: "scoop",
+        targets: [
+          [10, 20], [30, 20], [50, 20], [70, 20], [87, 22], [100, 20], [140, 20],
+          [203, 24], [220, 20], [250, 20], [274, 18], [302, 28], [330, 20], [350, 20],
+        ],
+      },
       { type: "fall", targets: [[157, 22], [273, 26], [372, 32]] },
     ],
     constraints: { maxTotalPoints: 1200 },
@@ -1001,14 +1017,7 @@ test("unknown presets are rejected before touching the store", async () => {
   );
 });
 
-test("the apply-call cap keeps a wide plan inside its budget instead of inlining megabytes", async () => {
-  // 回归：一个参数上的**不相邻**表现手法簇各自需要独立的 apply 调用，而调用数以前
-  // 完全不封顶。两条硬约束会同时被打破：
-  //   1. K 次调用要封存 K 个 plan artifact，而 ArtifactStore 的 maxEntries（默认 128）
-  //      是整个会话共享的。越过配额后 seal 抛错。
-  //   2. seal 失败的旧兜底是把整份 mutation payload 内联回响应——实测 320 KB，
-  //      超 16 KiB 上限 20 倍，而这正是 §11 条目 7 已经删除的 inline apply 路径。
-  // 封顶把它变成规划期就如实上报的 continuation。
+test("a wide expression plan seals one transaction instead of many apply calls", async () => {
   const store = createStore();
   const targetCount = 200;
   // 每个 scoop 目标之间留一整个空拍，因此它们互不相邻，无法合并成一次调用。
@@ -1036,8 +1045,7 @@ test("the apply-call cap keeps a wide plan inside its budget instead of inlining
     ],
   });
 
-  // 交接的调用数被封顶，且响应留在 compact 预算内。
-  assert.equal(result.apply.callCount, 16);
+  assert.equal(result.summary.applyCallCount, 1);
   assert.ok(
     Buffer.byteLength(JSON.stringify(result), "utf8") <= 16 * 1024,
     "a wide plan must stay inside the 16 KiB compact envelope budget"
@@ -1045,12 +1053,87 @@ test("the apply-call cap keeps a wide plan inside its budget instead of inlining
   // 交接仍然走 planRef，绝不回落到内联 payload。
   assert.ok(result.apply.arguments.planRef);
   assert.equal(result.applyRequests, undefined);
-  // 被推迟的簇如实上报，而不是静默丢弃。
-  assert.equal(result.continuation.reason, "APPLY_CALL_CAP");
-  assert.equal(result.continuation.remainingCallCount, targetCount - 16);
-  assert.ok(result.continuation.workflow.length > 0);
-  assert.ok(result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_APPLY_CALL_CAP"));
-  // 配额没有被一次规划吃掉：16 个 plan + 1 个 detail，而不是 200 个。
-  assert.ok(artifactStore.entries.size <= 17, `sealed ${artifactStore.entries.size} artifacts`);
+  assert.equal(result.continuation, undefined);
+  const planArtifact = artifactStore.resolve({
+    artifactId: result.apply.arguments.planRef,
+    expectedKind: "plan",
+    sessionId: "sess_apply_cap",
+  });
+  assert.equal(planArtifact.payload.mutationRequest.curves.length, targetCount);
+  assert.equal(result.summary.expectedUserUndoSteps, 1);
+  assert.ok(result.detailRef);
+  // 一份 plan 加可选的响应明细，不再按簇消耗 ArtifactStore 配额。
+  assert.equal(artifactStore.entries.size, 2, `sealed ${artifactStore.entries.size} artifacts`);
   assert.ok(!result.warnings.some((warning) => warning.code === "ARTIFACT_SEAL_FAILED"));
+});
+
+test("planner rejects ranges that overlap only after boundary guards are compiled", async () => {
+  const store = createStore();
+  const lengthBlick = Math.round(Q * 0.01);
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { onsetBlick: Q, durationBlick: Q, pitch: 60 },
+      { onsetBlick: Q + lengthBlick + 1, durationBlick: Q, pitch: 62 },
+    ],
+  });
+
+  await assert.rejects(
+    createService(store).plan({
+      contextId: stored.contextId,
+      gestures: [
+        {
+          type: "scoop",
+          targets: [
+            [0, 20],
+            [1, 20],
+          ],
+          lengthQuarter: 0.01,
+        },
+      ],
+    }),
+    (error) => {
+      assert.equal(error.code, "PLAN_CONFLICT");
+      assert.match(error.message, /boundary guards/i);
+      assert.equal(error.details.parameter, "pitchDelta");
+      return true;
+    }
+  );
+});
+
+test("planner does not seal a plan whose anchored-note set exceeds the transaction limit", async () => {
+  const store = createStore();
+  const transitionCount = 129;
+  const notes = [];
+  const transitions = [];
+  for (let index = 0; index < transitionCount; index += 1) {
+    const fromIndex = notes.length;
+    const fromBlick = index * 4 * Q;
+    notes.push({ onsetBlick: fromBlick, durationBlick: Q, pitch: 60 });
+    notes.push({ onsetBlick: fromBlick + Q, durationBlick: Q, pitch: 62 });
+    transitions.push([fromIndex, fromIndex + 1]);
+  }
+  const { stored } = createStoredContext(store, { notes });
+  const artifactStore = new ArtifactStore({ now: () => 2000 });
+
+  await assert.rejects(
+    createService(store, artifactStore).plan({
+      contextId: stored.contextId,
+      constraints: { maxTotalPoints: 2000 },
+      gestures: [
+        {
+          type: "portamento",
+          transitions,
+          lengthQuarter: 0.1,
+          maxCents: 100,
+        },
+      ],
+    }),
+    (error) => {
+      assert.equal(error.code, "PLAN_TOO_FRAGMENTED");
+      assert.equal(error.details.expectedNotes, transitionCount * 2);
+      assert.equal(error.details.maxExpectedNotes, 256);
+      return true;
+    }
+  );
+  assert.equal(artifactStore.entries.size, 0, "an invalid plan must not consume an Artifact slot");
 });

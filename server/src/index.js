@@ -42,6 +42,7 @@ import { NotePatchService } from "./note-patch.js";
 import { NoteStructureService } from "./note-structure.js";
 import {
   BUILTIN_AUTOMATION_PARAMETERS,
+  MAX_CURVE_OPERATIONS_PER_TRANSACTION,
   ParameterCurveService,
 } from "./parameter-curve.js";
 import { PITCH_CONTROL_LIMITS } from "./pitch-control.js";
@@ -814,7 +815,7 @@ export const TOOLS = [
   {
     name: "sv_wait_for_processing",
     description:
-      'Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide the 0-based occurrence ordinal; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT with ordinal candidates. For computedPitch, omitted startBlick/intervalBlick/frames inherit that occurrence\'s sampling when the range context was captured with include:["computedPitch"]; otherwise all three are required. Explicit values override captured sampling. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.',
+      'Poll read-only computed data until phonemes, computed attributes, or computed pitch complete and remain stable. Accepts group/selection snapshot contexts and range snapshot contexts. For a range context, provide the 0-based occurrence ordinal; it may be omitted only when exactly one vocal occurrence exists. Multiple candidates return AMBIGUOUS_CONTEXT with ordinal candidates. For computedPitch, omitted startBlick/intervalBlick/frames inherit that occurrence\'s sampling when the range context was captured with include:["computedPitch"]; otherwise all three are required. Explicit values override captured sampling. Computed pitch returns coverage/count/hash evidence by default; set includeValues:true only when raw frames are needed. Phoneme and computed-attribute values remain included by default. Legal empty phonemes do not make processing pending. An explicit all-non-empty quality condition may return phoneme_coverage_unsatisfied while processing state remains ready.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -846,6 +847,11 @@ export const TOOLS = [
           default: false,
           description:
             "Optional phoneme coverage condition, default false. It never changes processing state; on timeout, complete results remain ready and the tool reports phoneme_coverage_unsatisfied.",
+        },
+        includeValues: {
+          type: "boolean",
+          description:
+            "Include raw observed values. Defaults to false for computed pitch and true for phonemes/computedAttributes.",
         },
         startBlick: {
           type: "integer",
@@ -1134,7 +1140,7 @@ export const TOOLS = [
   {
     name: "sv_compare_computed_pitch",
     description:
-      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas; Hz-based metrics use each side\'s own tempo map. Per-note pairing matches notes by score position: after a structural edit (insert/delete/move), notes without an unchanged before-note at the same position are reported unmatched with no before/delta instead of a misleading cross-note comparison. anomalySegments.items are sorted by startBlick (score order) by default — anomalySortBy:"severity" sorts by peak error instead; the response declares sortBy, and top always carries the most severe segment regardless of sorting or truncation. Coverage below analysis.lowCoverageWarnRatio (default 0.5) raises LOW_COMPUTED_PITCH_COVERAGE so small-sample summaries are never mistaken for reliable conclusions. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
+      'Objective singing analysis over computed pitch already captured by sv_snapshot_range (include ["notes","computedPitch"]). Pure in-memory read: never touches the host, so before/after states must each be snapshotted first. compare_to_target measures one context against note targets (per-note stable-window centerErrorCent, framewise diagnostics, detrended-autocorrelation vibrato rate/depth/regularity, transition overshoot/arrival/settling, anomaly segments). transitions is a bounded {count,returned,truncated,items} summary; metrics.maxTransitions defaults to 20 and can be raised when detail is needed. compare_contexts diffs two contexts frame-by-frame on the identical sampling grid by score position (after minus before) with per-note center deltas; Hz-based metrics use each side\'s own tempo map. Per-note pairing matches notes by score position: after a structural edit (insert/delete/move), notes without an unchanged before-note at the same position are reported unmatched with no before/delta instead of a misleading cross-note comparison. anomalySegments.items are sorted by startBlick (score order) by default — anomalySortBy:"severity" sorts by peak error instead; the response declares sortBy, and top always carries the most severe segment regardless of sorting or truncation. Coverage below analysis.lowCoverageWarnRatio (default 0.5) raises LOW_COMPUTED_PITCH_COVERAGE so small-sample summaries are never mistaken for reliable conclusions. Null frames stay null (unvoiced or processing-incomplete) and never enter statistics. Frame-rate adequacy for vibrato is graded ok/borderline/too_coarse instead of failing. Analysis thresholds are engineering defaults, not host-calibrated; musical quality judgment remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1163,6 +1169,14 @@ export const TOOLS = [
               type: "boolean",
               default: true,
               description: "compare_to_target only; ignored by compare_contexts.",
+            },
+            maxTransitions: {
+              type: "integer",
+              minimum: 1,
+              maximum: 2000,
+              default: 20,
+              description:
+                "Maximum transition detail items returned by compare_to_target; count always reports the full population.",
             },
             anomalySegments: { type: "boolean", default: true },
           },
@@ -1226,7 +1240,7 @@ export const TOOLS = [
   {
     name: "sv_plan_expression",
     description:
-      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into a unified apply envelope: apply.arguments contains only planRef + action, while the full mutation remains sealed server-side. Submit action dry_run first, then action commit through the target tool\'s hardened transaction kernel. Non-adjacent gesture clusters on one parameter need several sequential calls, so apply.callCount/apply.additionalCalls list them in order and apply.expectedUserUndoSteps reports the resulting Undo record count honestly — they are separate transactions, so a later failure does not roll back earlier commits. Each sealed apply target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. Intent-derived gestures never anchor on breath notes (lyrics "br", no singable pitch — their duration still separates phrases; explicit gestures may still target them deliberately). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
+      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into one sealed apply envelope: apply.arguments contains only planRef + action, while the full mutation remains server-side. All disjoint ranges, including repeated ranges of one Automation parameter, execute through sv_patch_parameter_curves as one verified-compensation transaction and one Undo step. Submit action dry_run first, then action commit. Each sealed apply target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. Intent-derived gestures never anchor on breath notes (lyrics "br", no singable pitch — their duration still separates phrases; explicit gestures may still target them deliberately). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1922,7 +1936,7 @@ export const TOOLS = [
   {
     name: "sv_patch_parameter_curves",
     description:
-      "Atomically edit 1-16 distinct Automation parameters on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again, aliases report requestedParameter/resolvedParameter, and uniqueness is enforced after resolution. The service then validates all curves, opens one host Undo interval, writes and verifies every curve, and compensates every touched curve in reverse order on failure (verified compensation, not ACID). target.expectedNotes and target.expectedTimeOffsetBlick (emitted by sv_plan_expression) are verified against the live host in preflight so curves are never written at positions the notes or the whole reference have drifted away from. compact/standard/verbose control evidence size. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable. If a client collapses nested range/point types to unknown, read svcopilot://schemas/sv_patch_parameter_curves for the exact validated input schema.",
+      `Atomically edit 1-${MAX_CURVE_OPERATIONS_PER_TRANSACTION} Automation ranges on one note group. Built-in names and observable vocalMode_<Name> values are resolved before any getParameter call; the returned Automation typeName is checked again and aliases report requestedParameter/resolvedParameter. One parameter may appear more than once only when its resolved group-local ranges are disjoint; overlapping or touching ranges fail before any write. The service validates every range, opens one host Undo interval, writes and verifies every curve, and compensates every touched range in reverse order on failure (verified compensation, not ACID). target.expectedNotes and target.expectedTimeOffsetBlick (emitted by sv_plan_expression) are verified against the live host in preflight so curves are never written at positions the notes or the whole reference have drifted away from. Large successful batches keep aggregate status, verification, Undo, and timings inline while moving per-curve evidence to detailRef. undoLabel is audit-only. timings exposes coordinatorQueueMs and service-internal phases; dispatcherQueueMs is null because MCP SDK waiting before handler entry is not observable. If a client collapses nested range/point types to unknown, read svcopilot://schemas/sv_patch_parameter_curves for the exact validated input schema.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1932,7 +1946,7 @@ export const TOOLS = [
         curves: {
           type: "array",
           minItems: 1,
-          maxItems: 16,
+          maxItems: MAX_CURVE_OPERATIONS_PER_TRANSACTION,
           items: {
             type: "object",
             additionalProperties: false,
@@ -2298,7 +2312,7 @@ export const TOOLS = [
   {
     name: "sv_edit_phrase",
     description:
-      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. Note/structure edits use a detached NoteGroup plan; curve/voice-only edits use operation-specific live preflight without cloning the full group. Commit journals and applies the verified plan to the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared target mutations require allowSharedTargetMutation:true and are scanned at commit; dry-run defers the project-wide scan. Any commit failure restores notes, curves, voice, and target identity with read-back verification. Notes are referenced by 0-based group index from the same sv_snapshot_range context. If a client collapses nested note, structure, range, or point types to unknown, read svcopilot://schemas/sv_edit_phrase for the exact validated input schema.",
+      "Commit note fields, lyrics/language, structural note operations, multiple Automation curves, and observable voice parameters as one phrase transaction. Fully captured deterministic dry-runs use targeted live fingerprint checks plus an in-memory structural model without cloning the group; partial captures, host-defined curve simplification, and every commit keep the detached NoteGroup preflight. Commit journals and applies the verified plan to the original target inside one Undo interval because SynthV does not allow changing an existing reference target. Shared target mutations require allowSharedTargetMutation:true and are scanned at commit; dry-run defers the project-wide scan. Any commit failure restores notes, curves, voice, and target identity with read-back verification. Notes are referenced by 0-based group index from the same sv_snapshot_range context. If a client collapses nested note, structure, range, or point types to unknown, read svcopilot://schemas/sv_edit_phrase for the exact validated input schema.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2374,7 +2388,7 @@ export const TOOLS = [
                     required: ["onsetBlick", "durationBlick", "pitch"],
                   },
                 },
-                required: ["op", "noteIndex"],
+                required: ["op", "note"],
               },
               {
                 type: "object",
@@ -2550,7 +2564,7 @@ export const TOOLS = [
   {
     name: "sv_start_audition",
     description:
-      "Non-blocking audition with verified startup and recovery. autoStop:true schedules a server timer without holding the host coordinator; when it fires, stop/restore is dispatched through the queue and the terminal state reports timer delay, queue delay, host stop time, and playhead overrun. User stops become stopped_by_user. Temporary solo/playhead values are restored only when the user has not changed them. The recovery payload remains the crash-recovery escape hatch. MCP cannot hear audio; a human judges the sound.",
+      "Non-blocking audition with verified startup and recovery. autoStop:true schedules a server timer without holding the host coordinator; when it fires, stop/restore is dispatched through the queue and the terminal state reports timer delay, queue delay, host stop time, and playhead overrun. Responses expose data.terminal: false while active and true after the lifecycle has finished. User stops become stopped_by_user. Temporary solo/playhead values are restored only when the user has not changed them. The recovery payload remains the crash-recovery escape hatch. MCP cannot hear audio; a human judges the sound.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2587,7 +2601,8 @@ export const TOOLS = [
   },
   {
     name: "sv_get_audition",
-    description: "Read the current playback status and playhead for a running audition.",
+    description:
+      "Read the current playback status and playhead for an audition. Stop polling as soon as data.terminal is true; stopped, restored, restore_failed, and stopped_by_user are terminal states whose remembered result is replayed idempotently.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2599,7 +2614,7 @@ export const TOOLS = [
   {
     name: "sv_stop_audition",
     description:
-      "Stop an audition and restore its saved playback status (stopped, playing, or looping), playhead, and temporary solo fields. Mixer fields are restored ONLY if they still hold the audition-set value; user changes are left untouched and reported. Success requires every requested value to read back correctly, otherwise restore_failed preserves recovery evidence for retry.",
+      "Stop an audition and restore its saved playback status (stopped, playing, or looping), playhead, and temporary solo fields. Mixer fields are restored ONLY if they still hold the audition-set value; user changes are left untouched and reported. Success requires every requested value to read back correctly, otherwise restore_failed preserves recovery evidence for retry. The completed response has data.terminal:true and is replayed idempotently.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2611,7 +2626,7 @@ export const TOOLS = [
   {
     name: "sv_restore_audition",
     description:
-      "Restore mixer and playhead state from a recovery payload returned by sv_start_audition. Use after a server crash left solo/mute changes behind. Same skip-if-user-modified semantics as sv_stop_audition.",
+      "Restore mixer and playhead state from a recovery payload returned by sv_start_audition. Use after a server crash left solo/mute changes behind. Same skip-if-user-modified semantics as sv_stop_audition. The response is terminal and reports data.terminal:true.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2693,7 +2708,7 @@ export const TOOLS = [
   {
     name: "sv_audition_compare",
     description:
-      'Organize a non-blocking human A/B audition of two EXISTING versions over the same range — different track solo configurations, e.g. an original take against an edited duplicate track. Returns a comparisonId immediately; the variants play in sequence with a gap between them. Every variant runs through the same hardened sv_start_audition kernel (verified startup, auto-stop timing, restore-only-if-the-user-has-not-changed-it mixer semantics, per-variant recovery payload), so playback recovery is never reimplemented here. Variant A must fully stop and restore BEFORE variant B starts; restore failure terminates the comparison, and concurrent get/stop/timer transitions share one lifecycle completion. autoRestore is therefore always true. This tool NEVER applies a temporary musical edit for variant B: the official API has no Undo call, so there is no general recovery token after a successful commit, and an un-undoable "audition-only write" would be dishonest. It therefore creates no project-content Undo record; only mixer solo and playhead are touched, and both are restored. MCP cannot hear audio: the response reports playback order and restore evidence only, and perception stays human_only — ask the person which variant they preferred and never state a preference yourself.',
+      'Organize a non-blocking human A/B audition of two EXISTING versions over the same range — different track solo configurations, e.g. an original take against an edited duplicate track. Returns a comparisonId immediately with data.terminal:false; stop polling once any response reports data.terminal:true. The variants play in sequence with a gap between them. Every variant runs through the same hardened sv_start_audition kernel (verified startup, auto-stop timing, restore-only-if-the-user-has-not-changed-it mixer semantics, per-variant recovery payload), so playback recovery is never reimplemented here. Variant A must fully stop and restore BEFORE variant B starts; restore failure terminates the comparison, and concurrent get/stop/timer transitions share one lifecycle completion. autoRestore is therefore always true. This tool NEVER applies a temporary musical edit for variant B: the official API has no Undo call, so there is no general recovery token after a successful commit, and an un-undoable "audition-only write" would be dishonest. It therefore creates no project-content Undo record; only mixer solo and playhead are touched, and both are restored. MCP cannot hear audio: the response reports playback order and restore evidence only, and perception stays human_only — ask the person which variant they preferred and never state a preference yourself.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2772,7 +2787,7 @@ export const TOOLS = [
   {
     name: "sv_get_audition_compare",
     description:
-      "Read the current state of an A/B comparison, including which variant is playing, the transition history, and the live playback state of the underlying audition. Idempotent; once the comparison is finished it returns the remembered terminal result.",
+      "Read the current state of an A/B comparison, including which variant is playing, the transition history, and the live playback state of the underlying audition. Stop polling when data.terminal is true. Idempotent; once the comparison is restored, restore_failed, or failed it returns the remembered terminal result.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2784,7 +2799,7 @@ export const TOOLS = [
   {
     name: "sv_stop_audition_compare",
     description:
-      "Stop an A/B comparison early and restore the saved playhead and temporary solo state through the underlying audition kernel. Idempotent: repeat calls return the same remembered terminal result. Mixer fields the user changed themselves are left alone and reported.",
+      "Stop an A/B comparison early and restore the saved playhead and temporary solo state through the underlying audition kernel. The completed response has data.terminal:true. Idempotent: repeat calls return the same remembered terminal result. Mixer fields the user changed themselves are left alone and reported.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

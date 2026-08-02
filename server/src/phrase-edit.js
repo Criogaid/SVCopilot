@@ -519,12 +519,23 @@ async function resolveTarget(
 }
 
 async function prepareDetachedPhrase(capture, resolved, input, host) {
+  const curvesAreDeterministic = input.curves.every(
+    (curve) => curve.simplifyThreshold === undefined
+  );
   if (
-    input.notePatches.length === 0 &&
-    input.structureOperations.length === 0 &&
-    input.curves.every((curve) => curve.simplifyThreshold === undefined)
+    input.dryRun &&
+    input.structureOperations.length > 0 &&
+    curvesAreDeterministic
   ) {
-    return prepareNonStructuralPhrase(capture, resolved, input);
+    const modeled = await prepareStructuralDryRun(capture, resolved, input, host);
+    if (modeled) return modeled;
+  }
+  const canUseLivePreflight =
+    input.structureOperations.length === 0 &&
+    curvesAreDeterministic &&
+    (input.notePatches.length === 0 || input.dryRun);
+  if (canUseLivePreflight) {
+    return prepareNonStructuralPhrase(capture, resolved, input, host);
   }
   await verifyContextFingerprints(capture, resolved, host);
   const backup = await capture.call(resolved.originalTarget, "clone", [], {
@@ -612,7 +623,7 @@ async function prepareDetachedPhrase(capture, resolved, input, host) {
   };
 }
 
-async function prepareNonStructuralPhrase(capture, resolved, input) {
+async function prepareNonStructuralPhrase(capture, resolved, input, host) {
   const liveTarget = {
     roots: resolved.roots,
     reference: resolved.reference,
@@ -627,6 +638,24 @@ async function prepareNonStructuralPhrase(capture, resolved, input) {
   for (const plan of liveCurvePlans) {
     plan.verification = { attempted: false, passed: null, phase: "live_preflight" };
   }
+  let notePlan = { requested: 0, changedNotes: 0, diff: [] };
+  if (input.notePatches.length > 0) {
+    const noteIndexes = input.notePatches.map((patch) => patch.note);
+    const liveNotes = await resolveOccurrenceNotes(
+      capture,
+      resolved.originalTarget,
+      resolved.occurrence,
+      noteIndexes
+    );
+    const observedFingerprints = await verifyContextFingerprints(capture, resolved, host, {
+      noteIndexes,
+      notesByIndex: liveNotes,
+    });
+    notePlan = await applyNotePatches(capture, liveNotes, input.notePatches, {
+      write: false,
+      baselineByNote: observedFingerprints,
+    });
+  }
   const voice = planVoicePatch(resolved.originalVoice, input.voicePatch);
   const noteCount = await capture.call(resolved.originalTarget, "getNumNotes");
   return {
@@ -639,7 +668,7 @@ async function prepareNonStructuralPhrase(capture, resolved, input) {
     detachedTarget: null,
     curvePlans: liveCurvePlans,
     liveCurvePlans,
-    notePlan: { requested: 0, changedNotes: 0, diff: [] },
+    notePlan,
     structurePlan: {
       operations: [],
       initialNoteCount: noteCount,
@@ -649,21 +678,243 @@ async function prepareNonStructuralPhrase(capture, resolved, input) {
     voice,
     finalNoteCount: noteCount,
     hasChanges:
-      liveCurvePlans.some((plan) => !jsonEqual(plan.journal, plan.planned)) || voice.changed,
+      notePlan.changedNotes > 0 ||
+      liveCurvePlans.some((plan) => !jsonEqual(plan.journal, plan.planned)) ||
+      voice.changed,
     preflightMode: "live_non_structural",
   };
 }
 
-async function verifyContextFingerprints(capture, resolved, host) {
-  const expectedFingerprints = resolved.occurrence.noteFingerprints;
-  if (expectedFingerprints.length === 0) return;
+async function prepareStructuralDryRun(capture, resolved, input, host) {
+  const noteCount = await capture.call(resolved.originalTarget, "getNumNotes");
+  if (!hasCompleteGroupCapture(resolved.occurrence, noteCount)) return null;
+
+  const liveTarget = {
+    roots: resolved.roots,
+    reference: resolved.reference,
+    group: resolved.originalTarget,
+    groupUuid: resolved.originalTargetUuid,
+    groupTimeOffsetBlick: resolved.groupTimeOffsetBlick,
+    groupOnsetBlick: resolved.groupOnsetBlick,
+    contextOccurrence: resolved.occurrence,
+    contextData: resolved.contextData,
+  };
+  const liveCurvePlans = await prepareCurves(capture, liveTarget, input.curves);
+  for (const plan of liveCurvePlans) {
+    plan.verification = { attempted: false, passed: null, phase: "live_preflight" };
+  }
+
+  const referencedNoteIndexes = [
+    ...new Set([
+      ...input.notePatches.map((patch) => patch.note),
+      ...input.structureOperations.flatMap(operationNoteIndexes),
+    ]),
+  ];
+  const liveNotes = await resolveOccurrenceNotes(
+    capture,
+    resolved.originalTarget,
+    resolved.occurrence,
+    referencedNoteIndexes
+  );
+  const observedFingerprints = await verifyContextFingerprints(capture, resolved, host, {
+    noteIndexes: referencedNoteIndexes,
+    notesByIndex: liveNotes,
+  });
+  const notePlan = await applyNotePatches(capture, liveNotes, input.notePatches, {
+    write: false,
+    baselineByNote: observedFingerprints,
+  });
+  const structurePlan = planStructureOperationsInMemory(
+    resolved.occurrence.noteFingerprints,
+    notePlan.diff,
+    input.structureOperations
+  );
+  const voice = planVoicePatch(resolved.originalVoice, input.voicePatch);
+  return {
+    resolved,
+    clone: null,
+    cloneUuid: null,
+    backup: null,
+    backupNotes: null,
+    finalNotes: null,
+    detachedTarget: null,
+    curvePlans: liveCurvePlans,
+    liveCurvePlans,
+    notePlan,
+    structurePlan,
+    voice,
+    finalNoteCount: structurePlan.finalNoteCount,
+    hasChanges:
+      input.structureOperations.length > 0 ||
+      notePlan.changedNotes > 0 ||
+      liveCurvePlans.some((plan) => !jsonEqual(plan.journal, plan.planned)) ||
+      voice.changed,
+    preflightMode: "live_structural_model",
+  };
+}
+
+function hasCompleteGroupCapture(occurrence, noteCount) {
+  const fingerprints = Array.isArray(occurrence.noteFingerprints)
+    ? occurrence.noteFingerprints
+    : [];
+  if (fingerprints.length !== noteCount) return false;
+  const indices = new Set(fingerprints.map((fingerprint) => fingerprint.indexInGroup));
+  if (indices.size !== noteCount) return false;
+  for (let index = 0; index < noteCount; index += 1) {
+    if (!indices.has(index)) return false;
+  }
+  return true;
+}
+
+function planStructureOperationsInMemory(fingerprints, noteDiff, operations) {
+  let notes = [...fingerprints]
+    .sort((left, right) => left.indexInGroup - right.indexInGroup)
+    .map((fingerprint) => ({
+      snapshotIndex: fingerprint.indexInGroup,
+      data: { ...fingerprint },
+    }));
+  const sortNotes = () => {
+    // V8 的 Array#sort 是稳定排序；同 onset 时保留宿主当前顺序。
+    notes.sort((left, right) => left.data.onsetBlick - right.data.onsetBlick);
+  };
+  const findSnapshotNote = (noteIndex) =>
+    notes.find((note) => note.snapshotIndex === noteIndex) ?? null;
+
+  for (const change of noteDiff) {
+    const note = findSnapshotNote(change.note);
+    if (!note) continue;
+    note.data[change.field] = change.after;
+    if (change.field === "onsetBlick") sortNotes();
+  }
+
+  const results = [];
+  const claimed = new Set();
+  for (const operation of operations) {
+    for (const noteIndex of operationNoteIndexes(operation)) {
+      if (claimed.has(noteIndex)) {
+        throw codedError(
+          "DUPLICATE_NOTE_INDEX",
+          `note index is used by multiple structure operations: ${noteIndex}`
+        );
+      }
+      if (!findSnapshotNote(noteIndex)) {
+        throw codedError("NOTE_NOT_IN_CONTEXT", `note ${noteIndex} is not part of this occurrence`, {
+          got: noteIndex,
+        });
+      }
+      claimed.add(noteIndex);
+    }
+
+    if (operation.op === "insert") {
+      const inserted = {
+        snapshotIndex: null,
+        data: { ...operation.note },
+      };
+      notes.push(inserted);
+      sortNotes();
+      results.push({ op: "insert", indexInGroup: notes.indexOf(inserted) });
+      continue;
+    }
+    if (operation.op === "delete") {
+      const note = findSnapshotNote(operation.noteIndex);
+      notes.splice(notes.indexOf(note), 1);
+      results.push({ op: "delete", noteIndex: operation.noteIndex });
+      continue;
+    }
+    if (operation.op === "split") {
+      const note = findSnapshotNote(operation.noteIndex);
+      const onset = note.data.onsetBlick;
+      const end = onset + note.data.durationBlick;
+      if (operation.atBlick <= onset || operation.atBlick >= end) {
+        throw codedError("INVALID_ARGUMENTS", "split atBlick must be strictly inside the note");
+      }
+      note.data.durationBlick = operation.atBlick - onset;
+      notes.push({
+        snapshotIndex: null,
+        data: {
+          ...note.data,
+          onsetBlick: operation.atBlick,
+          durationBlick: end - operation.atBlick,
+          lyrics: operation.secondLyrics,
+        },
+      });
+      sortNotes();
+      results.push({ op: "split", noteIndex: operation.noteIndex, atBlick: operation.atBlick });
+      continue;
+    }
+
+    const ordered = operation.notes
+      .map((noteIndex) => ({ noteIndex, note: findSnapshotNote(noteIndex) }))
+      .sort((left, right) => notes.indexOf(left.note) - notes.indexOf(right.note));
+    const positions = ordered.map((item) => notes.indexOf(item.note));
+    for (let index = 1; index < positions.length; index += 1) {
+      if (positions[index] !== positions[index - 1] + 1) {
+        throw codedError("INVALID_ARGUMENTS", "merge notes must be consecutive");
+      }
+    }
+    const first = ordered[0].note;
+    const last = ordered.at(-1).note;
+    const mergedLyrics =
+      operation.lyricsJoin === "concat"
+        ? ordered.map((item) => item.note.data.lyrics).join("")
+        : first.data.lyrics;
+    first.data.durationBlick =
+      last.data.onsetBlick + last.data.durationBlick - first.data.onsetBlick;
+    first.data.lyrics = mergedLyrics;
+    const removed = new Set(ordered.slice(1).map((item) => item.note));
+    notes = notes.filter((note) => !removed.has(note));
+    results.push({ op: "merge", notes: operation.notes, lyricsJoin: operation.lyricsJoin });
+  }
+
+  const expectedNoteCount =
+    fingerprints.length +
+    operations.reduce((delta, operation) => {
+      if (operation.op === "insert" || operation.op === "split") return delta + 1;
+      if (operation.op === "delete") return delta - 1;
+      return delta - (operation.notes.length - 1);
+    }, 0);
+  if (notes.length !== expectedNoteCount) {
+    throw codedError(
+      "INTERNAL_ERROR",
+      `modeled structure expected ${expectedNoteCount} notes, observed ${notes.length}`
+    );
+  }
+  return {
+    operations: results,
+    initialNoteCount: fingerprints.length,
+    finalNoteCount: notes.length,
+    countScope: "target_group",
+  };
+}
+
+async function verifyContextFingerprints(
+  capture,
+  resolved,
+  host,
+  { noteIndexes = null, notesByIndex = null } = {}
+) {
+  const requested = noteIndexes === null ? null : new Set(noteIndexes);
+  const expectedFingerprints = resolved.occurrence.noteFingerprints.filter(
+    (fingerprint) => requested === null || requested.has(fingerprint.indexInGroup)
+  );
+  if (requested !== null && expectedFingerprints.length !== requested.size) {
+    const missing = noteIndexes.find(
+      (index) => !expectedFingerprints.some((fingerprint) => fingerprint.indexInGroup === index)
+    );
+    throw codedError("NOTE_NOT_IN_CONTEXT", `note ${missing} is not part of this occurrence`, {
+      got: missing,
+    });
+  }
+  if (expectedFingerprints.length === 0) return new Map();
 
   // 写入仍需要 note handle；先按 occurrence 顺序解析，再一次性批量读指纹。
   const notes = [];
   for (const expected of expectedFingerprints) {
-    const note = await capture.call(resolved.originalTarget, "getNote", [expected.indexInGroup + 1], {
-      inferredType: "Note",
-    });
+    const note =
+      notesByIndex?.get(expected.indexInGroup) ??
+      (await capture.call(resolved.originalTarget, "getNote", [expected.indexInGroup + 1], {
+        inferredType: "Note",
+      }));
     if (!note?.__handle__) throw codedError("STALE_CONTEXT", `note ${expected.indexInGroup} no longer exists`);
     notes.push(note);
   }
@@ -675,6 +926,7 @@ async function verifyContextFingerprints(capture, resolved, host) {
     expectedGroupUuid: resolved.originalTargetUuid,
     noteIndicesInGroup: expectedFingerprints.map((expected) => expected.indexInGroup),
   });
+  const observedByIndex = new Map();
 
   for (const [position, expected] of expectedFingerprints.entries()) {
     const observed = observedFingerprints[position];
@@ -686,7 +938,9 @@ async function verifyContextFingerprints(capture, resolved, host) {
       error.observedFingerprint = observed;
       throw error;
     }
+    observedByIndex.set(expected.indexInGroup, observed);
   }
+  return observedByIndex;
 }
 
 async function prepareCurves(capture, target, curves) {
@@ -712,9 +966,21 @@ async function prepareCurves(capture, target, curves) {
   return plans;
 }
 
-async function resolveOccurrenceNotes(capture, group, occurrence) {
+async function resolveOccurrenceNotes(capture, group, occurrence, noteIndexes = null) {
+  const requested = noteIndexes === null ? null : new Set(noteIndexes);
+  const fingerprints = occurrence.noteFingerprints.filter(
+    (fingerprint) => requested === null || requested.has(fingerprint.indexInGroup)
+  );
+  if (requested !== null && fingerprints.length !== requested.size) {
+    const missing = noteIndexes.find(
+      (index) => !fingerprints.some((fingerprint) => fingerprint.indexInGroup === index)
+    );
+    throw codedError("NOTE_NOT_IN_CONTEXT", `note ${missing} is not part of this occurrence`, {
+      got: missing,
+    });
+  }
   const notes = new Map();
-  for (const fingerprint of occurrence.noteFingerprints) {
+  for (const fingerprint of fingerprints) {
     const note = await capture.call(group, "getNote", [fingerprint.indexInGroup + 1], {
       inferredType: "Note",
     });
@@ -726,7 +992,12 @@ async function resolveOccurrenceNotes(capture, group, occurrence) {
   return notes;
 }
 
-async function applyNotePatches(capture, notesByIndex, patches) {
+async function applyNotePatches(
+  capture,
+  notesByIndex,
+  patches,
+  { write = true, baselineByNote = new Map() } = {}
+) {
   const diff = [];
   for (const patch of patches) {
     const note = notesByIndex.get(patch.note);
@@ -737,8 +1008,18 @@ async function applyNotePatches(capture, notesByIndex, patches) {
         { got: patch.note }
       );
     }
+    const baseline = baselineByNote.get(patch.note) ?? {};
+    const values = new Map();
+    const readCurrent = async (field) => {
+      if (values.has(field)) return values.get(field);
+      const observed = Object.hasOwn(baseline, field)
+        ? baseline[field]
+        : await readNoteField(capture, note, field);
+      values.set(field, observed);
+      return observed;
+    };
     for (const [field, expected] of Object.entries(patch.expected ?? {})) {
-      const observed = await readNoteField(capture, note, field);
+      const observed = await readCurrent(field);
       if (!noteFieldEqual(field, observed, expected)) {
         const error = codedError("EXPECTED_MISMATCH", `note ${patch.note}.${field} changed`);
         error.expected = expected;
@@ -747,16 +1028,23 @@ async function applyNotePatches(capture, notesByIndex, patches) {
       }
     }
     for (const [field, requested] of Object.entries(patch.set)) {
-      const before = await readNoteField(capture, note, field);
+      const before = await readCurrent(field);
       const planned = field === "attributes" ? { ...before, ...requested } : requested;
       if (noteFieldEqual(field, before, planned)) continue;
-      // setAttributes 按官方契约只更新给定字段；完整 planned 仅用于读回验证，
-      // 不能把 typed-v2 的特殊数字信封随旧属性一起写回。
-      await writeNoteField(capture, note, field, field === "attributes" ? requested : planned);
-      const observed = await readNoteField(capture, note, field);
-      if (!noteFieldEqual(field, observed, planned)) {
-        throw codedError("DETACHED_PREPARATION_FAILED", `note ${patch.note}.${field} did not read back`);
+      let observed = planned;
+      if (write) {
+        // setAttributes 按官方契约只更新给定字段；完整 planned 仅用于读回验证，
+        // 不能把 typed-v2 的特殊数字信封随旧属性一起写回。
+        await writeNoteField(capture, note, field, field === "attributes" ? requested : planned);
+        observed = await readNoteField(capture, note, field);
+        if (!noteFieldEqual(field, observed, planned)) {
+          throw codedError(
+            "DETACHED_PREPARATION_FAILED",
+            `note ${patch.note}.${field} did not read back`
+          );
+        }
       }
+      values.set(field, observed);
       diff.push({ note: patch.note, field, before, after: observed });
     }
   }
@@ -1607,9 +1895,10 @@ function clampInteger(value, minimum, maximum, fallback) {
   return value;
 }
 
-function codedError(code, message) {
+function codedError(code, message, details = undefined) {
   const error = new Error(message);
   error.code = code;
+  if (details !== undefined) error.details = details;
   return error;
 }
 

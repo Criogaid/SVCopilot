@@ -494,6 +494,41 @@ test("phoneme readiness distinguishes legal empty values from unfinished shape",
   assert.equal(strict.warnings[0].code, "PHONEME_COVERAGE_UNSATISFIED");
 });
 
+test("computed-pitch waiting returns evidence by default and values only on opt-in", async () => {
+  const values = Array.from({ length: 640 }, (_, index) =>
+    index % 8 === 0 ? null : 60 + index / 1000
+  );
+  const common = {
+    roots: { sv: handle(36, "SV") },
+    group: handle(37, "NoteGroupReference"),
+    kind: "computedPitch",
+    startBlick: 0,
+    intervalBlick: 100,
+    frames: values.length,
+    timeoutMs: 0,
+    sleepFn: async () => {},
+    now: () => 0,
+  };
+  const host = { call: async () => values };
+
+  const summary = await waitForProcessing(host, common);
+  assert.equal(summary.status, "succeeded");
+  assert.equal(summary.data.values, undefined);
+  assert.equal(summary.data.evidence.returnedFrames, values.length);
+  assert.equal(summary.data.evidence.observedFrames, 560);
+  assert.equal(summary.data.evidence.nullFrames, 80);
+  assert.equal(summary.data.evidence.coverage, 0.875);
+  assert.match(summary.data.evidence.contentHash, /^sha256_[0-9a-f]{64}$/);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(summary), "utf8") < 1024,
+    "a status-only 640-frame observation must remain a summary response"
+  );
+
+  const detailed = await waitForProcessing(host, { ...common, includeValues: true });
+  assert.deepEqual(detailed.data.values, values);
+  assert.equal(detailed.data.evidence.contentHash, summary.data.evidence.contentHash);
+});
+
 test("phoneme readiness uses observed envelope entries instead of padded array length", async () => {
   const padded = decodeWireValue({
     $sv: "sparse-array",
@@ -749,10 +784,11 @@ test("ProcessingService resolves single and explicit range occurrences", async (
   });
   assert.equal(inferredPitch.status, "succeeded");
   assert.deepEqual(computedPitchCalls[0].slice(1), [705_600, 176_400, 4]);
-  assert.deepEqual(inferredPitch.data.evidence, {
-    requestedFrames: 4,
-    observedFrames: 4,
-  });
+  assert.equal(inferredPitch.data.evidence.requestedFrames, 4);
+  assert.equal(inferredPitch.data.evidence.returnedFrames, 4);
+  assert.equal(inferredPitch.data.evidence.observedFrames, 4);
+  assert.equal(inferredPitch.data.evidence.nullFrames, 0);
+  assert.match(inferredPitch.data.evidence.contentHash, /^sha256_[0-9a-f]{64}$/);
 
   stored.context.occurrences.push({
     occurrence: 1,

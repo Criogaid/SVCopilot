@@ -673,8 +673,8 @@ function buildHarmonyResponse(
         capsule: {
           stored: loaded.stored,
           occurrence: loaded.target,
-          // harmony 往空目标里插音符，因此不引用目标组的任何既有音符。
-          noteIndexes: [],
+          // insert 也必须封存非空目标组的既有指纹；否则 capsule 看起来像“未捕获”，
+          // executor 无法区分它与真正空组，也无法验证目标在规划后是否漂移。
         },
       });
       const planArtifact = artifactStore.seal({

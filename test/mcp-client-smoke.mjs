@@ -13,6 +13,7 @@ import {
   MAX_DESCRIBE_OPERATIONS,
 } from "../server/src/compact-facade.js";
 import { facadeForTool, operationNameForTool } from "../server/src/operation-catalog.js";
+import { MAX_CURVE_OPERATIONS_PER_TRANSACTION } from "../server/src/parameter-curve.js";
 
 const Q = 705600000;
 const MAX_SCHEMA_RESOURCE_CHARS = 16_000;
@@ -308,7 +309,10 @@ try {
   assert.equal(setLyricsTool.inputSchema.properties.requireNonEmptyPhonemes.default, false);
   assert.match(cloneTrackTool.description, /not an isolated musical-data fork/);
   assert.match(cloneTrackTool.description, /sharedTargetGroups/);
-  assert.equal(batchCurveTool.inputSchema.properties.curves.maxItems, 16);
+  assert.equal(
+    batchCurveTool.inputSchema.properties.curves.maxItems,
+    MAX_CURVE_OPERATIONS_PER_TRANSACTION
+  );
   // 响应形状由契约固定（§10.6 规则 14）：schema 不再提供 responseMode 这个旋钮。
   assert.equal(batchCurveTool.inputSchema.properties.responseMode, undefined);
   const curveTarget = batchCurveTool.inputSchema.properties.target;
@@ -1456,10 +1460,14 @@ try {
       },
     })
   );
-  assert.equal(duplicateCurvePatch.error.code, "DUPLICATE_PARAMETER");
+  assert.equal(duplicateCurvePatch.error.code, "OVERLAPPING_CURVE_RANGES");
   assert.deepEqual(
     duplicateCurvePatch.curves.map((curve) => curve.resolvedParameter),
     ["loudness", "loudness"]
+  );
+  assert.deepEqual(
+    duplicateCurvePatch.curves.map((curve) => curve.status),
+    ["not_applied", "failed"]
   );
   assert.equal(duplicateCurvePatch.undoRecords, 0);
 

@@ -17,12 +17,13 @@ import { FACADE_ORDER, buildOperationCatalog, operationNameForTool } from "./ope
 
 export const DESCRIBE_OPERATION_TOOL = "sv_describe";
 
-// 一次最多请求 2 个 operation。这只是上界，真正的约束是下面的字节预算。
-export const MAX_DESCRIBE_OPERATIONS = 2;
+// 请求条数只防滥用；真正的响应边界由下方字节预算与逐项 deferred 控制。
+export const MAX_DESCRIBE_OPERATIONS = 16;
 
 // 单次 describe 响应的字节预算，与 artifact 直读上限一致。条数上限拦不住体积：
 // 最大的两份 schema 即使 $defs 去重后仍有约 18 KiB，所以预算必须按字节判定。
 export const MAX_DESCRIBE_BYTES = 16 * 1024;
+const DESCRIBE_ENVELOPE_RESERVE_BYTES = 1024;
 
 const FACADE_DESCRIPTIONS = {
   status: "Health check and official Synthesizer V API documentation lookup.",
@@ -153,7 +154,7 @@ export function createCompactFacade(tools) {
     // 第一个 operation 无论多大都要返回，否则请求会毫无进展。
     const described = [];
     const deferred = [];
-    let budget = MAX_DESCRIBE_BYTES;
+    let budget = MAX_DESCRIBE_BYTES - DESCRIBE_ENVELOPE_RESERVE_BYTES;
     for (const item of resolved) {
       const size = Buffer.byteLength(JSON.stringify(item), "utf8");
       if (described.length > 0 && size > budget) {
@@ -164,26 +165,22 @@ export function createCompactFacade(tools) {
       budget -= size;
     }
 
-    // 业务载荷放在 data 里（§10.2.1）：根信封只保留契约字段。`operations` 与
-    // `deferred` 必须同层——它们是同一次取舍的两半，分开放会让"哪些没返回"离
-    // "哪些返回了"隔一层，而模型正是要对比这两者才知道还需不需要再问一次。
-    return {
-      status: "succeeded",
-      data: {
-        operations: described,
-        ...(deferred.length > 0
-          ? {
-              // 如实报告被推迟的部分及其体积，并给出可执行的下一步，而不是静默丢弃。
-              deferred: {
-                operations: deferred,
-                reason: "response_byte_budget_exhausted",
-                budgetBytes: MAX_DESCRIBE_BYTES,
-                remedy: "call sv_describe again with these operations alone",
-              },
-            }
-          : {}),
-      },
-    };
+    const order = new Map(resolved.map((item, index) => [item.operation, index]));
+    let response = describeResponse(described, deferred);
+    while (
+      described.length > 1 &&
+      Buffer.byteLength(JSON.stringify(response), "utf8") >
+        MAX_DESCRIBE_BYTES - DESCRIBE_ENVELOPE_RESERVE_BYTES
+    ) {
+      const removed = described.pop();
+      deferred.push({
+        operation: removed.operation,
+        bytes: Buffer.byteLength(JSON.stringify(removed), "utf8"),
+      });
+      deferred.sort((left, right) => order.get(left.operation) - order.get(right.operation));
+      response = describeResponse(described, deferred);
+    }
+    return response;
   }
 
   function catalog(interfaceVersion) {
@@ -216,6 +213,27 @@ export function createCompactFacade(tools) {
     operationNames: [...operations.keys()].sort(),
     // operation 总数从这里派生，不在别处硬编码。
     operationCount: operations.size,
+  };
+}
+
+function describeResponse(operations, deferredOperations) {
+  // 业务载荷放在 data 里（§10.2.1）：operations 与 deferred 同层，调用方可以直接
+  // 求差并续取；schema 始终整项返回，绝不做字符串截断。
+  return {
+    status: "succeeded",
+    data: {
+      operations,
+      ...(deferredOperations.length > 0
+        ? {
+            deferred: {
+              operations: deferredOperations,
+              reason: "response_byte_budget_exhausted",
+              budgetBytes: MAX_DESCRIBE_BYTES,
+              remedy: "call sv_describe again with these operations alone",
+            },
+          }
+        : {}),
+    },
   };
 }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { BakeComputedPitchService } from "../server/src/bake-computed-pitch.js";
-import { RangeSnapshotService } from "../server/src/musical-range.js";
+import { RANGE_PAGE_LIMITS, RangeSnapshotService } from "../server/src/musical-range.js";
 import { PitchControlPatchService } from "../server/src/pitch-control-patch.js";
 import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
 import { createPitchHostModel } from "./helpers/pitch-host.mjs";
@@ -44,6 +44,7 @@ async function snapshotAll(snapshots, options = {}) {
     scope: { kind: "range", from: { bar: 1 }, to: { bar: 20 } },
     include: ["notes", "computedPitch", "pitchControls"],
     computedPitchSampling: { frames: FRAMES },
+    budgets: { bytes: RANGE_PAGE_LIMITS.maximums.bytes },
     ...options,
   });
 }

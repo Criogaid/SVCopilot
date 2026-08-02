@@ -3,6 +3,7 @@ import { getStoredComputedPitch, RANGE_REQUEST_LIMITS } from "./musical-range.js
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
+import { contentHash } from "./canonical-json.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const MAX_PROCESSING_EXPECTED_NOTES = 100_000;
@@ -129,6 +130,7 @@ export async function waitForProcessing(
     intervalBlick,
     frames,
     minimumObservedFrames = 1,
+    includeValues,
     timeoutMs = 10_000,
     pollIntervalMs = 100,
     stablePolls = 1,
@@ -144,6 +146,7 @@ export async function waitForProcessing(
   let evidence = null;
   let readyState = "ready";
   let lastReadyFingerprint = null;
+  const shouldIncludeValues = includeValues ?? kind !== "computedPitch";
 
   while (true) {
     attempts += 1;
@@ -199,8 +202,19 @@ export async function waitForProcessing(
         resultLength: frames,
       });
       const values = Array.isArray(lastObservation) ? lastObservation : [];
-      const observedFrames = values.filter((item) => typeof item === "number").length;
-      evidence = { requestedFrames: frames, observedFrames };
+      const returnedFrames = observedArrayIndices(values).length;
+      const normalizedValues = Array.from({ length: values.length }, (_, index) =>
+        typeof values[index] === "number" && Number.isFinite(values[index]) ? values[index] : null
+      );
+      const observedFrames = normalizedValues.filter((item) => item !== null).length;
+      evidence = {
+        requestedFrames: frames,
+        returnedFrames,
+        observedFrames,
+        nullFrames: returnedFrames - observedFrames,
+        coverage: frames > 0 ? observedFrames / frames : 0,
+        contentHash: contentHash(normalizedValues),
+      };
       conditionReady = observedFrames >= minimumObservedFrames;
       readyState = conditionReady ? "ready" : "pending";
       observationFingerprint = JSON.stringify([observedFrames, lastObservation]);
@@ -224,7 +238,7 @@ export async function waitForProcessing(
           attempts,
           elapsedMs: now() - startedAt,
           evidence,
-          values: lastObservation,
+          ...(shouldIncludeValues ? { values: lastObservation } : {}),
         },
         warnings: [],
       };
@@ -249,7 +263,7 @@ export async function waitForProcessing(
           attempts,
           elapsedMs: now() - startedAt,
           evidence,
-          values: lastObservation,
+          ...(shouldIncludeValues ? { values: lastObservation } : {}),
         },
         warnings: [
           {
@@ -297,6 +311,9 @@ function normalizeRequest(request) {
   if (request.requireNonEmpty !== undefined && typeof request.requireNonEmpty !== "boolean") {
     throw codedError("INVALID_ARGUMENTS", "requireNonEmpty must be a boolean");
   }
+  if (request.includeValues !== undefined && typeof request.includeValues !== "boolean") {
+    throw codedError("INVALID_ARGUMENTS", "includeValues must be a boolean");
+  }
   // expectedNotes 直接决定 resultLength 数组分配；不做上限会允许 [1,1e6) 级别的无谓大分配。
   if (
     request.expectedNotes !== undefined &&
@@ -332,6 +349,7 @@ function normalizeRequest(request) {
     kind,
     expectedNotes: request.expectedNotes,
     requireNonEmpty: request.requireNonEmpty === true,
+    includeValues: request.includeValues ?? kind !== "computedPitch",
     startBlick: request.startBlick,
     intervalBlick: request.intervalBlick,
     frames: request.frames,

@@ -212,6 +212,7 @@ export class AuditionService {
             autoStop: input.autoStop,
             restore: input.restore,
             state: audition.state,
+            terminal: false,
             transitionHistory: audition.transitionHistory,
             endPolicy: audition.endPolicy,
             plannedStopAt,
@@ -410,6 +411,7 @@ export class AuditionService {
         ...result.data,
         auditionId,
         state: audition.state,
+        terminal: true,
         transitionHistory: audition.transitionHistory,
         endPolicy: "auto_stop",
         autoStop: timing,
@@ -455,6 +457,7 @@ export class AuditionService {
             loop: audition.loop,
             autoStop: audition.autoStop,
             state: audition.state,
+            terminal: false,
             transitionHistory: audition.transitionHistory,
             endPolicy: audition.endPolicy,
             plannedStopAt: audition.plannedStopAt,
@@ -552,7 +555,7 @@ export class AuditionService {
           outcome: "unchanged",
           retryable: false,
         },
-        data: { auditionId: audition.id, recovery: audition.recovery },
+        data: { auditionId: audition.id, terminal: true, recovery: audition.recovery },
         warnings: [],
       };
     }
@@ -571,6 +574,7 @@ export class AuditionService {
         ...result.data,
         auditionId: audition.id,
         state: audition.state,
+        terminal: true,
         transitionHistory: audition.transitionHistory,
         endPolicy: audition.endPolicy,
         perception: "human_only",
@@ -607,7 +611,7 @@ export class AuditionService {
           outcome: "partial",
           retryable: false,
         },
-        data: { recovery, perception: "human_only" },
+        data: { recovery, terminal: true, perception: "human_only" },
         warnings: [],
         timings: finishAuditionTiming(timer),
       };
@@ -615,7 +619,7 @@ export class AuditionService {
     this._absorbExternalRestore(recovery, result);
     return {
       ...result,
-      data: { ...result.data, perception: "human_only" },
+      data: { ...result.data, terminal: true, perception: "human_only" },
       timings: finishAuditionTiming(timer),
     };
   }
@@ -640,6 +644,7 @@ export class AuditionService {
           ...result.data,
           auditionId,
           state: audition.state,
+          terminal: true,
           transitionHistory: audition.transitionHistory,
           endPolicy: audition.endPolicy,
           restoredVia: "sv_restore_audition",
@@ -950,6 +955,7 @@ function autoStopFailure(audition, cause) {
     data: {
       auditionId: audition.id,
       state: "restore_failed",
+      terminal: true,
       transitionHistory: audition.transitionHistory,
       recovery: audition.recovery,
       autoStop: autoStopTiming(audition),
@@ -975,6 +981,7 @@ function explicitStopFailure(audition, cause) {
     data: {
       auditionId: audition.id,
       state: "restore_failed",
+      terminal: true,
       transitionHistory: audition.transitionHistory,
       recovery: audition.recovery,
       endPolicy: audition.endPolicy,

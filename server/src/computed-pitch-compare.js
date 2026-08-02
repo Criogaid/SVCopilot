@@ -45,6 +45,8 @@ export const COMPARE_ANALYSIS_DEFAULTS = Object.freeze({
 });
 const MAX_ANOMALY_SEGMENTS = 10;
 const MAX_PER_NOTE_ITEMS = 200;
+const DEFAULT_TRANSITION_ITEMS = 20;
+const MAX_TRANSITION_ITEMS = 2_000;
 const SEMITONE_DELTA_THRESHOLDS = Object.freeze(["0.01", "0.05", "0.10"]);
 const ANOMALY_SORT_MODES = Object.freeze(["startBlick", "severity"]);
 
@@ -222,8 +224,20 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
         })
       : null;
     const transitions = input.metrics.transitions
-      ? buildTransitions(spans, base.frameData.perSpan, params, context)
+      ? buildTransitions(
+          spans,
+          base.frameData.perSpan,
+          params,
+          context,
+          input.metrics.maxTransitions
+        )
       : null;
+    if (transitions?.truncated) {
+      warnings.push({
+        code: "TRANSITIONS_TRUNCATED",
+        message: `transitions returns ${transitions.returned} of ${transitions.count} items; raise metrics.maxTransitions or narrow the snapshot range for more detail.`,
+      });
+    }
     return { anomalies, perNote, transitions };
   });
 
@@ -446,9 +460,10 @@ function analyzeNoteSeries(noteFrames, targetSemitone, params, fs, { vibrato }) 
   return result;
 }
 
-function buildTransitions(spans, perSpan, params, context) {
+function buildTransitions(spans, perSpan, params, context, limit) {
   const transitions = [];
-  for (let index = 0; index + 1 < spans.length; index += 1) {
+  const count = Math.max(0, spans.length - 1);
+  for (let index = 0; index < count && transitions.length < limit; index += 1) {
     const from = spans[index];
     const to = spans[index + 1];
     const direction = Math.sign(to.targetSemitone - from.targetSemitone);
@@ -468,7 +483,12 @@ function buildTransitions(spans, perSpan, params, context) {
       ...analyzeTransition(to, perSpan[index + 1], direction, params.transition, context),
     });
   }
-  return transitions;
+  return {
+    count,
+    returned: transitions.length,
+    truncated: transitions.length < count,
+    items: transitions,
+  };
 }
 
 // 转换分析只看进入新音符后的窗口：overshoot（越过目标的最大有向偏差）、
@@ -1197,18 +1217,31 @@ function normalizeSide(value, label) {
 }
 
 function normalizeMetrics(value) {
-  const defaults = { perNote: true, vibrato: true, transitions: true, anomalySegments: true };
+  const defaults = {
+    perNote: true,
+    vibrato: true,
+    transitions: true,
+    maxTransitions: DEFAULT_TRANSITION_ITEMS,
+    anomalySegments: true,
+  };
   if (value === undefined) return defaults;
   if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "metrics must be an object");
   assertKnownKeys(value, Object.keys(defaults), "metrics");
   const metrics = { ...defaults };
-  for (const key of Object.keys(defaults)) {
+  for (const key of ["perNote", "vibrato", "transitions", "anomalySegments"]) {
     if (value[key] === undefined) continue;
     if (typeof value[key] !== "boolean") {
       throw codedError("INVALID_ARGUMENTS", `metrics.${key} must be a boolean`);
     }
     metrics[key] = value[key];
   }
+  metrics.maxTransitions = checkedInteger(
+    value.maxTransitions,
+    1,
+    MAX_TRANSITION_ITEMS,
+    DEFAULT_TRANSITION_ITEMS,
+    "metrics.maxTransitions"
+  );
   return metrics;
 }
 

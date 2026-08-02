@@ -516,7 +516,7 @@ const RECIPES = [
           ],
           action: "dry_run",
         },
-        note: "In practice submit apply.arguments from step 2 verbatim with action dry_run, then each apply.additionalCalls entry in order when apply.callCount > 1.",
+        note: "Submit apply.arguments from step 2 verbatim with action dry_run. The sealed plan contains every disjoint curve range in one transaction.",
         acceptable: ["status dry_run"],
       },
       {

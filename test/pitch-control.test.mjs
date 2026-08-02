@@ -222,6 +222,10 @@ test("a dense curve is split into cached fragments instead of exceeding the resp
   const observed = [];
 
   while (true) {
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(page), "utf8") <= 8 * 1024,
+      "default compact pages must stay inside the 8 KiB response budget"
+    );
     const firstFragment = page.data.pitchControls[0];
     const lastFragment = page.data.pitchControls.at(-1);
     assert.equal(firstFragment.continuedFromPreviousPage, firstFragment.fragmentIndex > 0);

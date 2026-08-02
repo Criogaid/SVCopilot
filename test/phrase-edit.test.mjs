@@ -10,6 +10,7 @@ function createPhraseModel({
   quantizeVoice = false,
   failProcessing = false,
   capturedNoteCount = null,
+  noteCount = 2,
 } = {}) {
   let nextHandle = 1_000;
   let cloneCount = 0;
@@ -52,7 +53,7 @@ function createPhraseModel({
     });
     return group;
   };
-  const originalGroup = createGroup("phrase-original", [
+  const initialNotes = [
     {
       onsetBlick: 0,
       durationBlick: Q,
@@ -73,7 +74,20 @@ function createPhraseModel({
       detuneCents: 0,
       attributes: { rapAccent: 0 },
     },
-  ]);
+  ];
+  for (let index = initialNotes.length; index < noteCount; index += 1) {
+    initialNotes.push({
+      onsetBlick: index * Q,
+      durationBlick: Q,
+      pitch: 60 + (index % 12),
+      lyrics: `note-${index}`,
+      phonemesOverride: "",
+      languageOverride: "english",
+      detuneCents: 0,
+      attributes: {},
+    });
+  }
+  const originalGroup = createGroup("phrase-original", initialNotes);
   let currentTarget = originalGroup;
   let voice = {
     paramTension: 0.2,
@@ -368,7 +382,7 @@ function fullRequest(contextId, overrides = {}) {
   };
 }
 
-test("sv_edit_phrase dry-run verifies a detached clone without project mutations", async () => {
+test("sv_edit_phrase models a combined dry-run without project mutations", async () => {
   const { model, service, contextId } = createPhraseModel();
   const result = await service.edit(fullRequest(contextId, { action: "dry_run" }));
   assert.equal(result.ok, true);
@@ -379,7 +393,9 @@ test("sv_edit_phrase dry-run verifies a detached clone without project mutations
   assert.equal(model.voice.paramTension, 0.2);
   assert.equal(result.changes.notePatches.changedNotes, 1);
   assert.equal(result.changes.structure.finalNoteCount, 3);
-  assert.equal(result.changes.curves[0].verified, true);
+  assert.equal(result.changes.curves[0].verified, null);
+  assert.equal(result.preflightMode, "live_structural_model");
+  assert.equal(model.cloneCount, 0);
 });
 
 test("sv_edit_phrase returns no_change without creating an empty Undo", async () => {
@@ -409,6 +425,106 @@ test("sv_edit_phrase returns no_change without creating an empty Undo", async ()
   assert.equal(result.changes.structure.finalNoteCount, 2);
   assert.equal(result.changes.finalNoteCount, 2);
   assert.equal(model.cloneCount, 0);
+});
+
+test("sv_edit_phrase plans note and curve changes without cloning the full group", async () => {
+  const { model, service, contextId } = createPhraseModel({ noteCount: 373 });
+  const result = await service.edit({
+    action: "dry_run",
+    target: { contextId, occurrence: 0, expectedGroupUuid: "phrase-original" },
+    notePatches: [{ note: 0, expected: { lyrics: "when" }, set: { lyrics: "where" } }],
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q },
+        points: [{ blick: 0, value: 2 }],
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.preflightMode, "live_non_structural");
+  assert.equal(result.changes.notePatches.changedNotes, 1);
+  assert.equal(result.changes.curves.length, 1);
+  assert.equal(model.cloneCount, 0);
+  const original = model.states.get(model.originalGroup.__handle__).notes[0];
+  assert.equal(model.states.get(original.__handle__).data.lyrics, "when");
+  assert.equal(model.undoCount, 0);
+});
+
+test("sv_edit_phrase models all structural dry-run operations without cloning a fully captured group", async () => {
+  const fast = createPhraseModel({ noteCount: 373 });
+  const structureOperations = [
+    {
+      op: "insert",
+      note: {
+        onsetBlick: 50 * Q + Q / 2,
+        durationBlick: Q / 4,
+        pitch: 67,
+        lyrics: "new",
+      },
+    },
+    { op: "delete", noteIndex: 372 },
+    { op: "split", noteIndex: 100, atBlick: 100 * Q + Q / 2, secondLyrics: "-" },
+    { op: "merge", notes: [200, 201], lyricsJoin: "concat" },
+  ];
+  const result = await fast.service.edit({
+    action: "dry_run",
+    target: { contextId: fast.contextId, occurrence: 0 },
+    structureOperations,
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.preflightMode, "live_structural_model");
+  assert.equal(result.verification.phase, "live_preflight");
+  assert.equal(result.changes.structure.initialNoteCount, 373);
+  assert.equal(result.changes.structure.finalNoteCount, 373);
+  assert.deepEqual(
+    result.changes.structure.operations.map((operation) => operation.op),
+    ["insert", "delete", "split", "merge"]
+  );
+  assert.equal(fast.model.cloneCount, 0);
+  assert.equal(fast.model.states.get(fast.model.originalGroup.__handle__).notes.length, 373);
+  assert.equal(fast.model.undoCount, 0);
+
+  const detached = createPhraseModel({ noteCount: 373 });
+  const detachedResult = await detached.service.edit({
+    action: "dry_run",
+    target: { contextId: detached.contextId, occurrence: 0 },
+    structureOperations,
+    curves: [
+      {
+        parameter: "loudness",
+        mode: "replace",
+        range: { fromBlick: 0, toBlick: Q },
+        points: [{ blick: 0, value: 0 }],
+        simplifyThreshold: 0.1,
+      },
+    ],
+  });
+  assert.equal(detachedResult.ok, true, JSON.stringify(detachedResult));
+  assert.equal(detachedResult.preflightMode, "detached_note_group");
+  assert.equal(detached.model.cloneCount, 2);
+  assert.deepEqual(result.changes.structure, detachedResult.changes.structure);
+});
+
+test("sv_edit_phrase keeps partial structural captures on the detached host preflight", async () => {
+  const fixture = createPhraseModel({ noteCount: 373, capturedNoteCount: 12 });
+  const result = await fixture.service.edit({
+    action: "dry_run",
+    target: { contextId: fixture.contextId, occurrence: 0 },
+    structureOperations: [
+      { op: "split", noteIndex: 1, atBlick: Q + Q / 2, secondLyrics: "-" },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.preflightMode, "detached_note_group");
+  assert.equal(fixture.model.cloneCount, 2);
+  assert.equal(fixture.model.undoCount, 0);
 });
 
 test("sv_edit_phrase keeps simplify on detached preflight because its effect is host-defined", async () => {
@@ -486,8 +602,7 @@ test("sv_edit_phrase keeps note bindings stable when an onset patch reorders not
 
 test("sv_edit_phrase validates merge adjacency after earlier structure operations", async () => {
   const { model, service, contextId } = createPhraseModel();
-  const result = await service.edit({
-    action: "commit",
+  const request = {
     target: { contextId, occurrence: 0 },
     structureOperations: [
       {
@@ -500,7 +615,16 @@ test("sv_edit_phrase validates merge adjacency after earlier structure operation
         lyricsJoin: "concat",
       },
     ],
-  });
+  };
+
+  const preview = await service.edit({ ...request, action: "dry_run" });
+  assert.equal(preview.ok, false);
+  assert.equal(preview.error.code, "INVALID_ARGUMENTS");
+  assert.equal(preview.effects, "none");
+  assert.equal(model.cloneCount, 0);
+  assert.equal(model.undoCount, 0);
+
+  const result = await service.edit({ ...request, action: "commit" });
 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "INVALID_ARGUMENTS");
@@ -701,7 +825,7 @@ test("sv_edit_phrase rejects unobservable voice fields without project effects",
   assert.equal(model.undoCount, 0);
 });
 
-test("sv_edit_phrase sends only requested attributes when old values contain typed sentinels", async () => {
+test("sv_edit_phrase plans attributes without replaying typed sentinels through a dry-run setter", async () => {
   const { model, service, contextId } = createPhraseModel();
   const originalState = model.states.get(model.originalGroup.__handle__);
   model.states.get(originalState.notes[0].__handle__).data.attributes.tF0Offset = {
@@ -730,5 +854,6 @@ test("sv_edit_phrase sends only requested attributes when old values contain typ
   });
 
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.deepEqual(writes, [{ rapAccent: 0.5 }]);
+  assert.deepEqual(writes, []);
+  assert.equal(result.changes.notePatches.changedNotes, 1);
 });

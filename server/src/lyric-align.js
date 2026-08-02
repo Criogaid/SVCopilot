@@ -850,15 +850,17 @@ function formatAlignment(mapped, detailRef) {
         }
       : {}),
   };
-  // 单一形状：定量截断的列表 + 溢出时指向完整明细的 detailRef（§10.6 规则 10/14）。
+  // 已有 detailRef 时不再把同一批明细复制进主响应；封存失败才保留定量内联兜底。
   const limit = STANDARD_ALIGNMENT_ITEMS;
+  const overflow = hasAlignmentOverflow(mapped, limit);
+  const externalized = overflow && detailRef;
   return {
     ...summary,
-    unassignedUnits: mapped.unassignedUnits.slice(0, limit),
-    unfilledNotes: mapped.unfilledNotes.slice(0, limit),
+    unassignedUnits: externalized ? [] : mapped.unassignedUnits.slice(0, limit),
+    unfilledNotes: externalized ? [] : mapped.unfilledNotes.slice(0, limit),
     unassignedTruncated: mapped.unassignedUnits.length > limit,
     unfilledTruncated: mapped.unfilledNotes.length > limit,
-    ...(hasAlignmentOverflow(mapped, limit) && detailRef ? { detailRef } : {}),
+    ...(externalized ? { detailsOmitted: true, detailRef } : {}),
   };
 }
 

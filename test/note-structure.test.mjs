@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ArtifactStore, planReference } from "../server/src/artifact-store.js";
+import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { NoteStructureService } from "../server/src/note-structure.js";
 import { buildPlanArtifact } from "../server/src/plan-reference.js";
 import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
@@ -495,6 +496,60 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
   // capsule 是只读证据，绝不写回 store：写回会让它被别人查到、被 LRU 淘汰，
   // 并与真实快照混淆（§4.3.2）。
   assert.equal(snapshots.store.get(contextId), null);
+});
+
+test("sv_generate_harmony seals enough target evidence for its restructure PlanRef", async () => {
+  const sessionId = "sess_harmony_restructure";
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const { model, snapshots, service, entry, contextId } = createRangeFixture({
+    artifactStore,
+    sessionId,
+  });
+  entry.context.quarterBlick = Q;
+  entry.context.occurrences.push({
+    occurrence: 1,
+    trackIndex: 1,
+    groupIndex: 0,
+    targetGroupUuid: "source-group",
+    timeOffsetBlick: 0,
+    groupNoteCount: 3,
+    sharedTargetOccurrences: [1],
+    noteFingerprints: [60, 62, 64].map((pitch, index) => ({
+      indexInGroup: index,
+      onsetBlick: (index + 4) * Q,
+      durationBlick: Q,
+      pitch,
+      lyrics: `source-${index}`,
+      phonemesOverride: "",
+      languageOverride: "english",
+      detuneCents: 0,
+    })),
+  });
+  const planner = new HarmonyPlanService({
+    store: snapshots.store,
+    artifactStore,
+    sessionId,
+    now: () => 1000,
+  });
+  const planned = await planner.plan({
+    contextId,
+    sourceOccurrence: 1,
+    targetOccurrence: 0,
+    harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
+  });
+
+  assert.equal(planned.status, "planned");
+  assert.equal(planned.summary.planned, 3);
+  const result = await service.restructureNotes({
+    planRef: planned.apply.arguments.planRef,
+    action: "dry_run",
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.data.initialNoteCount, 3);
+  assert.equal(result.data.expectedNoteCount, 6);
+  assert.equal(model.groupNotes.length, 3);
+  assert.equal(model.undoCount, 0);
 });
 
 test("sv_restructure_notes accepts a range context and resolves notes by group index", async () => {

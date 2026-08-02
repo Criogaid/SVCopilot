@@ -42,7 +42,7 @@ export const RANGE_PAGE_LIMITS = Object.freeze({
     automationPoints: 2_000,
     computedPitchFrames: 2_000,
     pitchControls: 100,
-    bytes: 48 * 1024,
+    bytes: 8 * 1024,
   }),
   maximums: Object.freeze({
     notes: 2_000,
@@ -658,7 +658,13 @@ function artifactRangeContext(context) {
     pitchControlsByOccurrence: _pitchControls,
     ...identityContext
   } = context;
-  return identityContext;
+  return {
+    ...identityContext,
+    noteIdentitySource: "data.notes",
+    occurrences: (identityContext.occurrences ?? []).map(
+      ({ noteFingerprints: _noteFingerprints, ...occurrence }) => occurrence
+    ),
+  };
 }
 
 function denseRangeDetail(data) {
@@ -747,8 +753,9 @@ function formatStoredRangePage(stored, page, { changedSinceToken = false, timing
 
 function buildRangePages(data, initialBudgets, stored) {
   let budgets = { ...initialBudgets };
+  let pitchControlPointsPerFragment = PITCH_CONTROL_POINTS_PER_FRAGMENT;
   while (true) {
-    const pages = paginateRangeData(data, budgets);
+    const pages = paginateRangeData(data, budgets, pitchControlPointsPerFragment);
     const largest = Math.max(...pages.map((page) => Buffer.byteLength(JSON.stringify(page), "utf8")));
     const pageByteLimit = budgets.bytes - RESPONSE_ENVELOPE_RESERVE_BYTES;
     if (largest <= pageByteLimit) {
@@ -771,12 +778,17 @@ function buildRangePages(data, initialBudgets, stored) {
       computedPitchFrames: Math.max(1, Math.floor(budgets.computedPitchFrames / 2)),
       pitchControls: Math.max(1, Math.floor(budgets.pitchControls / 2)),
     };
+    const nextPitchControlPointsPerFragment = Math.max(
+      1,
+      Math.floor(pitchControlPointsPerFragment / 2)
+    );
     if (
       next.notes === budgets.notes &&
       next.attributes === budgets.attributes &&
       next.automationPoints === budgets.automationPoints &&
       next.computedPitchFrames === budgets.computedPitchFrames &&
-      next.pitchControls === budgets.pitchControls
+      next.pitchControls === budgets.pitchControls &&
+      nextPitchControlPointsPerFragment === pitchControlPointsPerFragment
     ) {
       throw codedError(
         "SNAPSHOT_RESPONSE_BUDGET_TOO_SMALL",
@@ -784,13 +796,17 @@ function buildRangePages(data, initialBudgets, stored) {
       );
     }
     budgets = next;
+    pitchControlPointsPerFragment = nextPitchControlPointsPerFragment;
   }
 }
 
-function paginateRangeData(data, budgets) {
+function paginateRangeData(data, budgets, pitchControlPointsPerFragment) {
   const notes = data.notes ?? [];
   const attributes = data.attributes ?? [];
-  const pitchControls = fragmentPitchControls(data.pitchControls ?? []);
+  const pitchControls = fragmentPitchControls(
+    data.pitchControls ?? [],
+    pitchControlPointsPerFragment
+  );
   const emptyAutomation = (data.automation ?? [])
     .filter((item) => item.points.length === 0)
     .map((item) => ({ ...item, offset: 0, points: [] }));
@@ -861,23 +877,23 @@ function paginateRangeData(data, budgets) {
   return pages;
 }
 
-function fragmentPitchControls(items) {
+function fragmentPitchControls(items, pointsPerFragment) {
   const fragments = [];
   for (const item of items) {
     if (item.kind !== "curve" || !Array.isArray(item.points)) {
       fragments.push(item);
       continue;
     }
-    if (item.points.length <= PITCH_CONTROL_POINTS_PER_FRAGMENT) {
+    if (item.points.length <= pointsPerFragment) {
       fragments.push(item);
       continue;
     }
-    const fragmentCount = Math.ceil(item.points.length / PITCH_CONTROL_POINTS_PER_FRAGMENT);
+    const fragmentCount = Math.ceil(item.points.length / pointsPerFragment);
     for (let fragmentIndex = 0; fragmentIndex < fragmentCount; fragmentIndex += 1) {
-      const pointOffset = fragmentIndex * PITCH_CONTROL_POINTS_PER_FRAGMENT;
+      const pointOffset = fragmentIndex * pointsPerFragment;
       fragments.push({
         ...item,
-        points: item.points.slice(pointOffset, pointOffset + PITCH_CONTROL_POINTS_PER_FRAGMENT),
+        points: item.points.slice(pointOffset, pointOffset + pointsPerFragment),
         fragment: true,
         fragmentIndex,
         fragmentCount,

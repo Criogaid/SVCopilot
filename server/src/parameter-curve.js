@@ -1,4 +1,5 @@
 import { createHostScope } from "./snapshot.js";
+import { artifactReference } from "./artifact-store.js";
 import { settlePlanLedger } from "./plan-reference.js";
 import { getVocalModeNames, normalizeVoiceParameters } from "./voice-parameters.js";
 import {
@@ -20,8 +21,10 @@ const RANGE_RELATIVE_TOLERANCE = 1e-6;
 const MIN_READ_WINDOW_BLICK = 1024;
 const MAX_JOURNAL_POINTS = 4000;
 const MAX_SNAPSHOT_POINTS = 20_000;
+const MAX_INLINE_BATCH_DETAIL_BYTES = 8 * 1024;
+export const MAX_CURVE_OPERATIONS_PER_TRANSACTION = 256;
 // target.expectedNotes 的上限：apply 前用快照指纹逐条核对锚点音符是否漂移，绑定合理规模。
-const MAX_EXPECTED_NOTES = 256;
+export const MAX_EXPECTED_NOTES_PER_TRANSACTION = 256;
 export const BUILTIN_AUTOMATION_PARAMETERS = Object.freeze([
   "pitchDelta",
   "vibratoEnv",
@@ -176,11 +179,12 @@ export class ParameterCurveService {
       coordinatorRequestedAt,
       planScopeSource,
     });
-    return settlePlanLedger(
-      this.artifactStore?.planLedger ?? null,
-      ledgerRef,
-      formatBatchTransaction(transaction, input)
-    );
+    const formatted = formatBatchTransaction(transaction, input);
+    const response = externalizeBatchCurveDetails(formatted, {
+      artifactStore: this.artifactStore,
+      sessionId: this.sessionId,
+    });
+    return settlePlanLedger(this.artifactStore?.planLedger ?? null, ledgerRef, response);
   }
 
   async _runTransaction(input, timingOrigin = {}) {
@@ -299,25 +303,6 @@ async function executeCurveTransaction(capture, input, clock) {
           throw withCurveFailure(error, index, input.curves[index].parameter, "preflight");
         }
       }
-      const parameterOwners = new Map();
-      for (let index = 0; index < resolvedCurves.length; index += 1) {
-        const resolvedParameter = resolvedCurves[index].parameter;
-        const key = resolvedParameter.toLowerCase();
-        if (parameterOwners.has(key)) {
-          const duplicateError = codedError(
-            "DUPLICATE_PARAMETER",
-            `curves[${parameterOwners.get(key)}] and curves[${index}] both resolve to ${resolvedParameter}`
-          );
-          duplicateError.resolvedParameter = resolvedParameter;
-          throw withCurveFailure(
-            duplicateError,
-            index,
-            resolvedCurves[index].requestedParameter,
-            "preflight"
-          );
-        }
-        parameterOwners.set(key, index);
-      }
       for (let index = 0; index < resolvedCurves.length; index += 1) {
         failedCurveIndex = index;
         const curveStartedAt = clock.now();
@@ -339,6 +324,27 @@ async function executeCurveTransaction(capture, input, clock) {
             "preflight"
           );
         }
+      }
+      const overlap = findOverlappingCurveRanges(transaction.plans);
+      if (overlap) {
+        failedCurveIndex = overlap.current.index;
+        const overlapError = codedError(
+          "OVERLAPPING_CURVE_RANGES",
+          `curves[${overlap.previous.index}] and curves[${overlap.current.index}] resolve to ${overlap.current.typeName} with overlapping local ranges [${overlap.previous.range.fromLocal}, ${overlap.previous.range.toLocal}] and [${overlap.current.range.fromLocal}, ${overlap.current.range.toLocal}]`
+        );
+        overlapError.resolvedParameter = overlap.current.typeName;
+        overlapError.details = {
+          previousCurveIndex: overlap.previous.index,
+          curveIndex: overlap.current.index,
+          previousRange: { ...overlap.previous.range },
+          range: { ...overlap.current.range },
+        };
+        throw withCurveFailure(
+          overlapError,
+          overlap.current.index,
+          overlap.current.requestedParameter,
+          "preflight"
+        );
       }
       failedCurveIndex = null;
     });
@@ -558,7 +564,9 @@ async function executeCurveTransaction(capture, input, clock) {
     transaction.failure = failureEvidence(error, phase, failedCurveIndex);
     const writeAttempted = touched.length > 0;
     if (!writeAttempted) {
-      for (const plan of transaction.plans) plan.status = "not_applied";
+      for (const plan of transaction.plans) {
+        plan.status = plan.index === transaction.failure.curveIndex ? "failed" : "not_applied";
+      }
       transaction.status = error?.code === "TARGET_CONFLICT" ? "conflict" : "failed";
       return finish();
     }
@@ -714,6 +722,28 @@ export async function prepareCurvePlan(capture, target, input, index) {
     warnings,
     timings: { preflightReadMs: 0, hostWriteMs: 0, verificationMs: 0, rollbackMs: 0 },
   };
+}
+
+function findOverlappingCurveRanges(plans) {
+  const byParameter = new Map();
+  for (const plan of plans) {
+    const key = plan.typeName.toLowerCase();
+    const ranges = byParameter.get(key) ?? [];
+    ranges.push(plan);
+    byParameter.set(key, ranges);
+  }
+  for (const ranges of byParameter.values()) {
+    ranges.sort(
+      (left, right) =>
+        left.range.fromLocal - right.range.fromLocal || left.range.toLocal - right.range.toLocal
+    );
+    for (let index = 1; index < ranges.length; index += 1) {
+      if (ranges[index].range.fromLocal <= ranges[index - 1].range.toLocal) {
+        return { previous: ranges[index - 1], current: ranges[index] };
+      }
+    }
+  }
+  return null;
 }
 
 async function resolveCurvePoints(capture, target, points, inputRange) {
@@ -1782,6 +1812,70 @@ function formatBatchTransaction(transaction, input) {
   };
 }
 
+function externalizeBatchCurveDetails(response, { artifactStore, sessionId }) {
+  if (
+    !response.ok ||
+    !artifactStore ||
+    !sessionId ||
+    !Array.isArray(response.curves) ||
+    Buffer.byteLength(JSON.stringify(response), "utf8") <= MAX_INLINE_BATCH_DETAIL_BYTES
+  ) {
+    return response;
+  }
+  try {
+    const artifact = artifactStore.seal({
+      kind: "curve-transaction-detail",
+      schemaVersion: "1",
+      sessionId,
+      payload: {
+        status: response.status,
+        target: response.target,
+        curves: response.curves,
+      },
+    });
+    const statuses = {};
+    let pointCount = 0;
+    let verifiedCurves = 0;
+    for (const curve of response.curves) {
+      statuses[curve.status] = (statuses[curve.status] ?? 0) + 1;
+      pointCount += curve.pointCount ?? 0;
+      if (curve.verified === true) verifiedCurves += 1;
+    }
+    const { curves, ...summary } = response;
+    return {
+      ...summary,
+      curveSummary: {
+        total: curves.length,
+        statuses,
+        pointCount,
+        verifiedCurves,
+        clampedCount: response.clampedCount,
+      },
+      detailsOmitted: true,
+      detailRef: artifactReference(artifact),
+      warnings: [
+        ...response.warnings,
+        {
+          code: "CURVE_DETAILS_EXTERNALIZED",
+          message: `${curves.length} per-curve evidence records moved to detailRef; aggregate transaction, verification, Undo, and timing evidence remains inline.`,
+        },
+      ],
+    };
+  } catch (error) {
+    // 写入结论已经成立；详情封存失败不能把已验证事务改判成失败或丢掉内联证据。
+    return {
+      ...response,
+      warnings: [
+        ...response.warnings,
+        {
+          code: "CURVE_DETAIL_ARTIFACT_UNAVAILABLE",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      ],
+    };
+  }
+}
+
 function formatBatchCurve(plan, input, index, transaction) {
   if (!plan) {
     const isFailure = transaction.failure?.curveIndex === index;
@@ -1912,8 +2006,15 @@ function normalizeGetRequest(request) {
 function normalizeBatchPatchRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   const target = normalizeTarget(request.target);
-  if (!Array.isArray(request.curves) || request.curves.length < 1 || request.curves.length > 16) {
-    throw codedError("INVALID_ARGUMENTS", "curves must contain between 1 and 16 items");
+  if (
+    !Array.isArray(request.curves) ||
+    request.curves.length < 1 ||
+    request.curves.length > MAX_CURVE_OPERATIONS_PER_TRANSACTION
+  ) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `curves must contain between 1 and ${MAX_CURVE_OPERATIONS_PER_TRANSACTION} items`
+    );
   }
   const curves = request.curves.map((curve, index) => {
     try {
@@ -2130,10 +2231,10 @@ function normalizeExpectedNotes(value) {
       "target.expectedNotes must be a non-empty array when provided"
     );
   }
-  if (value.length > MAX_EXPECTED_NOTES) {
+  if (value.length > MAX_EXPECTED_NOTES_PER_TRANSACTION) {
     throw codedError(
       "INVALID_ARGUMENTS",
-      `target.expectedNotes must contain at most ${MAX_EXPECTED_NOTES} items`
+      `target.expectedNotes must contain at most ${MAX_EXPECTED_NOTES_PER_TRANSACTION} items`
     );
   }
   return value.map((note, index) => {

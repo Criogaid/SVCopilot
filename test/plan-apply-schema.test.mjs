@@ -20,6 +20,7 @@ import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { LyricAlignService } from "../server/src/lyric-align.js";
 import { buildApplyEnvelope, sealApplyEnvelope } from "../server/src/plan-envelope.js";
 import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
+import { MAX_CURVE_OPERATIONS_PER_TRANSACTION } from "../server/src/parameter-curve.js";
 import { QuantizePlanService } from "../server/src/quantize-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 
@@ -121,7 +122,7 @@ function assertPlanRefOnly(plan, label) {
 
 // facade 是唯一 surface，direct tool 的 schema 不在 tools/list 里；
 // 取 schema 的唯一途径就是模型自己会走的那条——sv_describe。
-async function fetchServedSchemas(toolNames) {
+async function fetchServedOperations(toolNames) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverScript],
@@ -132,7 +133,7 @@ async function fetchServedSchemas(toolNames) {
   const client = new Client({ name: "plan-apply-schema-test", version: "1.0.0" });
   try {
     await client.connect(transport);
-    const schemas = {};
+    const served = {};
     // 每次最多请求 MAX_DESCRIBE_OPERATIONS 个，按批取完。响应还有字节预算：两份大
     // schema 会让第二个被 deferred，此时按它给出的 remedy 单独再取一次。
     const pending = [...toolNames];
@@ -156,13 +157,20 @@ async function fetchServedSchemas(toolNames) {
           pending.push(name);
           continue;
         }
-        schemas[name] = entry.inputSchema;
+        served[name] = entry;
       }
     }
-    return schemas;
+    return served;
   } finally {
     await client.close().catch(() => {});
   }
+}
+
+async function fetchServedSchemas(toolNames) {
+  const served = await fetchServedOperations(toolNames);
+  return Object.fromEntries(
+    Object.entries(served).map(([toolName, operation]) => [toolName, operation.inputSchema])
+  );
 }
 
 function compile(schema) {
@@ -192,6 +200,12 @@ test("served sv_patch_notes schema exposes diagnostics and scoped note reference
     Object.hasOwn(schemas.sv_compare_computed_pitch.properties, "diagnostics"),
     false
   );
+  const maxTransitions =
+    schemas.sv_compare_computed_pitch.properties.metrics.properties.maxTransitions;
+  assert.equal(maxTransitions.type, "integer");
+  assert.equal(maxTransitions.minimum, 1);
+  assert.equal(maxTransitions.maximum, 2000);
+  assert.equal(maxTransitions.default, 20);
 
   const validate = compile(patchSchema);
   assert.equal(
@@ -205,6 +219,63 @@ test("served sv_patch_notes schema exposes diagnostics and scoped note reference
     true,
     JSON.stringify(validate.errors)
   );
+});
+
+test("served sv_edit_phrase schema accepts an insert operation with its note payload", async () => {
+  const schemas = await fetchServedSchemas(["sv_edit_phrase"]);
+  const validate = compile(schemas.sv_edit_phrase);
+  assertValid(
+    validate,
+    {
+      target: { contextId: "ctx_insert", occurrence: 0 },
+      structureOperations: [
+        {
+          op: "insert",
+          note: { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "la" },
+        },
+      ],
+      action: "dry_run",
+    },
+    "sv_edit_phrase insert"
+  );
+});
+
+test("served processing schema exposes opt-in computed-pitch values", async () => {
+  const schemas = await fetchServedSchemas(["sv_wait_for_processing"]);
+  assert.equal(schemas.sv_wait_for_processing.properties.includeValues.type, "boolean");
+  assert.match(
+    schemas.sv_wait_for_processing.properties.includeValues.description,
+    /computed pitch/i
+  );
+});
+
+test("served curve schema exposes the single-transaction operation budget", async () => {
+  const schemas = await fetchServedSchemas(["sv_patch_parameter_curves"]);
+  assert.equal(
+    schemas.sv_patch_parameter_curves.properties.curves.maxItems,
+    MAX_CURVE_OPERATIONS_PER_TRANSACTION
+  );
+});
+
+test("served audition descriptions expose the terminal polling contract", async () => {
+  const served = await fetchServedOperations([
+    "sv_start_audition",
+    "sv_get_audition",
+    "sv_stop_audition",
+    "sv_restore_audition",
+    "sv_audition_compare",
+    "sv_get_audition_compare",
+    "sv_stop_audition_compare",
+  ]);
+  for (const [toolName, operation] of Object.entries(served)) {
+    assert.match(
+      operation.description,
+      /data\.terminal/i,
+      `${toolName} must tell an MCP-only client how to recognize lifecycle completion`
+    );
+  }
+  assert.match(served.sv_get_audition.description, /stop polling/i);
+  assert.match(served.sv_get_audition_compare.description, /stop polling/i);
 });
 
 test("all nine occurrence-facing tools expose ordinal-only public schemas", async () => {
@@ -681,13 +752,15 @@ test("oversized lyric alignment lists are capped and backed by a detail artifact
   // 单一形状（§10.6 规则 14）：计数与首末项恒定返回，逐项列表定量截断，
   // 完整明细走 detailRef。调用方不再需要先选一档才知道能读到什么。
   assert.equal(plan.alignment.unfilledCount, 366);
-  assert.equal(plan.alignment.unfilledNotes.length, 50);
+  assert.deepEqual(plan.alignment.unfilledNotes, []);
   assert.equal(plan.alignment.unfilledTruncated, true);
+  assert.equal(plan.alignment.detailsOmitted, true);
   assert.equal(plan.alignment.firstUnfilledNote.note, 7);
   assert.equal(plan.alignment.lastUnfilledNote.note, 372);
   assert.ok(plan.alignment.detailRef);
   // 截断后的信封仍远小于 16 KiB compact 预算，且 366 项完整明细可从 artifact 取回。
-  assert.ok(Buffer.byteLength(JSON.stringify(plan), "utf8") < 16 * 1024);
+  const responseBytes = Buffer.byteLength(JSON.stringify(plan), "utf8");
+  assert.ok(responseBytes < 8 * 1024, `alignment response must stay below 8 KiB, got ${responseBytes}`);
 
   const planArtifact = artifactStore.resolve({
     artifactId: plan.apply.arguments.planRef,
@@ -708,7 +781,7 @@ test("oversized lyric alignment lists are capped and backed by a detail artifact
   assert.equal(detailArtifact.payload.alignment.unfilledNotes.length, 366);
 });
 
-test("the apply envelope reports multiple sequential calls honestly", async () => {
+test("disjoint expression ranges share one plan and one transaction", async () => {
   const store = new SnapshotStore({ now: () => 1000 });
   const context = createStoredContext(store, [
     { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
@@ -717,7 +790,7 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
     { onsetBlick: 21 * Q, durationBlick: Q, pitch: 65, lyrics: "d" },
   ]);
   const fixture = createPlannerFixture(ExpressionPlanService, store, "multi_call");
-  // 同一参数的两个互不相邻表现手法簇 → 必须拆成两次调用（两条 Undo 记录）。
+  // 同一参数的两个互不相邻表现手法簇由曲线事务核统一提交。
   const plan = await fixture.service.plan({
     contextId: context.stored.contextId,
     gestures: [
@@ -736,24 +809,18 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
     ],
   });
 
-  assertPlanRefOnly(plan, "multi-call expression plan");
-  assert.equal(plan.apply.callCount, 2);
-  assert.equal(plan.apply.callIndex, 0);
-  assert.equal(plan.apply.expectedUserUndoSteps, 2);
-  assert.equal(plan.apply.additionalCalls.length, 1);
-  assert.equal(plan.apply.additionalCalls[0].callIndex, 1);
-  assert.notEqual(
-    plan.apply.arguments.planRef,
-    plan.apply.additionalCalls[0].arguments.planRef,
-    "each independently committed call needs its own replay ledger identity"
-  );
-  // 不得暗示多次调用是一个事务。
-  assert.match(plan.apply.sequencing, /does NOT roll back earlier committed calls/);
-  assert.equal(resolvePlanCall(plan, fixture, 0).tool, "sv_patch_parameter_curves");
-  assert.equal(resolvePlanCall(plan, fixture, 1).tool, "sv_patch_parameter_curves");
+  assertPlanRefOnly(plan, "single-transaction expression plan");
+  assert.equal(plan.summary.applyCallCount, 1);
+  assert.equal(plan.apply.callIndex, undefined);
+  assert.equal(plan.apply.expectedUserUndoSteps, 1);
+  assert.equal(plan.apply.additionalCalls, undefined);
+  const request = resolvePlanCall(plan, fixture, 0);
+  assert.equal(request.tool, "sv_patch_parameter_curves");
+  assert.equal(request.arguments.curves.length, 2);
+  assert.equal(new Set(request.arguments.curves.map((curve) => curve.parameter)).size, 1);
 });
 
-test("a partial multi-call artifact seal releases every artifact from that attempt", async () => {
+test("one expression transaction consumes one plan artifact", async () => {
   const store = new SnapshotStore({ now: () => 1000 });
   const context = createStoredContext(store, [
     { onsetBlick: 0, durationBlick: Q, pitch: 60, lyrics: "a" },
@@ -771,31 +838,21 @@ test("a partial multi-call artifact seal releases every artifact from that attem
     artifactStore,
     sessionId: "sess_partial_seal",
   });
-  await assert.rejects(
-    service.plan({
-      contextId: context.stored.contextId,
-      gestures: [
-        {
-          type: "hairpin",
-          from: 0,
-          to: 1,
-          amounts: { loudness: 3 },
-        },
-        {
-          type: "hairpin",
-          from: 2,
-          to: 3,
-          amounts: { loudness: 3 },
-        },
-      ],
-    }),
-    (error) => {
-      assert.equal(error.code, "PLAN_SEAL_FAILED");
-      assert.match(error.message, /no planRef to hand back/);
-      return true;
-    }
-  );
-  assert.equal(artifactStore.entries.size, 0);
+  const plan = await service.plan({
+    contextId: context.stored.contextId,
+    gestures: [
+      { type: "hairpin", from: 0, to: 1, amounts: { loudness: 3 } },
+      { type: "hairpin", from: 2, to: 3, amounts: { loudness: 3 } },
+    ],
+  });
+  assert.equal(plan.summary.applyCallCount, 1);
+  assert.equal(artifactStore.entries.size, 1);
+  const artifact = artifactStore.resolve({
+    artifactId: plan.apply.arguments.planRef,
+    expectedKind: "plan",
+    sessionId: "sess_partial_seal",
+  });
+  assert.equal(artifact.payload.mutationRequest.curves.length, 2);
 });
 
 test("an actionable plan without an ArtifactStore fails instead of returning inline mutation data", async () => {
