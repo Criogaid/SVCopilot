@@ -1008,7 +1008,9 @@ try {
   );
   assert.equal(okOf(verifiedWrite), true);
   assert.equal(verifiedWrite.effects, "verified");
-  assert.ok(!verifiedWrite.warnings.some((warning) => warning.code === "UNVERIFIED_WRITE"));
+  // 空 warnings 在 surface 上被省略（§11 删除项 17），因此「不含某个 code」必须
+  // 容忍字段整个缺失——那正是「一个警告都没有」的表达方式。
+  assert.ok(!(verifiedWrite.warnings ?? []).some((warning) => warning.code === "UNVERIFIED_WRITE"));
 
   // sv_patch_notes 公开契约：dry-run 无副作用，真实写入带补偿语义与逐项读回。
   const patchTool = served.get("sv_patch_notes");
@@ -1059,7 +1061,8 @@ try {
   assert.equal(patchApplied.status, "succeeded");
   assert.equal(patchApplied.effects, "verified");
   assert.equal(patchApplied.atomicity, "verified_compensation");
-  assert.equal(patchApplied.rollback.attempted, false);
+  // 「没有回滚」现在由 rollback 容器整个缺席表达（§10.2.1：出现即 attempted）。
+  assert.equal(patchApplied.rollback, undefined);
   assert.equal(patchApplied.data.actuallyChangedNotes, 1);
   assert.equal(patchApplied.undo.boundaryCallsCompleted, 2);
   assert.equal(patchApplied.verification.passed, true);

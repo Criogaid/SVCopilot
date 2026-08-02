@@ -129,4 +129,80 @@ for (const [status, effects] of [
   );
 }
 
+// §11 删除项 17：可由其它字段完全推导的字段必须在 surface 上消失。
+// 一次断言四类，因为它们共用同一条判据（「恒等于默认值」），分开写会让某一类
+// 悄悄回归时另外三条仍然通过。
+{
+  const result = encodeToolResult({
+    status: "succeeded",
+    effects: "verified",
+    // 空 warnings 与「没有警告」是同一件事（§10.2.1「非空时」）。
+    warnings: [],
+    // false 是默认值；只有 true 需要出现。
+    retryable: false,
+    // 容器出现本身就是 attempted 的证据，键内再写一遍是同义重复。
+    verification: { attempted: true, passed: true },
+    // attempted:false —— 这一步从未发生，整个容器都是噪声。
+    rollback: { attempted: false, verified: null },
+    data: { detail: {}, changed: 1 },
+  });
+  const structured = result.structuredContent;
+  assert.deepStrictEqual(Object.keys(structured).sort(), [
+    "data",
+    "effects",
+    "status",
+    "verification",
+  ]);
+  assert.deepStrictEqual(structured.verification, { passed: true });
+  assert.deepStrictEqual(structured.data, { changed: 1 }, "空 detail 必须整个消失");
+}
+
+// 反例，比省略规则本身更重要：「尝试过且失败」与「从未尝试」是两件事。
+// 省略 passed:false 会让一次失败的读回验证看起来像一次没做验证的成功写入。
+{
+  const structured = encodeToolResult({
+    status: "partial",
+    effects: "may_remain",
+    verification: { attempted: true, passed: false, evidence: { observed: {} } },
+    rollback: { attempted: true, verified: false },
+    warnings: [{ code: "X", count: 1 }],
+  }).structuredContent;
+  assert.strictEqual(structured.verification.passed, false);
+  assert.strictEqual(structured.rollback.verified, false);
+  assert.deepStrictEqual(structured.warnings, [{ code: "X", count: 1 }]);
+  assert.deepStrictEqual(structured.data, undefined);
+}
+
+// retryable:true 是唯一需要出现的取值，因此不能被省略掉。矩阵只允许它与
+// effects:"none" 并存（零写入才谈得上原样重放），所以这里必须单独构造一个
+// 零副作用失败，而不是挂在上面那个 partial 上。
+{
+  const structured = encodeToolResult({
+    status: "failed",
+    effects: "none",
+    retryable: true,
+  }).structuredContent;
+  assert.strictEqual(structured.retryable, true);
+}
+
+// 非空 detail 是可读取的明细引用，必须原样保留。
+{
+  const structured = encodeToolResult({
+    status: "succeeded",
+    data: { detail: { artifact: "a_x", totalBytes: 9 } },
+  }).structuredContent;
+  assert.deepStrictEqual(structured.data.detail, { artifact: "a_x", totalBytes: 9 });
+}
+
+// 没有信封的 operation（sv_raw 的 handle 图、官方文档查询）直接透出宿主值：
+// 在那些形状上套用根信封的出现条件会删掉宿主自己的字段。
+{
+  const structured = encodeToolResult({
+    handle: [7, 1],
+    warnings: [],
+    retryable: false,
+  }).structuredContent;
+  assert.deepStrictEqual(Object.keys(structured).sort(), ["handle", "retryable", "warnings"]);
+}
+
 console.log("mcp-result-encoder.test.mjs passed");

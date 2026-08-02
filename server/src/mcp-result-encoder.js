@@ -3,6 +3,7 @@
 // structuredContent 是唯一完整的机器结果；content[0].text 只是一行状态摘要。
 // 早期实现把完整 JSON.stringify 同时写进两处，wire bytes 精确是 payload 的两倍，
 // 而两路承载的信息完全相同——这是全链路最便宜的一处浪费。
+import { omitDerivableFields } from "./envelope-omission.js";
 import {
   assertStatusEnvelope,
   fillCanonicalEffects,
@@ -165,12 +166,19 @@ export function encodeToolResult(value) {
     };
   }
 
-  // 三步规范化，顺序不可换：先把服务内部 status（audition 状态机、processing 观测
-  // 结论）投影进冻结矩阵，再补齐可由 status 唯一推导的 effects，最后校验三者相容。
-  // 校验放在最后，才是在检查「模型真正看到的那一份」。
-  const projected = foldLegacyRootFields(
-    fillCanonicalEffects(projectStatusEnvelope(stripRedundantOk(normalizedValue)))
+  // 四步规范化，顺序不可换：先把服务内部 status（audition 状态机、processing 观测
+  // 结论）投影进冻结矩阵，再补齐可由 status 唯一推导的 effects，接着折叠迁移期的
+  // 根级业务字段，最后省略可推导字段。
+  //
+  // 省略必须排在补齐**之后**：fillCanonicalEffects 要读 status 才能定 effects，
+  // 而省略只看最终值。反过来先省略会让「本该补上的 effects」因为暂时缺席而被跳过。
+  const projected = omitDerivableFields(
+    foldLegacyRootFields(
+      fillCanonicalEffects(projectStatusEnvelope(stripRedundantOk(normalizedValue)))
+    )
   );
+  // 校验放在最后，才是在检查「模型真正看到的那一份」。省略 retryable:false 不影响
+  // 相容性判定：assertStatusEnvelope 只对 retryable === true 设约束。
   if (typeof projected.status === "string") assertStatusEnvelope(projected);
 
   const result = {
