@@ -37,7 +37,11 @@ export class LyricsService {
       const startedAt = this.now();
       try {
         const stored = this.snapshotService.getContext(contextId, host.epoch());
-        resolved = await resolveContextTarget(host, stored, { verify: true });
+        resolved = await resolveContextTarget(
+          host,
+          { kind: "snapshot", stored },
+          { verify: true }
+        );
         if (resolved.notes.length !== input.lyrics.length) {
           return failed(
             "LYRIC_COUNT_MISMATCH",

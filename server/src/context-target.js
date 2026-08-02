@@ -4,32 +4,43 @@ import { scanTargetOccurrences } from "./parameter-curve.js";
 import { measureDiagnosticPhase } from "./operation-diagnostics.js";
 import { createBulkStats, readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
-import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { resolveMutationScope, resolveNoteIndex } from "./scope-source.js";
 
 export async function resolveContextTarget(
   host,
-  stored,
+  source,
   {
     verify = true,
     acceptRange = false,
     occurrence,
     noteIndicesInGroup,
+    allowEmptyGroup = false,
     diagnostics = null,
   } = {}
 ) {
-  if (stored?.context?.kind === "range") {
+  const stored = source?.kind === "snapshot" ? source.stored : null;
+  const isRangeSource =
+    source?.kind === "plan_capsule" || stored?.context?.kind === "range";
+  if (isRangeSource) {
     if (!acceptRange) {
       throw codedError(
         "INVALID_CONTEXT",
         "sv_set_lyrics only accepts group or selection contexts from sv_snapshot; for range contexts use sv_patch_notes for per-note lyrics or sv_edit_phrase for atomic phrase edits"
       );
     }
-    return resolveRangeContextTarget(host, stored, {
+    return resolveRangeContextTarget(host, source, {
       verify,
       occurrence,
       noteIndicesInGroup,
+      allowEmptyGroup,
       diagnostics,
     });
+  }
+  if (source?.kind !== "snapshot") {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      'source.kind must be "snapshot" or "plan_capsule"'
+    );
   }
   if (!stored?.context || !["selection", "group"].includes(stored.context.kind)) {
     throw codedError("INVALID_CONTEXT", "context does not identify an editable note group");
@@ -102,6 +113,7 @@ export async function resolveContextTarget(
       notes,
       fingerprints,
       contextKind: stored.context.kind,
+      groupNoteCount: contextGroupNoteCount(stored, fingerprints.length),
       bulkStats,
     };
   } catch (error) {
@@ -118,20 +130,21 @@ export async function resolveContextTarget(
 // 按 occurrence 定位 reference/target、比对 target UUID、逐音符校验指纹（含 detuneCents）。
 async function resolveRangeContextTarget(
   host,
-  stored,
-  { verify, occurrence: requestedOrdinal, noteIndicesInGroup, diagnostics }
+  source,
+  { verify, occurrence: requestedOrdinal, noteIndicesInGroup, allowEmptyGroup, diagnostics }
 ) {
-  // 候选判据是"可编辑的人声 occurrence"：instrumental 的存在但不能当 NoteGroup 编辑，
-  // 因此显式点名它得到 INVALID_TARGET，而不是"越界"或"未捕获"。
-  const { occurrence } = selectOccurrenceByOrdinal(stored.context.occurrences, requestedOrdinal, {
-    eligible: (item) =>
-      typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
-    noneCode: "INVALID_CONTEXT",
-    noneMessage: "range context contains no editable vocal occurrence",
-    ambiguousMessage:
-      "range context has multiple vocal occurrences; pass one occurrence ordinal",
-    ineligibleCode: "INVALID_TARGET",
-    ineligibleMessage: "instrumental occurrences cannot be edited as note groups",
+  const mutationScope = resolveMutationScope({
+    source,
+    occurrence: requestedOrdinal,
+    expectedEpoch: host.epoch(),
+    allowEmptyGroup,
+  });
+  const occurrence = mutationScope.occurrence;
+  if (typeof occurrence.targetGroupUuid !== "string" || occurrence.targetGroupUuid.length === 0) {
+    throw codedError("INVALID_TARGET", "instrumental occurrences cannot be edited as note groups");
+  }
+  const expectedFingerprints = selectRangeFingerprints(mutationScope, {
+    noteIndicesInGroup,
   });
 
   const scope = createHostScope(host);
@@ -164,9 +177,6 @@ async function resolveRangeContextTarget(
     const fingerprints = [];
     const positionByIndexInGroup = new Map();
     const contextPositionByIndexInGroup = new Map();
-    const expectedFingerprints = selectRangeFingerprints(occurrence, {
-      noteIndicesInGroup,
-    });
     const allContextPositions = new Map(
       (occurrence.noteFingerprints ?? []).map((fingerprint, index) => [fingerprint.indexInGroup, index])
     );
@@ -227,9 +237,11 @@ async function resolveRangeContextTarget(
       fingerprints,
       contextKind: "range",
       occurrence,
+      mutationScope,
       positionByIndexInGroup,
       contextPositionByIndexInGroup,
       targetNoteCount,
+      groupNoteCount: mutationScope.groupNoteCount,
       bulkStats,
     };
   } catch (error) {
@@ -242,13 +254,13 @@ async function resolveRangeContextTarget(
   }
 }
 
-function selectRangeFingerprints(occurrence, { noteIndicesInGroup }) {
-  const all = occurrence.noteFingerprints ?? [];
-  const requestedIndices = new Set(
-    (noteIndicesInGroup ?? []).filter((value) => Number.isSafeInteger(value))
+function selectRangeFingerprints(mutationScope, { noteIndicesInGroup }) {
+  if (!Array.isArray(noteIndicesInGroup) || noteIndicesInGroup.length === 0) {
+    return [...mutationScope.noteByIndex.values()];
+  }
+  return [...new Set(noteIndicesInGroup)].map((index, position) =>
+    resolveNoteIndex(mutationScope, index, `/noteIndicesInGroup/${position}`)
   );
-  if (requestedIndices.size === 0) return all;
-  return all.filter((fingerprint) => requestedIndices.has(fingerprint.indexInGroup));
 }
 
 export function contextGroupNoteCount(stored, fallback = null) {

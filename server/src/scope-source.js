@@ -2,8 +2,8 @@
 //
 // 两种来源产出同一个值：mutation handler 从 SnapshotStore 读 Context；PlanRef 展开出
 // 一个只读 capsule。capsule **不写回 store**——写回会让只读证据变成一条可被别人查到、
-// 可被 LRU 淘汰、还会与真实快照混淆的条目（§4.3.2），所以它随 resolvePlanReference
-// 的返回值交给调用方，由调用方显式传给 getContext。
+// 可被 LRU 淘汰、还会与真实快照混淆的条目（§4.3.2）。PlanRef 直接返回 ScopeSource，
+// mutation 不再把 capsule 伪装成 Snapshot 交给 getContext。
 //
 // 光有 `capsule` 参数还不够：target resolution、fingerprint lookup、shared-target
 // 检查全都直接读 `stored.context.occurrences`。因此这里把「范围作用域」定义成一个与
@@ -193,10 +193,14 @@ export function assertSealedCapsuleSatisfies(operation, capsule, epoch) {
  * @param {object} options
  * @param {{kind: "snapshot", stored: object} | {kind: "plan_capsule", capsule: object}} options.source
  * @param {number} [options.occurrence] - Context 内 0-based ordinal；单 occurrence 时可省略
+ * @param {number} [options.expectedEpoch] - mutation 当前 bridge epoch；planner 纯数据路径省略
+ * @param {boolean} [options.requireCapturedNotes=true] - 纯 Curve/PitchControl 操作可关闭
+ * @param {boolean} [options.allowEmptyGroup=false] - 结构 insert 可显式允许真正空组
  * @returns {{
  *   sourceKind: "snapshot" | "plan_capsule",
  *   contextId: string | null,
  *   epoch: number,
+ *   context: object,
  *   occurrence: object,
  *   occurrenceOrdinal: number,
  *   noteByIndex: Map<number, object>,
@@ -204,16 +208,34 @@ export function assertSealedCapsuleSatisfies(operation, capsule, epoch) {
  *   sharedTargetOccurrences: string[],
  * }}
  */
-export function resolveMutationScope({ source, occurrence } = {}) {
-  if (source?.kind === "snapshot") return fromSnapshot(source.stored, occurrence);
-  if (source?.kind === "plan_capsule") return fromCapsule(source.capsule, occurrence);
-  throw codedError(
-    "INVALID_ARGUMENTS",
-    'source.kind must be "snapshot" or "plan_capsule"'
-  );
+export function resolveMutationScope({
+  source,
+  occurrence,
+  expectedEpoch,
+  requireCapturedNotes = true,
+  allowEmptyGroup = false,
+} = {}) {
+  let scope;
+  if (source?.kind === "snapshot") {
+    scope = fromSnapshot(source.stored, occurrence, requireCapturedNotes, allowEmptyGroup);
+  } else if (source?.kind === "plan_capsule") {
+    scope = fromCapsule(source.capsule, occurrence, requireCapturedNotes, allowEmptyGroup);
+  } else {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      'source.kind must be "snapshot" or "plan_capsule"'
+    );
+  }
+  if (expectedEpoch !== undefined && scope.epoch !== expectedEpoch) {
+    throw codedError(
+      "STALE_CONTEXT",
+      `scope belongs to bridge epoch ${scope.epoch}; current epoch is ${expectedEpoch}`
+    );
+  }
+  return scope;
 }
 
-function fromSnapshot(stored, requestedOrdinal) {
+function fromSnapshot(stored, requestedOrdinal, requireCapturedNotes, allowEmptyGroup) {
   if (stored?.context?.kind !== "range") {
     throw codedError("INVALID_CONTEXT", "operation requires a range context");
   }
@@ -223,12 +245,15 @@ function fromSnapshot(stored, requestedOrdinal) {
     sourceKind: "snapshot",
     contextId: stored.contextId ?? null,
     epoch: stored.epoch,
+    context: stored.context,
     occurrence,
     ordinal,
+    requireCapturedNotes,
+    allowEmptyGroup,
   });
 }
 
-function fromCapsule(capsule, requestedOrdinal) {
+function fromCapsule(capsule, requestedOrdinal, requireCapturedNotes, allowEmptyGroup) {
   if (capsule === null || typeof capsule !== "object" || Array.isArray(capsule)) {
     throw codedError("INVALID_ARGUMENTS", "plan capsule must be an object");
   }
@@ -268,8 +293,11 @@ function fromCapsule(capsule, requestedOrdinal) {
     // capsule 刻意不带 contextId：它不在 store 里，让下游拿它去 get() 只会得到 null。
     contextId: null,
     epoch: capsule.epoch,
+    context: capsule.context,
     occurrence: occurrences[0],
     ordinal: 0,
+    requireCapturedNotes,
+    allowEmptyGroup,
   });
 }
 
@@ -373,8 +401,11 @@ function buildScope({
   sourceKind,
   contextId,
   epoch,
+  context,
   occurrence,
   ordinal,
+  requireCapturedNotes,
+  allowEmptyGroup,
   sharedTargetOccurrences,
   groupNoteCount,
 }) {
@@ -389,10 +420,16 @@ function buildScope({
   const fingerprints = Array.isArray(occurrence.noteFingerprints)
     ? occurrence.noteFingerprints
     : [];
+  const resolvedGroupNoteCount =
+    groupNoteCount ?? occurrence.groupNoteCount ?? fingerprints.length;
   // 空捕获检查放在 occurrence 选定之后，两条分支共用（§9.2）：只在显式 ordinal
   // 分支检查会让"单 occurrence 省略 ordinal"漏过，随后退化成 NOTE_NOT_IN_CONTEXT
-  // ——那正是 §3.1 规则 3 禁止的降级。
-  if (fingerprints.length === 0) {
+  // ——那正是 §3.1 规则 3 禁止的降级。真正的空 NoteGroup 仍可执行 insert。
+  if (
+    requireCapturedNotes &&
+    fingerprints.length === 0 &&
+    (!allowEmptyGroup || resolvedGroupNoteCount > 0)
+  ) {
     throw codedError("OCCURRENCE_NOT_CAPTURED", "the selected occurrence captured no notes", {
       got: ordinal,
     });
@@ -401,12 +438,11 @@ function buildScope({
   const noteByIndex = new Map(
     fingerprints.map((fingerprint) => [fingerprint.indexInGroup, fingerprint])
   );
-  const resolvedGroupNoteCount =
-    groupNoteCount ?? occurrence.groupNoteCount ?? fingerprints.length;
   return Object.freeze({
     sourceKind,
     contextId,
     epoch,
+    context,
     occurrence,
     occurrenceOrdinal: ordinal,
     noteByIndex,

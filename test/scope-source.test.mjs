@@ -84,6 +84,30 @@ test("both sources produce the identical scope shape", () => {
   assert.equal(fromCapsule.contextId, null);
 });
 
+test("mutation scope rejects a capsule from another bridge epoch", () => {
+  const capsule = {
+    epoch: 3,
+    context: { kind: "range", occurrences: [occurrenceWith([0, 1])] },
+  };
+  assert.equal(
+    codeOf(() =>
+      resolveMutationScope({
+        source: { kind: "plan_capsule", capsule },
+        occurrence: 0,
+        expectedEpoch: 4,
+      })
+    ),
+    "STALE_CONTEXT"
+  );
+  assert.doesNotThrow(() =>
+    resolveMutationScope({
+      source: { kind: "plan_capsule", capsule },
+      occurrence: 0,
+      expectedEpoch: 3,
+    })
+  );
+});
+
 test("a filtered or reordered occurrences array is refused", () => {
   // Context 自己记录 ordinal（musical-range 在 prepareStoredRange 里写入）。若有人
   // 过滤或重排过数组，同一个 ordinal 会在不同请求里指向不同 occurrence——那正是
@@ -158,6 +182,26 @@ test("an empty capture is caught even when the ordinal is omitted", () => {
     codeOf(() => resolveMutationScope({ source: { kind: "snapshot", stored } })),
     "OCCURRENCE_NOT_CAPTURED"
   );
+});
+
+test("a truly empty note group remains editable", () => {
+  const stored = storedWith([occurrenceWith([], { groupNoteCount: 0 })]);
+  const scope = resolveMutationScope({
+    source: { kind: "snapshot", stored },
+    allowEmptyGroup: true,
+  });
+  assert.equal(scope.groupNoteCount, 0);
+  assert.equal(scope.noteByIndex.size, 0);
+});
+
+test("a note-independent mutation may use a context without captured notes", () => {
+  const stored = storedWith([occurrenceWith([])]);
+  const scope = resolveMutationScope({
+    source: { kind: "snapshot", stored },
+    requireCapturedNotes: false,
+  });
+  assert.equal(scope.groupNoteCount, 8);
+  assert.equal(scope.noteByIndex.size, 0);
 });
 
 test("an out-of-range ordinal reports the maximum", () => {

@@ -1,7 +1,7 @@
 import { getStoredComputedPitch } from "./musical-range.js";
 import { codedError, isRecord } from "./pitch-control.js";
 import { ServiceTiming } from "./service-timing.js";
-import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { resolveMutationScope } from "./scope-source.js";
 import { dryRunFromAction } from "./mutation-action.js";
 
 // sv_bake_computed_pitch —— 把宿主 computed pitch 显式固化为一条 SVCopilot 自有的
@@ -76,38 +76,56 @@ export class BakeComputedPitchService {
     if (input.sampling) {
       return this.session.withExclusive(async (host) => {
         const stored = this.snapshotService.getContext(input.contextId, host.epoch());
-        const { occurrence, ordinal } = resolveOccurrence(stored, input.occurrence);
+        const mutationScope = resolveBakeScope(stored, input.occurrence, host.epoch());
+        const occurrence = mutationScope.occurrence;
         const series = await readLiveComputedPitch(host, occurrence, input.sampling);
-        return { stored, occurrence, occurrenceOrdinal: ordinal, series, samplingSource: "live", groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null };
+        return {
+          stored,
+          occurrence,
+          occurrenceOrdinal: mutationScope.occurrenceOrdinal,
+          series,
+          samplingSource: "live",
+          groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null,
+        };
       });
     }
     // 继承路径不需要持锁：stored context 已有 computed pitch 与 occurrence 指纹。
     const epoch = this.session.getStatus?.().epoch ?? 0;
     const stored = this.snapshotService.getContext(input.contextId, epoch);
-    const { occurrence, ordinal } = resolveOccurrence(stored, input.occurrence);
-    const series = getStoredComputedPitch(stored, ordinal);
+    const mutationScope = resolveBakeScope(stored, input.occurrence, epoch);
+    const occurrence = mutationScope.occurrence;
+    const series = getStoredComputedPitch(stored, mutationScope.occurrenceOrdinal);
     if (!series) {
       throw codedError(
         "COMPUTED_PITCH_NOT_CAPTURED",
         'the occurrence has no stored computed pitch; re-run sv_snapshot_range with include ["computedPitch"], or pass explicit sampling'
       );
     }
-    return { stored, occurrence, occurrenceOrdinal: ordinal, series, samplingSource: "snapshot", groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null };
+    return {
+      stored,
+      occurrence,
+      occurrenceOrdinal: mutationScope.occurrenceOrdinal,
+      series,
+      samplingSource: "snapshot",
+      groupFingerprint: occurrence.pitchControlGroupFingerprint ?? null,
+    };
   }
 }
 
-function resolveOccurrence(stored, requestedOrdinal) {
-  // 与其它 range-scoped operation 共用同一个选择器：显式 ordinal 索引**完整**数组，
-  // 省略时唯一 vocal occurrence 自动选中，其余情况给出 ordinal 候选。手写第二份
-  // 选择逻辑会让错误码与候选形状随时间漂移——那正是迁移前的状态。
-  return selectOccurrenceByOrdinal(stored?.context?.occurrences, requestedOrdinal, {
-    eligible: (item) => typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
-    noneCode: "INVALID_CONTEXT",
-    noneMessage: "range context contains no vocal occurrence to bake",
-    ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
-    ineligibleCode: "INVALID_TARGET",
-    ineligibleMessage: "instrumental occurrences cannot be baked",
+function resolveBakeScope(stored, requestedOrdinal, epoch) {
+  const mutationScope = resolveMutationScope({
+    source: { kind: "snapshot", stored },
+    occurrence: requestedOrdinal,
+    expectedEpoch: epoch,
+    requireCapturedNotes: false,
   });
+  if (
+    typeof mutationScope.occurrence.targetGroupUuid !== "string" ||
+    mutationScope.occurrence.targetGroupUuid.length === 0
+  ) {
+    throw codedError("INVALID_TARGET", "instrumental occurrences cannot be baked");
+  }
+  return mutationScope;
 }
 
 async function readLiveComputedPitch(host, occurrence, sampling) {

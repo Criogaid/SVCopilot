@@ -9,7 +9,7 @@ import {
 } from "./musical-time.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { decodeDense } from "./dense-codec.js";
-import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { resolveMutationScope } from "./scope-source.js";
 import { dryRunFromAction } from "./mutation-action.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
@@ -143,7 +143,7 @@ export class ParameterCurveService {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
     let ledgerRef = null;
-    let planCapsule = null;
+    let planScopeSource = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const { resolvePlanReference } = await import("./plan-reference.js");
@@ -155,12 +155,11 @@ export class ParameterCurveService {
         expectedTargetTool: "sv_patch_parameter_curves",
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
-        snapshotStore: this.snapshotService?.store,
         planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolved.mutationRequest;
       ledgerRef = resolved.ledgerRef;
-      planCapsule = resolved.capsule;
+      planScopeSource = resolved.scopeSource;
     }
     let input;
     try {
@@ -175,7 +174,7 @@ export class ParameterCurveService {
     const transaction = await this._runTransaction(input, {
       serviceStartedAt,
       coordinatorRequestedAt,
-      planCapsule,
+      planScopeSource,
     });
     return settlePlanLedger(
       this.artifactStore?.planLedger ?? null,
@@ -187,7 +186,7 @@ export class ParameterCurveService {
   async _runTransaction(input, timingOrigin = {}) {
     const serviceStartedAt = timingOrigin.serviceStartedAt ?? this.now();
     const coordinatorRequestedAt = timingOrigin.coordinatorRequestedAt ?? serviceStartedAt;
-    const planCapsule = timingOrigin.planCapsule ?? null;
+    const planScopeSource = timingOrigin.planScopeSource ?? null;
     return this.session.withExclusive(async (host) => {
       const acquiredAt = this.now();
       const capture = createHostScope(host);
@@ -199,7 +198,7 @@ export class ParameterCurveService {
           acquiredAt,
           snapshotService: this.snapshotService,
           epoch: host.epoch(),
-          planCapsule,
+          scopeSource: planScopeSource,
         });
       } finally {
         await capture.releaseAll();
@@ -735,7 +734,7 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
       });
       continue;
     }
-    if (!target.contextOccurrence || !target.storedContext) {
+    if (!target.contextOccurrence || !target.contextData) {
       throw codedError(
         "CONTEXT_REQUIRED",
         "semantic positions require a target from sv_snapshot_range"
@@ -745,8 +744,8 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
       await ensureLiveMusicalContext(capture, target);
       const absoluteBlick = musicalToBlick(
         point.musicalPosition,
-        target.storedContext.context.meterMarks,
-        target.storedContext.context.quarterBlick
+        target.contextData.meterMarks,
+        target.contextData.quarterBlick
       );
       resolved.push({
         source: "musicalPosition",
@@ -760,7 +759,7 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
     if (point.kind === "rangeBoundary") {
       await ensureLiveMusicalContext(capture, target);
       const boundaryKey = point.rangeBoundary === "start" ? "from" : "to";
-      const absoluteBlick = target.storedContext.context.range?.[boundaryKey]?.blick;
+      const absoluteBlick = target.contextData.range?.[boundaryKey]?.blick;
       if (!Number.isSafeInteger(absoluteBlick)) {
         throw codedError("INVALID_CONTEXT", "range context has no usable boundary BLICK");
       }
@@ -792,8 +791,8 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
       const offsetBlick = resolveAnchorOffset(
         point.gap.offset,
         absoluteBase,
-        target.storedContext.context.meterMarks,
-        target.storedContext.context.quarterBlick
+        target.contextData.meterMarks,
+        target.contextData.quarterBlick
       );
       const localBlick = localBase + offsetBlick;
       resolved.push({
@@ -818,8 +817,8 @@ async function resolveCurvePoints(capture, target, points, inputRange) {
     const offsetBlick = resolveAnchorOffset(
       point.anchor.offset,
       absoluteBase,
-      target.storedContext.context.meterMarks,
-      target.storedContext.context.quarterBlick
+      target.contextData.meterMarks,
+      target.contextData.quarterBlick
     );
     const localBlick = localBase + offsetBlick;
     resolved.push({
@@ -882,8 +881,8 @@ async function ensureLiveMusicalContext(capture, target) {
     })
   );
   const quarterBlick = await capture.index("QUARTER");
-  const expectedMarks = target.storedContext.context.meterMarks;
-  const expectedQuarter = target.storedContext.context.quarterBlick;
+  const expectedMarks = target.contextData.meterMarks;
+  const expectedQuarter = target.contextData.quarterBlick;
   if (
     quarterBlick !== expectedQuarter ||
     JSON.stringify(meterMarks) !== JSON.stringify(expectedMarks)
@@ -1111,32 +1110,30 @@ function unknownParameterError(requestedParameter, vocalModeParameters) {
 async function resolveCurveTarget(capture, target, context = {}) {
   let requestedTarget = target;
   let contextOccurrence = null;
-  let storedContext = null;
+  let mutationScope = null;
+  let contextData = null;
   if (target.contextId) {
-    if (!context.snapshotService) {
+    if (!context.scopeSource && !context.snapshotService) {
       throw codedError("CONTEXT_UNAVAILABLE", "range context resolution is not configured");
     }
-    storedContext = context.snapshotService.getContext(target.contextId, context.epoch, {
-      capsule: context.planCapsule ?? null,
+    const source = context.scopeSource ?? {
+      kind: "snapshot",
+      stored: context.snapshotService.getContext(target.contextId, context.epoch),
+    };
+    mutationScope = resolveMutationScope({
+      source,
+      occurrence: target.occurrence,
+      expectedEpoch: context.epoch,
+      requireCapturedNotes: false,
     });
-    if (storedContext.context?.kind !== "range") {
-      throw codedError("INVALID_CONTEXT", "contextId does not identify a range snapshot");
+    contextOccurrence = mutationScope.occurrence;
+    contextData = mutationScope.context;
+    if (
+      typeof contextOccurrence.targetGroupUuid !== "string" ||
+      contextOccurrence.targetGroupUuid.length === 0
+    ) {
+      throw codedError("INVALID_TARGET", "instrumental occurrences have no automation to edit");
     }
-    // occurrence 必填（见 normalizeTarget）：曲线锚定在特定 occurrence 的音符上，
-    // 因此没有"唯一候选自动选择"语义。
-    contextOccurrence = selectOccurrenceByOrdinal(
-      storedContext.context.occurrences,
-      target.occurrence,
-      {
-        eligible: (item) =>
-          typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
-        noneCode: "INVALID_CONTEXT",
-        noneMessage: `context ${target.contextId} contains no editable vocal occurrence`,
-        ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
-        ineligibleCode: "INVALID_TARGET",
-        ineligibleMessage: "instrumental occurrences have no automation to edit",
-      }
-    ).occurrence;
     if (
       contextOccurrence.sharedTargetOccurrences.length > 1 &&
       context.readOnly !== true &&
@@ -1222,7 +1219,8 @@ async function resolveCurveTarget(capture, target, context = {}) {
     trackIndex: requestedTarget.trackIndex,
     groupIndex: requestedTarget.groupIndex,
     contextOccurrence,
-    storedContext,
+    mutationScope,
+    contextData,
     sharedTargetOccurrences: contextOccurrence?.sharedTargetOccurrences ?? [],
     projectTargetOccurrences,
   };
@@ -1573,7 +1571,7 @@ function toLocalRange(range, groupOnsetBlick) {
 
 async function resolveCurveRange(capture, target, range) {
   if (range.kind !== "semantic") return toLocalRange(range, target.groupTimeOffsetBlick);
-  if (!target.contextOccurrence || !target.storedContext) {
+  if (!target.contextOccurrence || !target.contextData) {
     throw codedError("CONTEXT_REQUIRED", "semantic ranges require a target from sv_snapshot_range");
   }
   const [from] = await resolveCurvePoints(capture, target, [{ ...range.from, value: 0 }], {

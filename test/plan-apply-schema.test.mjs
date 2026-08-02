@@ -695,7 +695,7 @@ test("oversized lyric alignment lists are capped and backed by a detail artifact
     sessionId,
   });
   assert.equal(
-    planArtifact.payload.contextSnapshot.snapshot.context.occurrences[0].noteFingerprints.length,
+    planArtifact.payload.capsule.context.occurrences[0].noteFingerprints.length,
     7
   );
   assert.ok(planArtifact.totalBytes < 10_000);

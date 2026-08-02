@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ArtifactStore, planReference } from "../server/src/artifact-store.js";
 import { ExecutionCoordinator } from "../server/src/execution-coordinator.js";
 import { ParameterCurveService } from "../server/src/parameter-curve.js";
+import { buildPlanArtifact } from "../server/src/plan-reference.js";
 
 const Q = 705600000;
 
@@ -173,7 +175,10 @@ function createService(model) {
   );
 }
 
-function createRangeContextService(model, { shared = false } = {}) {
+function createRangeContextService(
+  model,
+  { shared = false, artifactStore = null, sessionId = null } = {}
+) {
   const notes = [
     { __handle__: 850, __type__: "Note", __epoch__: 1 },
     { __handle__: 851, __type__: "Note", __epoch__: 1 },
@@ -256,9 +261,9 @@ function createRangeContextService(model, { shared = false } = {}) {
   };
   const service = new ParameterCurveService(
     { withExclusive: (task) => task(model.host) },
-    { now: () => 1000, snapshotService }
+    { now: () => 1000, snapshotService, artifactStore, sessionId }
   );
-  return { service, contextId, noteState, noteStates };
+  return { service, contextId, noteState, noteStates, stored, snapshotService };
 }
 
 // 在单曲线宿主模型上追加独立 Automation，用于验证跨曲线事务边界。
@@ -1260,6 +1265,54 @@ test("sv_patch_parameter_curves reports point-count evidence and rejects duplica
   assert.equal(duplicateResult.curves[1].resolvedParameter, "loudness");
   assert.equal(duplicateResult.error.resolvedParameter, "loudness");
   assert.ok(Number.isFinite(duplicateResult.timings.serviceTotalMs));
+});
+
+test("sv_patch_parameter_curves expands a planRef without consulting SnapshotService", async () => {
+  const sessionId = "sess_curve_plan";
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const model = createCurveModel();
+  const { service, contextId, stored, snapshotService } = createRangeContextService(model, {
+    artifactStore,
+    sessionId,
+  });
+  const occurrence = stored.context.occurrences[0];
+  const { payload } = buildPlanArtifact({
+    targetTool: "sv_patch_parameter_curves",
+    mutationRequest: {
+      target: { contextId, occurrence: 0, expectedGroupUuid: "curve-group" },
+      action: "dry_run",
+      atomic: true,
+      curves: [
+        {
+          parameter: "loudness",
+          mode: "replace",
+          range: { fromBlick: 0, toBlick: Q },
+          points: [{ blick: 0, value: 0.25 }],
+        },
+      ],
+    },
+    targetGroupUuid: occurrence.targetGroupUuid,
+    occurrence: 0,
+    expectedTimeOffsetBlick: occurrence.timeOffsetBlick,
+    capsule: { stored, occurrence, noteIndexes: [] },
+  });
+  const reference = planReference(
+    artifactStore.seal({
+      kind: "plan",
+      schemaVersion: "1",
+      sessionId,
+      sourceEpoch: 1,
+      payload,
+    })
+  );
+  snapshotService.getContext = () => {
+    throw new Error("PlanRef mutation must not consult SnapshotService.getContext");
+  };
+
+  const result = await service.patchCurves({ planRef: reference, action: "dry_run" });
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.curves[0].planned.pointCount, 1);
+  assert.equal(model.undoCount, 0);
 });
 
 test("range context resolves note anchors and musical positions in batch dry-run", async () => {

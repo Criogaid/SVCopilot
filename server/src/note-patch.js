@@ -1,6 +1,5 @@
 import {
   appendSharedTargetDryRunWarnings,
-  contextGroupNoteCount,
   ensureSharedTargetConfirmed,
   resolveContextTarget,
 } from "./context-target.js";
@@ -50,7 +49,7 @@ export class NotePatchService {
     });
     let resolvedRequest = request;
     let ledgerRef = null;
-    let planCapsule = null;
+    let planScopeSource = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const { resolvePlanReference } = await import("./plan-reference.js");
@@ -62,12 +61,11 @@ export class NotePatchService {
         expectedTargetTool: "sv_patch_notes",
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
-        snapshotStore: this.snapshotService.store,
         planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolved.mutationRequest;
       ledgerRef = resolved.ledgerRef;
-      planCapsule = resolved.capsule;
+      planScopeSource = resolved.scopeSource;
     }
     if (diagnostics && resolvedRequest !== request) {
       resolvedRequest = { ...resolvedRequest, diagnostics: true };
@@ -86,16 +84,18 @@ export class NotePatchService {
       const startedAt = this.now();
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
-        const stored = diagnostics
+        const source = diagnostics
           ? diagnostics.measureSync("contextRestoreMs", () =>
-              this.snapshotService.getContext(input.contextId, host.epoch(), {
-                capsule: planCapsule,
-              })
+              planScopeSource ?? {
+                kind: "snapshot",
+                stored: this.snapshotService.getContext(input.contextId, host.epoch()),
+              }
             )
-          : this.snapshotService.getContext(input.contextId, host.epoch(), {
-              capsule: planCapsule,
-            });
-        resolved = await resolveContextTarget(host, stored, {
+          : planScopeSource ?? {
+              kind: "snapshot",
+              stored: this.snapshotService.getContext(input.contextId, host.epoch()),
+            };
+        resolved = await resolveContextTarget(host, source, {
           verify: true,
           acceptRange: true,
           // index 身份不含 occurrence 前缀，因此不能从引用里推导 occurrence。
@@ -365,10 +365,8 @@ export class NotePatchService {
                 roots: resolved.roots,
                 group: resolved.group,
                 kind: input.waitFor,
-                expectedNotes: contextGroupNoteCount(
-                  stored,
-                  resolved.targetNoteCount ?? resolved.notes.length
-                ),
+                expectedNotes:
+                  resolved.groupNoteCount ?? resolved.targetNoteCount ?? resolved.notes.length,
                 timeoutMs: input.timeoutMs,
                 pollIntervalMs: input.pollIntervalMs,
                 sleepFn: this.sleep,

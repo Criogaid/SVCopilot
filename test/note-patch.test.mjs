@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ArtifactStore, planReference } from "../server/src/artifact-store.js";
 import { NotePatchService } from "../server/src/note-patch.js";
+import { buildPlanArtifact } from "../server/src/plan-reference.js";
 import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
 
 // 独立的宿主模型：支持全部可 patch 字段、按 (方法, 调用序号) 注入失败，用于补偿回滚测试。
@@ -658,7 +660,12 @@ test("sv_patch_notes reports zero remaining changes after a verified rollback", 
 });
 
 // range context fixture：与 sv_snapshot_range prepareStoredRange 存储的 occurrence 结构一致。
-function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
+function createRangeFixture({
+  shared = false,
+  extraOccurrence = false,
+  artifactStore = null,
+  sessionId = null,
+} = {}) {
   const model = createPatchModel();
   const session = { withExclusive: (task) => task(model.host) };
   const snapshots = new SnapshotService(session, {
@@ -668,6 +675,8 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
   const service = new NotePatchService(session, snapshots, {
     sleepFn: async () => {},
     now: () => 1000,
+    artifactStore,
+    sessionId,
   });
   const entry = snapshots.store.create({
     epoch: 1,
@@ -705,8 +714,51 @@ function createRangeFixture({ shared = false, extraOccurrence = false } = {}) {
       noteFingerprints: [],
     });
   }
-  return { model, snapshots, service, contextId: entry.contextId };
+  return { model, snapshots, service, entry, contextId: entry.contextId };
 }
+
+test("sv_patch_notes expands a planRef through its capsule without touching the store", async () => {
+  const sessionId = "sess_note_plan";
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const { model, snapshots, service, entry, contextId } = createRangeFixture({
+    artifactStore,
+    sessionId,
+  });
+  const occurrence = entry.context.occurrences[0];
+  const { payload } = buildPlanArtifact({
+    targetTool: "sv_patch_notes",
+    mutationRequest: {
+      contextId,
+      occurrence: 0,
+      patches: [{ note: 1, expected: { lyrics: "i" }, set: { lyrics: "changed" } }],
+      action: "dry_run",
+      atomic: true,
+      waitFor: "none",
+    },
+    targetGroupUuid: occurrence.targetGroupUuid,
+    occurrence: 0,
+    capsule: { stored: entry, occurrence, noteIndexes: [1] },
+  });
+  const reference = planReference(
+    artifactStore.seal({
+      kind: "plan",
+      schemaVersion: "1",
+      sessionId,
+      sourceEpoch: 1,
+      payload,
+    })
+  );
+  snapshots.store.delete(contextId);
+  snapshots.getContext = () => {
+    throw new Error("PlanRef mutation must not consult SnapshotService.getContext");
+  };
+
+  const result = await service.patchNotes({ planRef: reference, action: "dry_run" });
+  assert.equal(result.status, "dry_run");
+  assert.equal(result.data.plannedChangedNotes, 1);
+  assert.equal(model.notes[1].lyrics, "i");
+  assert.equal(snapshots.store.get(contextId), null);
+});
 
 test("sv_patch_notes accepts a range context and resolves notes by group index", async () => {
   const { model, snapshots, service, contextId } = createRangeFixture();

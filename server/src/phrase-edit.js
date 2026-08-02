@@ -13,7 +13,7 @@ import { ServiceTiming } from "./service-timing.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
-import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { resolveMutationScope } from "./scope-source.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 import { dryRunFromAction } from "./mutation-action.js";
 
@@ -72,16 +72,25 @@ export class PhraseEditService {
       const warnings = [];
       try {
         const resolved = await timer.measure("preflightReadMs", () =>
-          resolveTarget(capture, host, this.snapshotService, input.target, {
-            readOnly: input.dryRun,
-            scanSharedTargets:
-              !input.dryRun &&
-              (input.notePatches.length > 0 ||
-                input.structureOperations.length > 0 ||
-                input.curves.length > 0),
-            readVoice: input.voicePatch !== undefined,
-            readGeometry: input.curves.length > 0,
-          })
+          resolveTarget(
+            capture,
+            host,
+            {
+              kind: "snapshot",
+              stored: this.snapshotService.getContext(input.target.contextId, host.epoch()),
+            },
+            input.target,
+            {
+              readOnly: input.dryRun,
+              scanSharedTargets:
+                !input.dryRun &&
+                (input.notePatches.length > 0 ||
+                  input.structureOperations.length > 0 ||
+                  input.curves.length > 0),
+              readVoice: input.voicePatch !== undefined,
+              readGeometry: input.curves.length > 0,
+            }
+          )
         );
         prepared = await timer.measure("detachedPrepareMs", () =>
           prepareDetachedPhrase(capture, resolved, input, host)
@@ -422,7 +431,7 @@ export class PhraseEditService {
 async function resolveTarget(
   capture,
   host,
-  snapshotService,
+  source,
   targetInput,
   {
     readOnly = false,
@@ -431,25 +440,16 @@ async function resolveTarget(
     readGeometry = true,
   } = {}
 ) {
-  const stored = snapshotService.getContext(targetInput.contextId, host.epoch());
-  if (stored.context?.kind !== "range") {
-    throw codedError("INVALID_CONTEXT", "sv_edit_phrase requires a range snapshot context");
+  const mutationScope = resolveMutationScope({
+    source,
+    occurrence: targetInput.occurrence,
+    expectedEpoch: host.epoch(),
+    requireCapturedNotes: false,
+  });
+  const occurrence = mutationScope.occurrence;
+  if (typeof occurrence.targetGroupUuid !== "string" || occurrence.targetGroupUuid.length === 0) {
+    throw codedError("INVALID_TARGET", "instrumental occurrences cannot be edited as phrases");
   }
-  // occurrence 必填（见 normalizeRequest）：组合事务必须明确目标，因此这里不引入
-  // "唯一候选自动选择"语义，只把身份换成 ordinal。
-  const { occurrence } = selectOccurrenceByOrdinal(
-    stored.context.occurrences,
-    targetInput.occurrence,
-    {
-      eligible: (item) =>
-        typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
-      noneCode: "INVALID_CONTEXT",
-      noneMessage: "range context contains no editable vocal occurrence",
-      ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
-      ineligibleCode: "INVALID_TARGET",
-      ineligibleMessage: "instrumental occurrences cannot be edited as note groups",
-    }
-  );
   const roots = await capture.roots();
   const track = await capture.call(roots.project, "getTrack", [occurrence.trackIndex + 1], {
     inferredType: "Track",
@@ -507,7 +507,8 @@ async function resolveTarget(
     knownTargetOccurrenceCount: knownSharedCount,
     mutatesSharedTarget: scanSharedTargets,
     occurrence,
-    storedContext: stored,
+    mutationScope,
+    contextData: mutationScope.context,
     groupTimeOffsetBlick: readGeometry
       ? await capture.call(reference, "getTimeOffset")
       : occurrence.timeOffsetBlick,
@@ -537,7 +538,7 @@ async function prepareDetachedPhrase(capture, resolved, input, host) {
     groupTimeOffsetBlick: resolved.groupTimeOffsetBlick,
     groupOnsetBlick: resolved.groupOnsetBlick,
     contextOccurrence: resolved.occurrence,
-    storedContext: resolved.storedContext,
+    contextData: resolved.contextData,
   };
 
   const liveTarget = {
@@ -618,7 +619,7 @@ async function prepareNonStructuralPhrase(capture, resolved, input) {
     groupTimeOffsetBlick: resolved.groupTimeOffsetBlick,
     groupOnsetBlick: resolved.groupOnsetBlick,
     contextOccurrence: resolved.occurrence,
-    storedContext: resolved.storedContext,
+    contextData: resolved.contextData,
   };
   const liveCurvePlans = await prepareCurves(capture, liveTarget, input.curves);
   for (const plan of liveCurvePlans) {

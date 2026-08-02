@@ -481,6 +481,9 @@ test("sv_restructure_notes expands a planRef through its capsule without touchin
     })
   );
   snapshots.store.delete(contextId);
+  snapshots.getContext = () => {
+    throw new Error("PlanRef mutation must not consult SnapshotService.getContext");
+  };
 
   const result = await service.restructureNotes({
     planRef: reference,

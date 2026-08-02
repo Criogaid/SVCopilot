@@ -28,7 +28,7 @@ export class NoteStructureService {
   async restructureNotes(request) {
     let resolvedRequest = request;
     let ledgerRef = null;
-    let planCapsule = null;
+    let planScopeSource = null;
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const resolvedPlan = resolvePlanReference({
         planRef: request.planRef,
@@ -38,12 +38,11 @@ export class NoteStructureService {
         expectedTargetTool: "sv_restructure_notes",
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
-        snapshotStore: this.snapshotService.store,
         planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolvedPlan.mutationRequest;
       ledgerRef = resolvedPlan.ledgerRef;
-      planCapsule = resolvedPlan.capsule;
+      planScopeSource = resolvedPlan.scopeSource;
     }
     const input = normalizeRequest(resolvedRequest);
     const result = await this.session.withExclusive(async (host) => {
@@ -56,14 +55,16 @@ export class NoteStructureService {
       const startedAt = this.now();
       const atomicity = input.atomic ? "verified_compensation" : "none";
       try {
-        const stored = this.snapshotService.getContext(input.contextId, host.epoch(), {
-          capsule: planCapsule,
-        });
-        resolved = await resolveContextTarget(host, stored, {
+        const source = planScopeSource ?? {
+          kind: "snapshot",
+          stored: this.snapshotService.getContext(input.contextId, host.epoch()),
+        };
+        resolved = await resolveContextTarget(host, source, {
           verify: true,
           acceptRange: true,
           occurrence: input.occurrence,
           noteIndicesInGroup: operationNoteIndexList(input),
+          allowEmptyGroup: true,
         });
         const scope = resolved.scope;
         const initialNoteCount = await scope.call(resolved.target, "getNumNotes");

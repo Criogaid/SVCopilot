@@ -1,13 +1,81 @@
 import assert from "node:assert";
 import { ArtifactStore } from "../server/src/artifact-store.js";
 import {
-  buildPlanArtifact,
+  buildPlanArtifact as buildPlanArtifactRaw,
   resolvePlanReference,
 } from "../server/src/plan-reference.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 import { PlanExecutionLedger } from "../server/src/plan-ledger.js";
 
 const sessionId = "sess_plan";
+
+function buildPlanArtifact(options) {
+  if (options.capsule) return buildPlanArtifactRaw(options);
+  const occurrence = {
+    occurrence: 0,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: options.targetGroupUuid ?? "grp_fixture",
+    timeOffsetBlick: options.expectedTimeOffsetBlick ?? 0,
+    groupNoteCount: 1,
+    sharedTargetOccurrences: [],
+    noteFingerprints: [
+      {
+        indexInGroup: 0,
+        onsetBlick: 0,
+        durationBlick: 705600000,
+        pitch: 60,
+        lyrics: "占",
+        phonemesOverride: "",
+        languageOverride: "",
+        detuneCents: 0,
+      },
+    ],
+  };
+  const stored = {
+    contextId: "ctx_plan_fixture",
+    epoch: 1,
+    context: { kind: "range", occurrences: [occurrence] },
+  };
+  return buildPlanArtifactRaw({
+    ...options,
+    capsule: { stored, occurrence },
+  });
+}
+
+// actionable PlanRef 必须自带完整 scope；缺失时绝不能回退 SnapshotStore。
+{
+  assert.throws(
+    () =>
+      buildPlanArtifactRaw({
+        targetTool: "sv_patch_notes",
+        mutationRequest: { contextId: "ctx_missing_capsule", patches: [] },
+      }),
+    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE"
+  );
+
+  const store = new ArtifactStore();
+  const artifact = store.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload: {
+      targetTool: "sv_patch_notes",
+      mutationRequest: { contextId: "ctx_missing_capsule", patches: [] },
+    },
+  });
+  assert.throws(
+    () =>
+      resolvePlanReference({
+        planRef: artifact.id,
+        action: "dry_run",
+        expectedTargetTool: "sv_patch_notes",
+        sessionId,
+        artifactStore: store,
+      }),
+    (error) => error.code === "PLAN_CAPSULE_INCOMPLETE"
+  );
+}
 
 // 成功解析 plan artifact。
 {
@@ -93,18 +161,18 @@ const sessionId = "sess_plan";
   // capsule 交给调用方，**不**写回 store：只读证据一旦进 store 就会被别人查到、
   // 被 LRU 淘汰、并与真实快照混淆（§4.3.2）。
   assert.strictEqual(snapshotStore.get(stored.contextId), null);
-  assert.strictEqual(resolved.capsule.epoch, 7);
-  assert.strictEqual(resolved.capsule.contextId, stored.contextId);
+  assert.strictEqual(resolved.scopeSource.kind, "plan_capsule");
+  assert.strictEqual(resolved.scopeSource.capsule.epoch, 7);
   // capsule 只封存一个 occurrence，因此其局部 ordinal 恒为 0——源 Context 里的编号
   // 不会带进来（否则 scope-source 的一致性检查会正确地拒绝它）。
-  assert.strictEqual(resolved.capsule.context.occurrences[0].occurrence, 0);
+  assert.strictEqual(resolved.scopeSource.capsule.context.occurrences[0].occurrence, 0);
   assert.strictEqual(
-    resolved.capsule.context.occurrences[0].targetGroupUuid,
+    resolved.scopeSource.capsule.context.occurrences[0].targetGroupUuid,
     occurrence.targetGroupUuid
   );
 }
 
-// context 仍在 store 里时不产出 capsule：真实快照优先，capsule 只是它过期后的替身。
+// Context 仍在 store 里时也只使用 capsule：TTL 前后不能改变计划的身份解析路径。
 {
   let now = 1000;
   const snapshotStore = new SnapshotStore({ now: () => now, ttlMs: 100 });
@@ -145,11 +213,12 @@ const sessionId = "sess_plan";
     artifactStore,
     snapshotStore,
   });
-  assert.strictEqual(resolved.capsule, null);
+  assert.strictEqual(resolved.scopeSource.kind, "plan_capsule");
+  assert.strictEqual(resolved.scopeSource.capsule.epoch, 7);
 }
 
 // ordinal 是源 Context 内的坐标；单 occurrence capsule 的局部坐标恒为 0。
-// 只有切换到 capsule 时才重映射，源 Context 尚存时必须保留原 ordinal。
+// PlanRef 始终切到 capsule，因此是否过期都必须重映射为 0。
 {
   let now = 1000;
   const snapshotStore = new SnapshotStore({ now: () => now, ttlMs: 100 });
@@ -189,7 +258,7 @@ const sessionId = "sess_plan";
     occurrence: 3,
     patches: [],
   });
-  const live = resolvePlanReference({
+  const beforeExpiry = resolvePlanReference({
     planRef: rootArtifact.id,
     action: "dry_run",
     expectedTargetTool: "sv_patch_notes",
@@ -197,8 +266,8 @@ const sessionId = "sess_plan";
     artifactStore,
     snapshotStore,
   });
-  assert.strictEqual(live.capsule, null);
-  assert.strictEqual(live.mutationRequest.occurrence, 3);
+  assert.strictEqual(beforeExpiry.scopeSource.kind, "plan_capsule");
+  assert.strictEqual(beforeExpiry.mutationRequest.occurrence, 0);
 
   const nestedArtifact = sealPlan("sv_patch_parameter_curves", {
     target: { contextId: stored.contextId, occurrence: 3 },
@@ -206,7 +275,7 @@ const sessionId = "sess_plan";
   });
   now += 101;
   assert.strictEqual(snapshotStore.get(stored.contextId), null);
-  const [rootFromCapsule, nestedFromCapsule] = [
+  const [rootAfterExpiry, nestedAfterExpiry] = [
     [rootArtifact, "sv_patch_notes"],
     [nestedArtifact, "sv_patch_parameter_curves"],
   ].map(([artifact, targetTool]) =>
@@ -219,8 +288,10 @@ const sessionId = "sess_plan";
       snapshotStore,
     })
   );
-  assert.strictEqual(rootFromCapsule.mutationRequest.occurrence, 0);
-  assert.strictEqual(nestedFromCapsule.mutationRequest.target.occurrence, 0);
+  assert.strictEqual(rootAfterExpiry.mutationRequest.occurrence, 0);
+  assert.strictEqual(nestedAfterExpiry.mutationRequest.target.occurrence, 0);
+  assert.strictEqual(rootAfterExpiry.scopeSource.kind, "plan_capsule");
+  assert.strictEqual(nestedAfterExpiry.scopeSource.kind, "plan_capsule");
 }
 
 // 目标工具不匹配报错。
@@ -566,12 +637,72 @@ const sessionId = "sess_plan";
     mutationRequest: { contextId: stored.contextId, patches: [] },
     capsule: { stored, occurrence, noteIndexes: [5] },
   });
-  const sealed = payload.contextSnapshot.snapshot.context.occurrences[0];
+  const sealed = payload.capsule.context.occurrences[0];
   assert.strictEqual(sealed.noteFingerprints.length, 1);
   // 组内总数与被封存的指纹条数是两件不同的事实，必须各自存在。
   assert.strictEqual(sealed.groupNoteCount, 9);
   // 消费者共用的回退表达式在 capsule 上必须得出真实总数。
   assert.strictEqual(sealed.groupNoteCount ?? sealed.noteFingerprints.length, 9);
+}
+
+// PlanRef 的身份来源必须恒为封存 capsule，不能随原 Context 是否仍在 store 中改变。
+// 否则同一个计划会在 TTL 前后走两套 target-resolution 路径，只有过期后才暴露缺陷。
+{
+  const store = new SnapshotStore({ now: () => 1000 });
+  const stored = store.create({
+    epoch: 9,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: { kind: "range", occurrences: [] },
+  });
+  const occurrence = {
+    occurrence: 0,
+    trackIndex: 0,
+    groupIndex: 0,
+    targetGroupUuid: "grp_scope_source",
+    timeOffsetBlick: 0,
+    groupNoteCount: 1,
+    sharedTargetOccurrences: [],
+    noteFingerprints: [
+      { indexInGroup: 0, onsetBlick: 0, durationBlick: 100, pitch: 60, lyrics: "占" },
+    ],
+  };
+  stored.context.occurrences.push(occurrence);
+  const artifactStore = new ArtifactStore({ now: () => 1000 });
+  const { payload } = buildPlanArtifact({
+    targetTool: "sv_patch_notes",
+    mutationRequest: {
+      contextId: stored.contextId,
+      occurrence: 0,
+      patches: [{ note: 0, set: { lyrics: "位" } }],
+    },
+    capsule: { stored, occurrence, noteIndexes: [0] },
+  });
+  assert.ok(payload.capsule, "plan payload must use the capsule field");
+  assert.equal(Object.hasOwn(payload, "contextSnapshot"), false);
+  const artifact = artifactStore.seal({
+    kind: "plan",
+    schemaVersion: "1",
+    sessionId,
+    payload,
+  });
+  const resolved = resolvePlanReference({
+    planRef: artifact.id,
+    action: "dry_run",
+    expectedTargetTool: "sv_patch_notes",
+    sessionId,
+    artifactStore,
+    snapshotStore: {
+      get() {
+        throw new Error("PlanRef resolution must not consult SnapshotStore");
+      },
+    },
+  });
+  assert.deepStrictEqual(resolved.scopeSource, {
+    kind: "plan_capsule",
+    capsule: payload.capsule,
+  });
+  assert.equal(Object.hasOwn(resolved, "capsule"), false);
 }
 
 // 封存时校验 capsule 完整性：缺判据的计划必须在 seal 阶段就失败，
@@ -602,7 +733,7 @@ const sessionId = "sess_plan";
       targetTool: "sv_restructure_notes",
       mutationRequest: { contextId: stored.contextId, operations: [] },
       capsule: { stored, occurrence: complete },
-    }).payload.contextSnapshot
+    }).payload.capsule
   );
 
   // 缺目标身份：连"改的是哪个 NoteGroup"都不知道，因此不该封成一个可提交的计划。

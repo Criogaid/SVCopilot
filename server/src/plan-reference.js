@@ -30,7 +30,6 @@ export function resolvePlanReference({
   expectedTargetTool,
   sessionId,
   artifactStore,
-  snapshotStore,
   planLedger = null,
 }) {
   if (typeof planRef !== "string" || planRef.length === 0) {
@@ -56,26 +55,28 @@ export function resolvePlanReference({
   if (!["dry_run", "commit"].includes(action)) {
     throw codedError("INVALID_ARGUMENTS", "planRef action must be dry_run or commit");
   }
-  // capsule 不写回 store（§4.3.2）：只读证据一旦进了 store 就会被别人查到、
-  // 被 LRU 淘汰、并与真实快照混淆。改为随返回值交给调用方，由它显式传给
-  // getContext——用途因此在调用点可见，而不是藏在一次副作用里。
-  const capsule =
-    plan.contextSnapshot && !snapshotStore?.get(plan.contextSnapshot.contextId)
-      ? { ...canonicalClone(plan.contextSnapshot.snapshot), contextId: plan.contextSnapshot.contextId }
-      : null;
+  // PlanRef 始终消费自身封存的只读 capsule。若原 Context 尚在时改走 SnapshotStore，
+  // 同一个计划就会在 TTL 前后进入两套 target-resolution 路径，只有过期后才暴露缺陷。
+  if (!plan.capsule) {
+    throw codedError("PLAN_CAPSULE_INCOMPLETE", "plan artifact does not contain a scope capsule");
+  }
+  assertSealedCapsuleSatisfies(
+    operationNameForTool(plan.targetTool),
+    plan.capsule,
+    plan.capsule.epoch
+  );
+  const scopeSource = { kind: "plan_capsule", capsule: canonicalClone(plan.capsule) };
 
   const mutationRequest = canonicalClone(plan.mutationRequest);
-  if (capsule) {
-    // Plan capsule 只封存目标 occurrence，因此它在 capsule 内的 ordinal 恒为 0。
-    // 原 Context 仍在时必须保留原 ordinal；只有真正切到 capsule 时才能重映射。
-    if (Number.isSafeInteger(mutationRequest.occurrence)) mutationRequest.occurrence = 0;
-    if (
-      mutationRequest.target &&
-      typeof mutationRequest.target === "object" &&
-      Number.isSafeInteger(mutationRequest.target.occurrence)
-    ) {
-      mutationRequest.target.occurrence = 0;
-    }
+  // Plan capsule 只封存目标 occurrence，因此它在 capsule 内的 ordinal 恒为 0。
+  // PlanRef 始终使用 capsule，因此这里无条件把原 Context ordinal 重映射为 0。
+  if (Number.isSafeInteger(mutationRequest.occurrence)) mutationRequest.occurrence = 0;
+  if (
+    mutationRequest.target &&
+    typeof mutationRequest.target === "object" &&
+    Number.isSafeInteger(mutationRequest.target.occurrence)
+  ) {
+    mutationRequest.target.occurrence = 0;
   }
   // 执行请求只带 action（§10.6）；dryRun 布尔已从整个 surface 删除。
   mutationRequest.action = action;
@@ -102,7 +103,7 @@ export function resolvePlanReference({
     mutationRequest,
     // commit 的结果必须回填 ledger；null 表示这次不是 commit 或未启用 ledger。
     ledgerRef: planLedger && action === "commit" ? planRef : null,
-    capsule,
+    scopeSource,
   };
 }
 
@@ -141,9 +142,9 @@ export function settlePlanLedger(planLedger, ledgerRef, result) {
  * @param {number} [options.occurrence]
  * @param {number} [options.expectedTimeOffsetBlick]
  * @param {object} [options.fingerprints]
- * @param {{stored: object, occurrence: object, noteIndexes?: number[]}} [options.capsule]
+ * @param {{stored: object, occurrence: object, noteIndexes?: number[]}} options.capsule
  *   要封存的 context capsule 来源。capsule **只能**在这里构造：以前
- *   `buildPlanContextSnapshot` 是导出的，于是"构造 capsule"和"校验 capsule 是否完整"
+ *   capsule builder 是导出的，于是"构造 capsule"和"校验 capsule 是否完整"
  *   分处两个模块，没有任何一处同时看得见两侧——`groupNoteCount` 被漏封存的缺陷正是
  *   藏在这道缝里。现在唯一的入口就是这个函数，构造完立刻校验。
  * @returns {{ kind: "plan", payload: object }}
@@ -157,12 +158,12 @@ export function buildPlanArtifact({
   fingerprints = {},
   capsule,
 }) {
-  const contextSnapshot =
-    capsule === undefined
-      ? undefined
-      : buildPlanContextSnapshot(capsule.stored, capsule.occurrence, {
-          noteIndexes: capsule.noteIndexes,
-        });
+  if (capsule === undefined) {
+    throw codedError("PLAN_CAPSULE_INCOMPLETE", "an actionable plan must seal a scope capsule");
+  }
+  const sealedCapsule = buildPlanCapsule(capsule.stored, capsule.occurrence, {
+    noteIndexes: capsule.noteIndexes,
+  });
   // capsule 完整性在**封存时**校验，而不是等 apply 走到一半。
   //
   // 这条校验（CAPSULE_REQUIREMENTS_BY_OPERATION + assertCapsuleSatisfies）此前只被
@@ -172,13 +173,11 @@ export function buildPlanArtifact({
   //
   // 放在这里而不是 resolve 时：封存是 planner 自己的代码路径，此刻失败指向的是
   // planner 少存了东西；等到 resolve 才发现，报错会出现在无辜的执行方那一侧。
-  if (contextSnapshot !== undefined) {
-    assertSealedCapsuleSatisfies(
-      operationNameForTool(targetTool),
-      contextSnapshot.snapshot,
-      contextSnapshot.snapshot?.epoch
-    );
-  }
+  assertSealedCapsuleSatisfies(
+    operationNameForTool(targetTool),
+    sealedCapsule,
+    sealedCapsule.epoch
+  );
   return {
     kind: "plan",
     payload: {
@@ -188,7 +187,7 @@ export function buildPlanArtifact({
       ...(occurrence !== undefined ? { occurrence } : {}),
       ...(expectedTimeOffsetBlick !== undefined ? { expectedTimeOffsetBlick } : {}),
       fingerprints,
-      ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),
+      capsule: sealedCapsule,
     },
   };
 }
@@ -198,7 +197,7 @@ export function buildPlanArtifact({
 // **不导出**：capsule 的唯一构造入口是 buildPlanArtifact，它构造完立刻校验完整性。
 // 以前这个函数是导出的，于是五个 planner 各自构造 capsule、而校验器住在另一个模块里，
 // 两边谁也不认识谁——那道缝正是 groupNoteCount 缺陷藏身的地方。
-function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {}) {
+function buildPlanCapsule(stored, occurrence, { noteIndexes } = {}) {
   if (!stored || typeof stored.contextId !== "string" || !occurrence) {
     throw codedError("INVALID_ARGUMENTS", "plan context snapshot requires a stored context and occurrence");
   }
@@ -258,15 +257,10 @@ function buildPlanContextSnapshot(stored, occurrence, { noteIndexes } = {}) {
     noteFingerprints: selectedFingerprints,
   };
   return {
-    contextId: stored.contextId,
-    snapshot: {
-      epoch: stored.epoch,
-      scope: stored.scope,
-      observedAt: stored.observedAt,
-      context: {
-        kind: stored.context?.kind ?? "range",
-        occurrences: [minimalOccurrence],
-      },
+    epoch: stored.epoch,
+    context: {
+      kind: stored.context?.kind ?? "range",
+      occurrences: [minimalOccurrence],
     },
   };
 }

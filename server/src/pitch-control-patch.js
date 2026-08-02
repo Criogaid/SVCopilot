@@ -14,7 +14,7 @@ import {
 } from "./pitch-control.js";
 import { waitForProcessing } from "./processing.js";
 import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
-import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { resolveMutationScope } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { createHostScope } from "./snapshot.js";
 import { dryRunFromAction } from "./mutation-action.js";
@@ -63,7 +63,7 @@ export class PitchControlPatchService {
     const serviceStartedAt = this.now();
     let resolvedRequest = request;
     let ledgerRef = null;
-    let planCapsule = null;
+    let planScopeSource = null;
     // 如果请求携带 planRef，先从 artifact 展开为规范 mutation 请求。
     if (request?.planRef && this.artifactStore && this.sessionId) {
       const resolved = resolvePlanReference({
@@ -74,12 +74,11 @@ export class PitchControlPatchService {
         expectedTargetTool: "sv_patch_pitch_controls",
         sessionId: this.sessionId,
         artifactStore: this.artifactStore,
-        snapshotStore: this.snapshotService.store,
         planLedger: this.artifactStore.planLedger ?? null,
       });
       resolvedRequest = resolved.mutationRequest;
       ledgerRef = resolved.ledgerRef;
-      planCapsule = resolved.capsule;
+      planScopeSource = resolved.scopeSource;
     }
     let input;
     try {
@@ -99,7 +98,7 @@ export class PitchControlPatchService {
           serviceStartedAt,
           coordinatorRequestedAt,
           acquiredAt,
-          planCapsule,
+          planScopeSource,
         });
         return transaction;
       } finally {
@@ -138,11 +137,12 @@ export class PitchControlPatchService {
     let failedOpIndex = null;
     const inverses = [];
     try {
-      const stored = this.snapshotService.getContext(input.contextId, host.epoch(), {
-        capsule: clock.planCapsule ?? null,
-      });
+      const source = clock.planScopeSource ?? {
+        kind: "snapshot",
+        stored: this.snapshotService.getContext(input.contextId, host.epoch()),
+      };
       const target = await timer.measure("preflightReadMs", () =>
-        resolvePitchTarget(scope, stored, input)
+        resolvePitchTarget(scope, source, input, host.epoch())
       );
       tx.target = target;
 
@@ -319,25 +319,17 @@ export class PitchControlPatchService {
 
 // 解析目标：定位 range occurrence、比对 target UUID、读取 live offset、枚举全部 PitchControl
 // 并计算 live 全组 fingerprint。shared-target 的工程级扫描延迟到 commit（dry-run 保持无副作用）。
-async function resolvePitchTarget(scope, stored, input) {
-  if (stored?.context?.kind !== "range") {
-    throw codedError("INVALID_CONTEXT", "contextId does not identify a range snapshot");
+async function resolvePitchTarget(scope, source, input, epoch) {
+  const mutationScope = resolveMutationScope({
+    source,
+    occurrence: input.occurrence,
+    expectedEpoch: epoch,
+    requireCapturedNotes: false,
+  });
+  const occurrence = mutationScope.occurrence;
+  if (typeof occurrence.targetGroupUuid !== "string" || occurrence.targetGroupUuid.length === 0) {
+    throw codedError("INVALID_TARGET", "instrumental occurrences have no pitch controls to edit");
   }
-  // occurrence 必填（见 normalizeRequest）：PitchControl 编辑没有"唯一候选自动选择"
-  // 语义，因此这里把 ordinal 直接交给共享选择器，越界与 instrumental 各自成码。
-  const { occurrence } = selectOccurrenceByOrdinal(
-    stored.context.occurrences,
-    input.occurrence,
-    {
-      eligible: (item) =>
-        typeof item.targetGroupUuid === "string" && item.targetGroupUuid.length > 0,
-      noneCode: "INVALID_CONTEXT",
-      noneMessage: "range context contains no editable vocal occurrence",
-      ambiguousMessage: "range context has multiple vocal occurrences; pass one occurrence ordinal",
-      ineligibleCode: "INVALID_TARGET",
-      ineligibleMessage: "instrumental occurrences have no pitch controls to edit",
-    }
-  );
 
   const roots = await scope.roots();
   const track = await scope.call(roots.project, "getTrack", [occurrence.trackIndex + 1], {
@@ -406,7 +398,7 @@ async function resolvePitchTarget(scope, stored, input) {
     controlById: new Map(controls.map((control) => [control.fingerprint, control])),
     groupFingerprint: computeGroupFingerprint(controls, groupUuid),
     sharedTargetOccurrences: occurrence.sharedTargetOccurrences ?? [],
-    storedContext: stored,
+    mutationScope,
     observationStartBlick: onsetBlick,
     observationIntervalBlick: Math.max(1, Math.ceil(span / frames)),
     observationFrames: frames,
