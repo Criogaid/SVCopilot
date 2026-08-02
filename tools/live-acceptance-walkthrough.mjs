@@ -105,6 +105,20 @@ function okOf(result) {
   return result?.ok;
 }
 
+// 业务载荷住在 `data` 里（§10.2.1）：编码边界会把迁移期仍写在根级的字段折叠进去。
+// 走查必须按模型看到的形状读，否则一个已经搬家的字段只会静默读成 undefined，然后
+// 被 `?? null` 记成"没有证据"——那种报告看起来是跑完了的，实际每一格都是空的。
+//
+// 两处都查而不是只查 data：折叠是按登记表做的，未登记的契约字段（status/effects/
+// warnings/undo 等）本来就留在根上。
+function field(result, name) {
+  const data = result?.data;
+  if (data !== null && typeof data === "object" && !Array.isArray(data) && name in data) {
+    return data[name];
+  }
+  return result?.[name];
+}
+
 function assertReadOnly(label, result) {
   const status = result?.status ?? null;
   const effects = result?.effects ?? null;
@@ -185,13 +199,13 @@ async function runWalkthrough(client) {
   step(1, "doctor + ping + facade surface through MCP", {
     facadeTools: listed.tools.length,
     listToolsBytes: listBytes,
-    doctorOperationCount: doctor.surface?.operationCount ?? null,
+    doctorOperationCount: field(doctor, "surface")?.operationCount ?? null,
     catalogOperationCount: catalogCount,
-    installationHealthy: doctor.installationHealthy ?? null,
+    installationHealthy: field(doctor, "installationHealthy") ?? null,
     passed:
       listed.tools.length === FACADES.length &&
       listBytes < 12 * 1024 &&
-      doctor.surface?.operationCount === catalogCount,
+      field(doctor, "surface")?.operationCount === catalogCount,
   });
 
   // ---- §15.2 notes-only range context ----
@@ -214,7 +228,7 @@ async function runWalkthrough(client) {
 
   // ---- §15.3/15.4 grouped expression: request bytes and wall time ----
   const expressionArgs = {
-    contextId: captured.result.contextId,
+    contextId: captured.contextId,
     occurrence: captured.group.occurrence ?? 0,
     defaults: {
       vibrato: { surface: "pitchDelta", rateHz: 5.2, onsetDelayQuarter: 0.22 },
@@ -239,17 +253,21 @@ async function runWalkthrough(client) {
   });
 
   // ---- §15.5 short sealed PlanRef ----
-  const planRef = expressionPlan.apply?.arguments?.planRef ?? null;
+  const expressionApply = field(expressionPlan, "apply");
+  const planRef = expressionApply?.arguments?.planRef ?? null;
   step(5, "planner returns a short sealed planRef", {
     planRefType: typeof planRef,
     planRefBytes: typeof planRef === "string" ? Buffer.byteLength(planRef, "utf8") : null,
-    hasExpiresAt: Boolean(expressionPlan.apply?.expiresAt),
-    inlinedApplyRequests: expressionPlan.applyRequests !== undefined,
+    hasExpiresAt: Boolean(expressionApply?.expiresAt),
+    // apply.arguments 只允许 planRef + action：整份 mutation payload 内联回来时，
+    // 它既撑爆响应预算，也绕过 plan-ledger 的防重放。
+    applyArgumentKeys: Object.keys(expressionApply?.arguments ?? {}).sort(),
     passed:
       typeof planRef === "string" &&
       Buffer.byteLength(planRef, "utf8") <= 24 &&
-      Boolean(expressionPlan.apply?.expiresAt) &&
-      expressionPlan.applyRequests === undefined,
+      Boolean(expressionApply?.expiresAt) &&
+      JSON.stringify(Object.keys(expressionApply?.arguments ?? {}).sort()) ===
+        JSON.stringify(["action", "planRef"]),
   });
 
   // ---- §15.6/15.7 curve dry-run and its evidence ----
@@ -257,11 +275,12 @@ async function runWalkthrough(client) {
     await facadeCall(client, "sv_patch_parameter_curves", { planRef, action: "dry_run" })
   );
   const curveOutcome = assertReadOnly("patch_parameter_curves dry_run", curveDryRun);
-  const firstCurve = curveDryRun.curves?.[0] ?? null;
+  const curveList = field(curveDryRun, "curves");
+  const firstCurve = curveList?.[0] ?? null;
   step(6, "patch_parameter_curves dry_run via planRef", {
     ...curveOutcome,
     undoBoundaries: curveDryRun.undo?.boundaryCallsCompleted ?? null,
-    curveCount: curveDryRun.curves?.length ?? null,
+    curveCount: curveList?.length ?? null,
     passed:
       curveOutcome.status === "dry_run" && (curveDryRun.undo?.boundaryCallsCompleted ?? 0) === 0,
   });
@@ -282,19 +301,19 @@ async function runWalkthrough(client) {
   const planners = {};
   planners.align_lyrics = structured(
     await facadeCall(client, "sv_align_lyrics", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       lyrics: "\u3089",
     })
   );
   planners.plan_pitch_gesture = structured(
     await facadeCall(client, "sv_plan_pitch_gesture", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       gestures: [{ type: "attack", note: 0, depthSemitone: 0.3 }],
     })
   );
   planners.quantize_notes = structured(
     await facadeCall(client, "sv_quantize_notes", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       grid: { division: "1/8" },
     })
   );
@@ -311,7 +330,7 @@ async function runWalkthrough(client) {
     } else {
       planners.generate_harmony = structured(
         await facadeCall(client, "sv_generate_harmony", {
-          contextId: both.result.contextId,
+          contextId: both.contextId,
           sourceOccurrence: both.group.occurrence,
           targetOccurrence: target.occurrence,
           harmony: { interval: "third_below" },
@@ -340,7 +359,7 @@ async function runWalkthrough(client) {
   const dryRuns = { patch_parameter_curves: curveDryRun };
   dryRuns.patch_notes = structured(
     await facadeCall(client, "sv_patch_notes", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       occurrence: captured.group.occurrence,
       patches: [{ note: 0, set: { detuneCents: 7 } }],
       action: "dry_run",
@@ -349,7 +368,7 @@ async function runWalkthrough(client) {
   );
   dryRuns.patch_pitch_controls = structured(
     await facadeCall(client, "sv_patch_pitch_controls", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       occurrence: captured.group.occurrence,
       operations: [
         {
@@ -367,7 +386,7 @@ async function runWalkthrough(client) {
   dryRuns.edit_phrase = structured(
     await facadeCall(client, "sv_edit_phrase", {
       target: {
-        contextId: captured.result.contextId,
+        contextId: captured.contextId,
         occurrence: captured.group.occurrence,
       },
       notePatches: [{ note: 0, set: { detuneCents: 5 } }],
@@ -392,7 +411,7 @@ async function runWalkthrough(client) {
 
   // ---- §15.10 insert + delete + split + merge against one snapshot ----
   const structureArgs = {
-    contextId: captured.result.contextId,
+    contextId: captured.contextId,
     occurrence: captured.group.occurrence,
     operations: [
       // 四种 op 同批，全部相对同一快照 index 解析。split 的 atBlick 取自捕获音符的
@@ -432,18 +451,18 @@ async function runWalkthrough(client) {
   const readOnly = {};
   readOnly.analyze_phrase = structured(
     await facadeCall(client, "sv_analyze_phrase", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       include: ["key", "phrases"],
     })
   );
   readOnly.analyze_vocal_context = structured(
     await facadeCall(client, "sv_analyze_vocal_context", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
     })
   );
   readOnly.wait_processing = structured(
     await facadeCall(client, "sv_wait_for_processing", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       timeoutMs: 500,
       pollIntervalMs: 100,
     })
@@ -483,7 +502,7 @@ async function runWalkthrough(client) {
   );
 
   // ---- §15.13 artifact paging ----
-  const artifactRef = captured.result.artifactRef ?? null;
+  const artifactRef = field(captured.result, "artifactRef");
   let paging = null;
   if (artifactRef?.firstPageUri) {
     const pages = [];
@@ -511,12 +530,15 @@ async function runWalkthrough(client) {
   // ---- §15.14 compact workflow keeps detail out of the main path ----
   const compactWorkflow = structured(
     await facadeCall(client, "sv_analyze_phrase", {
-      contextId: captured.result.contextId,
+      contextId: captured.contextId,
       include: ["key"],
     })
   );
   step(14, "a compact workflow returns detail pointers instead of detail", {
-    hasDetailPointer: Boolean(compactWorkflow.detailRef ?? compactWorkflow.artifactRef),
+    // `detail` 的层级由契约固定在 data.detail（§10.2.1）；`artifactRef` 是迁移期
+    // 的旧名，同样已折进 data。两个都查，是因为这一步要证明的是「指针存在」，
+    // 而不是「指针叫什么名字」。
+    hasDetailPointer: Boolean(field(compactWorkflow, "detail") ?? field(compactWorkflow, "artifactRef")),
     bytes: utf8(compactWorkflow),
     // 服务端侧可证：明细可指、不内联。模型是否真的不去读它属于独立 LLM 验收。
     passed: utf8(compactWorkflow) <= 16 * 1024,
@@ -530,7 +552,7 @@ async function runWalkthrough(client) {
     sv_edit: [
       "sv_patch_notes",
       {
-        contextId: captured.result.contextId,
+        contextId: captured.contextId,
         patches: [{ note: 999999, set: { detuneCents: 7 } }],
         action: "dry_run",
       },
@@ -709,6 +731,10 @@ async function captureRange(client, fixture, { includeSecondGroup = false } = {}
   const secondNote = notes[1] ?? firstNote;
   return {
     result,
+    // contextId 从 `field()` 读，不从根级读：§10.2.1 的折叠已经把它收进 data，
+    // 直读根级只会拿到 undefined，而后面十几处调用会把它当合法入参送出去——
+    // 那种走查会在真实宿主上报一串 UNKNOWN_CONTEXT，看起来像宿主的问题。
+    contextId: field(result, "contextId"),
     group,
     allGroups,
     firstNote,
