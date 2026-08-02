@@ -548,9 +548,10 @@ test("a verified write keeps effects:verified when post-commit processing observ
     operations: [{ op: "add", control: { kind: "point", positionBlick: Q, pitchSemitone: 60 } }],
   });
   assert.equal(result.ok, true);
-  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.status, "succeeded");
   assert.equal(result.effects, "verified");
   assert.equal(result.verification.passed, true);
+  assert.equal(result.processing.status, "observation_failed");
   assert.ok(result.warnings.some((w) => w.code === "PROCESSING_OBSERVATION_FAILED"));
   assert.equal(model.controls.length, 1);
   assert.equal(model.undoCount, 2);

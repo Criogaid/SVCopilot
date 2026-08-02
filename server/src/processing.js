@@ -68,6 +68,55 @@ export class ProcessingService {
   }
 }
 
+/**
+ * 嵌套 `processing.status` 的全部取值。
+ *
+ * 它刻意与根级的 10 个 status 无交集：两者回答的是不同问题（「写入成不成功」与
+ * 「附加观察拿到了什么」）。共用词汇会让「这个 succeeded 说的是哪一层」重新变得
+ * 需要靠上下文猜——而那正是把子结论抬到根级时犯的错。
+ */
+export const NESTED_PROCESSING_STATUSES = Object.freeze([
+  "observed",
+  "observation_failed",
+  "not_ready",
+]);
+
+/**
+ * 把一次 processing 观察的内部结论投影成**嵌套** `processing.status`（计划 §4.5、§10.6
+ * 规则 4、§11 删除项 20）。
+ *
+ * 为什么必须有这一层：观察发生在提交、逐字段读回和 Undo 边界关闭**之后**，因此它的
+ * 结论说的是「附加信息拿没拿到」，而不是「这次写入成不成功」。五个 mutation 服务此前
+ * 都写成 `status: processing?.status ?? "succeeded"`，把子结论直接抬到根级——那让
+ * 一次**已验证成功**的写入按观察结果改写自己的成败：
+ *
+ *   - `processing_observation_failed` 靠 STATUS_PROJECTION 才勉强回落到 succeeded，
+ *     也就是说正确性依赖投影表里恰好有那一行；
+ *   - 更糟的是超时那三个（`processing_pending` / `stability_pending` /
+ *     `phoneme_coverage_unsatisfied`）投影成 `failed` + `retryable:true`，与服务自己
+ *     给出的 `effects:"verified"` 直接冲突。assertStatusEnvelope 会抛错，于是一次
+ *     真实成功的写入在编码边界变成 INTERNAL_ERROR；假如它没抛，模型就会收到
+ *     「失败且可原样重放」——去重放一个已经写进工程的 mutation。
+ *
+ * 因此根级 status 与观察结论必须彻底解耦：根级恒为 `succeeded`（写入已验证），
+ * 观察结论降级为 `processing.status` 加一条 warning。
+ *
+ * `sv_wait_for_processing` 不走这里：它的整个目的就是观察，pending 就是它的答案，
+ * 那些 status 在它的根级是诚实的。
+ *
+ * @param {object|null} processing - waitForProcessing 的返回值，或 null（未请求观察）
+ * @returns {"observed"|"observation_failed"|"not_ready"|null} 嵌套用的 status
+ */
+export function nestedProcessingStatus(processing) {
+  if (!processing) return null;
+  if (processing.status === "succeeded") return "observed";
+  // 宿主调用本身抛了错：连结论都没拿到。
+  if (processing.status === "processing_observation_failed") return "observation_failed";
+  // 观察成功执行但条件未在超时前达成。这不是失败，是「还没就绪」——重放 mutation
+  // 无意义，正确动作是再等一轮或重新观察，因此它绝不能带上 retryable。
+  return "not_ready";
+}
+
 export async function waitForProcessing(
   host,
   {

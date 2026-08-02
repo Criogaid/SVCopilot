@@ -12,7 +12,7 @@ import {
   parseContextControlId,
   pitchEquals,
 } from "./pitch-control.js";
-import { waitForProcessing } from "./processing.js";
+import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
 import { resolveMutationScope } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
@@ -229,7 +229,9 @@ export class PitchControlPatchService {
       tx.processing = await this._observeProcessing(host, target, input, tx);
 
       tx.ok = true;
-      tx.status = tx.processing?.status ?? "succeeded";
+      // 提交与读回验证均已完成，因此根级恒为 succeeded；processing 观察的结论降级为
+      // 嵌套 processing.status（§4.5 / §10.6 规则 4）。
+      tx.status = "succeeded";
       tx.effects = "verified";
       this.snapshotService.store.delete(input.contextId);
       return finish(tx, timer, input);
@@ -978,7 +980,21 @@ function finish(tx, timer, input) {
       verified: tx.rollback.verified,
       ...(tx.rollback.error ? { error: tx.rollback.error } : {}),
     },
-    ...(tx.processing ? { processing: tx.processing } : {}),
+    // 只投影出嵌套契约需要的字段，而不是把内部结果整个摊开：tx.processing 带着自己的
+    // `ok` 与内部 status 词汇（processing_pending 等），原样透出就等于在响应里放了
+    // 第二套成败结论。
+    ...(tx.processing
+      ? {
+          processing: {
+            status: nestedProcessingStatus(tx.processing),
+            state: tx.processing.data?.state ?? null,
+            ...(tx.processing.data?.evidence !== undefined
+              ? { evidence: tx.processing.data.evidence }
+              : {}),
+            ...(tx.processing.error ? { error: tx.processing.error } : {}),
+          },
+        }
+      : {}),
     ...(tx.failure ? { error: tx.failure } : {}),
     warnings: tx.warnings,
     timings,

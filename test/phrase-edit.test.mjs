@@ -587,8 +587,9 @@ test("sv_edit_phrase does not roll back a verified commit when processing observ
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.status, "succeeded");
   assert.equal(result.effects, "verified");
+  assert.equal(result.processing.status, "observation_failed");
   assert.equal(result.processing.error.code, "HOST_CALL_FAILED");
   assert.equal(model.undoCount, 2);
   const target = model.states.get(model.currentTarget.__handle__);

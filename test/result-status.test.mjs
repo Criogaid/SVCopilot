@@ -10,6 +10,10 @@ import test from "node:test";
 
 import { encodeToolResult } from "../server/src/mcp-result-encoder.js";
 import {
+  NESTED_PROCESSING_STATUSES,
+  nestedProcessingStatus,
+} from "../server/src/processing.js";
+import {
   RESULT_STATUSES,
   RESULT_STATUS_MATRIX,
   assertStatusEnvelope,
@@ -172,6 +176,42 @@ test("a verified write with a failed phoneme observation stays succeeded", () =>
   assert.equal(encoded.structuredContent.effects, "verified");
   assert.equal(encoded.isError, undefined);
   assert.equal(encoded.structuredContent.data.state, "processing_observation_failed");
+});
+
+test("no processing conclusion can occupy the root status of a verified write", () => {
+  // §4.5 / §11 删除项 20：processing 观察是写入之外的附加信息，它的结论只能落在
+  // 嵌套 processing.status。此前五个 mutation 服务都写
+  // `status: processing?.status ?? "succeeded"`，把内部词汇抬到根级。
+  //
+  // observation_failed 那一格靠 STATUS_PROJECTION 侥幸回落成 succeeded，因此看起来
+  // 没事；但同一个 hoist 也会放过三个 *_pending —— 它们投影成 failed + retryable:true，
+  // 与服务自己给出的 effects:"verified" 直接矛盾，于是在编码边界抛错。也就是说
+  // waitFor 超时会让一个**已经写进工程并通过读回验证**的 mutation 整个失败返回。
+  //
+  // 这里逐个钉住内部词汇：任何一个都不允许作为根 status 与 verified 并存。
+  for (const internal of [
+    "processing_observation_failed",
+    "processing_pending",
+    "stability_pending",
+    "phoneme_coverage_unsatisfied",
+  ]) {
+    const encoded = encodeToolResult({
+      status: "succeeded",
+      effects: "verified",
+      verification: { attempted: true, passed: true },
+      data: { processing: { status: nestedProcessingStatus({ status: internal }), state: "unknown" } },
+    });
+    const structured = encoded.structuredContent;
+    assert.equal(structured.status, "succeeded");
+    assert.equal(structured.effects, "verified");
+    assert.equal(structured.retryable, undefined, `${internal} must not invite a replay`);
+    assert.equal(encoded.isError, undefined);
+    // 结论没有被丢弃，只是降级到了它该在的层级。
+    assert.notEqual(structured.data.processing.status, undefined);
+    assert.equal(NESTED_PROCESSING_STATUSES.includes(structured.data.processing.status), true);
+    // 内部词汇绝不出现在根级。
+    assert.notEqual(structured.status, internal);
+  }
 });
 
 test("an unregistered status fails loudly instead of reaching the model", () => {

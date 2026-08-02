@@ -5,7 +5,7 @@ import {
 } from "./context-target.js";
 import { settlePlanLedger } from "./plan-reference.js";
 import { createOperationDiagnostics } from "./operation-diagnostics.js";
-import { waitForProcessing } from "./processing.js";
+import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 import { dryRunFromAction } from "./mutation-action.js";
 
 // 字段表同时决定确定性写入顺序：先时间/音高结构，再文本，再表达属性。
@@ -397,7 +397,11 @@ export class NotePatchService {
 
         return {
           ok: true,
-          status: processing?.status ?? "succeeded",
+          // 写入已通过逐字段读回验证，因此根级恒为 succeeded：processing 观察是提交之后
+          // 的附加信息，它的结论降级为 processing.status（§4.5 / §10.6 规则 4）。
+          // 写入已通过逐字段读回验证，因此根级恒为 succeeded：processing 观察是提交之后
+          // 的附加信息，它的结论降级为 processing.status（§4.5 / §10.6 规则 4）。
+          status: "succeeded",
           effects: "verified",
           atomicity,
           data: {
@@ -405,6 +409,7 @@ export class NotePatchService {
             ...(processing
               ? {
                   processing: {
+                    status: nestedProcessingStatus(processing),
                     state: processing.data.state,
                     attempts: processing.data.attempts,
                     elapsedMs: processing.data.elapsedMs,

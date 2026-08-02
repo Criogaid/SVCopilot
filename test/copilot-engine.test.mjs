@@ -1374,9 +1374,10 @@ test("sv_set_lyrics keeps verified success when post-commit processing observati
 
   // 写入已提交并逐项读回验证；处理观测失败只降级 processing 子结果 + warning。
   assert.equal(result.ok, true);
-  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.status, "succeeded");
   assert.equal(result.effects, "verified");
   assert.equal(result.verification.passed, true);
+  assert.equal(result.data.processing.status, "observation_failed");
   assert.deepEqual(model.notes.map((note) => note.lyrics), ["さ", "よ"]);
   assert.equal(model.undoCount, 2);
   assert.equal(result.data.processing.error.code, "HOST_TIMEOUT");

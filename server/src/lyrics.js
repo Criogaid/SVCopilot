@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
-import { waitForProcessing } from "./processing.js";
+import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 
 export class LyricsService {
   constructor(session, snapshotService, { sleepFn, now = () => Date.now() } = {}) {
@@ -262,7 +262,9 @@ export class LyricsService {
 
         return {
           ok: true,
-          status: processing?.status ?? "succeeded",
+          // 写入已通过读回验证，因此根级恒为 succeeded：processing 观察是提交之后的
+          // 附加信息，它的结论降级为 processing.status（§4.5 / §10.6 规则 4）。
+          status: "succeeded",
           effects: "verified",
           data: {
             processedNotes,
@@ -276,6 +278,7 @@ export class LyricsService {
             ...(processing
               ? {
                   processing: {
+                    status: nestedProcessingStatus(processing),
                     state: processing.data.state,
                     attempts: processing.data.attempts,
                     elapsedMs: processing.data.elapsedMs,

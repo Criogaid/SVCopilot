@@ -8,7 +8,7 @@ import {
   scanTargetOccurrences,
   verifyCurve,
 } from "./parameter-curve.js";
-import { waitForProcessing } from "./processing.js";
+import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 import { ServiceTiming } from "./service-timing.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { readNoteFingerprints } from "./note-fingerprint-reader.js";
@@ -359,7 +359,9 @@ export class PhraseEditService {
           input,
           resolved,
           prepared,
-          status: processing?.status ?? "succeeded",
+          // 提交与读回验证均已完成，因此根级恒为 succeeded；processing 观察的结论
+          // 降级为 processing.status（§4.5 / §10.6 规则 4）。
+          status: "succeeded",
           effects: "verified",
           boundaryCalls,
           processing,
@@ -1204,7 +1206,7 @@ function phraseSuccess(options) {
     ...(processing
       ? {
           processing: {
-            status: processing.status,
+            status: nestedProcessingStatus(processing),
             state: processing.data.state,
             evidence: processing.data.evidence,
             ...(processing.error ? { error: processing.error } : {}),

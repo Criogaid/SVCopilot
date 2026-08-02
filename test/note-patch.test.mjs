@@ -1152,9 +1152,13 @@ test("sv_patch_notes keeps verified success when post-commit processing observat
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.status, "processing_observation_failed");
+  // 观察失败不是顶层结论（§4.5 / §11 删除项 20）：写入已通过逐字段读回验证，因此
+  // 根级保持 succeeded/verified，观察的结论降级为嵌套 processing.status。
+  // 抬到根级会让模型去重放一个已经写进工程的 mutation。
+  assert.equal(result.status, "succeeded");
   assert.equal(result.effects, "verified");
   assert.equal(result.verification.passed, true);
+  assert.equal(result.data.processing.status, "observation_failed");
   assert.equal(result.data.processing.state, "unknown");
   assert.equal(result.data.processing.error.code, "HOST_TIMEOUT");
   assert.ok(result.warnings.some((warning) => warning.code === "PROCESSING_OBSERVATION_FAILED"));

@@ -617,9 +617,10 @@ test("sv_restructure_notes keeps verified success when post-commit processing ob
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.status, "processing_observation_failed");
+  assert.equal(result.status, "succeeded");
   assert.equal(result.effects, "verified");
   assert.equal(result.verification.passed, true);
+  assert.equal(result.data.processing.status, "observation_failed");
   assert.equal(result.data.processing.state, "unknown");
   assert.equal(result.data.processing.error.code, "HOST_TIMEOUT");
   assert.ok(result.warnings.some((warning) => warning.code === "PROCESSING_OBSERVATION_FAILED"));
