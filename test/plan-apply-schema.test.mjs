@@ -18,12 +18,13 @@ import { encodeDense } from "../server/src/dense-codec.js";
 import { ExpressionPlanService } from "../server/src/expression-plan.js";
 import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { LyricAlignService } from "../server/src/lyric-align.js";
+import { buildApplyEnvelope, sealApplyEnvelope } from "../server/src/plan-envelope.js";
 import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
 import { QuantizePlanService } from "../server/src/quantize-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 
-// 跨层契约回归：规划器（sv_plan_expression / sv_align_lyrics）产出的 applyRequests /
-// patchRequest 必须能通过真实 MCP 服务器对下游工具公布的 inputSchema——
+// 跨层契约回归：规划器产出的 planRef 请求和 Artifact 内封存的 mutationRequest
+// 都必须能通过真实 MCP 服务器对下游工具公布的 inputSchema——
 // 规划器新增字段（如 target.expectedNotes）而 index.js schema 未同步时，客户端会在
 // 提交阶段收到 schema 拒绝，这个测试让该漂移在 npm test 就失败。
 // 服务器不带 Lua bridge 启动：sv_describe 不需要宿主连接。
@@ -65,6 +66,57 @@ function createStoredContext(store, notes) {
   stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
   stored.snapshotToken = `snap_${stored.contextId}`;
   return { stored };
+}
+
+let plannerFixtureSequence = 0;
+
+function createPlannerFixture(Service, store, label) {
+  plannerFixtureSequence += 1;
+  const artifactStore = new ArtifactStore({ now: () => 2000 });
+  const sessionId = `sess_${label}_${plannerFixtureSequence}`;
+  return {
+    service: new Service({ store, now: () => 2000, artifactStore, sessionId }),
+    artifactStore,
+    sessionId,
+  };
+}
+
+function planApplyCalls(plan) {
+  if (!plan.apply?.arguments) return [];
+  return [plan.apply, ...(plan.apply.additionalCalls ?? [])];
+}
+
+function resolvePlanCall(plan, fixture, callIndex = 0) {
+  const call = planApplyCalls(plan)[callIndex];
+  assert.ok(call, `missing apply call ${callIndex}`);
+  const artifact = fixture.artifactStore.resolve({
+    artifactId: call.arguments.planRef,
+    expectedKind: "plan",
+    sessionId: fixture.sessionId,
+  });
+  return {
+    tool: artifact.payload.targetTool,
+    arguments: artifact.payload.mutationRequest,
+  };
+}
+
+function assertPlanRefOnly(plan, label) {
+  assert.ok(plan.apply, `${label} must return an apply envelope`);
+  assert.ok(plan.apply.expiresAt, `${label} must expose the plan lease`);
+  for (const call of planApplyCalls(plan)) {
+    assert.deepEqual(
+      Object.keys(call.arguments).sort(),
+      ["action", "planRef"],
+      `${label} must hand off only planRef + action`
+    );
+    assert.equal(call.arguments.action, "dry_run");
+    assert.match(call.arguments.planRef, /^a_[A-Za-z0-9_-]+$/);
+  }
+  assert.doesNotMatch(
+    JSON.stringify(plan),
+    /"(?:applyRequests|patchRequest|patchRequests|restructureRequest)"\s*:/,
+    `${label} must not expose a legacy inline alias`
+  );
 }
 
 // facade 是唯一 surface，direct tool 的 schema 不在 tools/list 里；
@@ -212,15 +264,24 @@ test("planner outputs validate against the schemas the real server serves", asyn
     { onsetBlick: Q, durationBlick: 3 * Q, pitch: 66, lyrics: "see" },
     { onsetBlick: 6 * Q, durationBlick: Q, pitch: 62, lyrics: "あ" },
   ]);
-  const plan = await new ExpressionPlanService({ store: planStore, now: () => 2000 }).plan({
+  const expressionFixture = createPlannerFixture(
+    ExpressionPlanService,
+    planStore,
+    "schema_expression"
+  );
+  const plan = await expressionFixture.service.plan({
     contextId: planContext.stored.contextId,
     intent: { technique: ["controlled_belt"], emotion: "cool_anger", section: "chorus" },
   });
-  assert.ok(plan.applyRequests.length >= 1);
-  for (const request of plan.applyRequests) {
+  assertPlanRefOnly(plan, "sv_plan_expression");
+  const expressionCalls = planApplyCalls(plan).map((_, index) =>
+    resolvePlanCall(plan, expressionFixture, index)
+  );
+  assert.ok(expressionCalls.length >= 1);
+  for (const request of expressionCalls) {
     assert.equal(request.tool, "sv_patch_parameter_curves");
     assert.ok(Array.isArray(request.arguments.target.expectedNotes));
-    assertValid(validateCurves, request.arguments, "sv_plan_expression applyRequest");
+    assertValid(validateCurves, request.arguments, "sv_plan_expression sealed mutation");
   }
 
   // sv_align_lyrics → sv_patch_notes（F2：>200 时单可提交批 + continuation，绝不预烤死批次）。
@@ -234,15 +295,18 @@ test("planner outputs validate against the schemas the real server serves", asyn
     }))
   );
   const pool = "我你他她们的一二三四五六七八九十日月山川风花雪";
-  const aligned = await new LyricAlignService({ store: lyricStore, now: () => 2000 }).align({
+  const lyricFixture = createPlannerFixture(LyricAlignService, lyricStore, "schema_lyrics");
+  const aligned = await lyricFixture.service.align({
     contextId: lyricContext.stored.contextId,
     lyrics: Array.from({ length: count }, (_, index) => pool[index % pool.length]).join(""),
     language: "mandarin",
   });
-  assert.equal(aligned.patchRequest.tool, "sv_patch_notes");
-  assert.equal(aligned.patchRequest.arguments.patches.length, 200);
+  assertPlanRefOnly(aligned, "sv_align_lyrics");
+  const lyricCall = resolvePlanCall(aligned, lyricFixture);
+  assert.equal(lyricCall.tool, "sv_patch_notes");
+  assert.equal(lyricCall.arguments.patches.length, 200);
   assert.equal(aligned.continuation.remainingChangedCount, 1);
-  assertValid(validatePatches, aligned.patchRequest.arguments, "sv_align_lyrics patchRequest");
+  assertValid(validatePatches, lyricCall.arguments, "sv_align_lyrics sealed mutation");
 });
 
 test("served mutation schemas accept only an explicit planRef execution action", async () => {
@@ -375,13 +439,18 @@ async function buildPlans() {
     { onsetBlick: Q, durationBlick: 3 * Q, pitch: 66, lyrics: "see" },
     { onsetBlick: 6 * Q, durationBlick: Q, pitch: 62, lyrics: "go" },
   ]);
+  const expressionFixture = createPlannerFixture(
+    ExpressionPlanService,
+    expressionStore,
+    "envelope_expression"
+  );
   plans.push({
     planner: "sv_plan_expression",
-    plan: await new ExpressionPlanService({ store: expressionStore, now: () => 2000 }).plan({
+    plan: await expressionFixture.service.plan({
       contextId: expressionContext.stored.contextId,
       intent: { technique: ["controlled_belt"], emotion: "cool_anger", section: "chorus" },
     }),
-    legacyField: "applyRequests",
+    fixture: expressionFixture,
   });
 
   const lyricStore = new SnapshotStore({ now: () => 1000 });
@@ -389,14 +458,15 @@ async function buildPlans() {
     { onsetBlick: 0, durationBlick: Q },
     { onsetBlick: Q, durationBlick: Q },
   ]);
+  const lyricFixture = createPlannerFixture(LyricAlignService, lyricStore, "envelope_lyrics");
   plans.push({
     planner: "sv_align_lyrics",
-    plan: await new LyricAlignService({ store: lyricStore, now: () => 2000 }).align({
+    plan: await lyricFixture.service.align({
       contextId: lyricContext.stored.contextId,
       lyrics: "ひかり",
       language: "japanese",
     }),
-    legacyField: "patchRequest",
+    fixture: lyricFixture,
   });
 
   const quantizeStore = new SnapshotStore({ now: () => 1000 });
@@ -404,26 +474,36 @@ async function buildPlans() {
     { onsetBlick: 1234, durationBlick: Q, pitch: 60, lyrics: "a" },
     { onsetBlick: Q + 4321, durationBlick: Q, pitch: 62, lyrics: "b" },
   ]);
+  const quantizeFixture = createPlannerFixture(
+    QuantizePlanService,
+    quantizeStore,
+    "envelope_quantize"
+  );
   plans.push({
     planner: "sv_quantize_notes",
-    plan: await new QuantizePlanService({ store: quantizeStore, now: () => 2000 }).plan({
+    plan: await quantizeFixture.service.plan({
       contextId: quantizeContext.stored.contextId,
       grid: { division: "1/16" },
     }),
-    legacyField: "patchRequest",
+    fixture: quantizeFixture,
   });
 
   const harmonyStore = new SnapshotStore({ now: () => 1000 });
   const harmonyCtx = harmonyContext(harmonyStore);
+  const harmonyFixture = createPlannerFixture(
+    HarmonyPlanService,
+    harmonyStore,
+    "envelope_harmony"
+  );
   plans.push({
     planner: "sv_generate_harmony",
-    plan: await new HarmonyPlanService({ store: harmonyStore, now: () => 2000 }).plan({
+    plan: await harmonyFixture.service.plan({
       contextId: harmonyCtx.stored.contextId,
       sourceOccurrence: 0,
       targetOccurrence: 1,
       harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
     }),
-    legacyField: "restructureRequest",
+    fixture: harmonyFixture,
   });
 
   const gestureStore = new SnapshotStore({ now: () => 1000 });
@@ -432,16 +512,21 @@ async function buildPlans() {
     { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "i" },
     { onsetBlick: 2 * Q, durationBlick: 4 * Q, pitch: 64, lyrics: "u" },
   ]);
+  const gestureFixture = createPlannerFixture(
+    PitchGesturePlanService,
+    gestureStore,
+    "envelope_pitch_gesture"
+  );
   plans.push({
     planner: "sv_plan_pitch_gesture",
-    plan: await new PitchGesturePlanService({ store: gestureStore, now: () => 2000 }).plan({
+    plan: await gestureFixture.service.plan({
       contextId: gestureCtx.stored.contextId,
       gestures: [
         { type: "attack", note: 0, depthSemitone: 0.3 },
         { type: "transition", from: 0, to: 1, width: { quarters: 0.5 } },
       ],
     }),
-    legacyField: "applyRequests",
+    fixture: gestureFixture,
   });
 
   return plans;
@@ -464,10 +549,10 @@ test("all five planners share one apply envelope a generic consumer can submit",
     toolNames.map((name) => [name, compile(schemas[name])])
   );
 
-  for (const { planner, plan, legacyField } of plans) {
+  for (const { planner, plan, fixture } of plans) {
     // 1) 顶层结构统一：不需要按规划器分支。
     assert.ok(plan.planId, `${planner} must return a planId`);
-    assert.ok(plan.apply, `${planner} must return an apply envelope`);
+    assertPlanRefOnly(plan, planner);
     assert.ok(plan.review, `${planner} must return review`);
     assert.equal(plan.apply.atomicity, "verified_compensation");
     assert.ok(
@@ -477,17 +562,27 @@ test("all five planners share one apply envelope a generic consumer can submit",
     assert.ok(Array.isArray(plan.apply.preconditions));
     assert.match(plan.apply.planIsNotAPreflightToken, /does not authorize skipping live preflight/);
 
-    // 2) 泛型提交路径：读 apply.tool，用该工具的 schema 校验 apply.arguments。
+    // 2) 泛型提交路径：PlanRef 请求和其封存的直接 mutation 都必须通过目标 schema。
     const validate = validators.get(plan.apply.tool);
     assert.ok(validate, `${planner} named an unserved tool ${plan.apply.tool}`);
     assertValid(validate, plan.apply.arguments, `${planner} apply.arguments`);
+    const resolvedFirst = resolvePlanCall(plan, fixture);
+    assert.equal(resolvedFirst.tool, plan.apply.tool);
+    assertValid(validate, resolvedFirst.arguments, `${planner} sealed mutation`);
 
     // 多次调用（expression 的非相邻表现手法簇）同样逐条可校验。
-    for (const call of plan.apply.additionalCalls ?? []) {
+    for (const [index, call] of (plan.apply.additionalCalls ?? []).entries()) {
       assertValid(
         validators.get(call.tool),
         call.arguments,
         `${planner} additionalCalls[${call.callIndex}].arguments`
+      );
+      const resolved = resolvePlanCall(plan, fixture, index + 1);
+      assert.equal(resolved.tool, call.tool);
+      assertValid(
+        validators.get(call.tool),
+        resolved.arguments,
+        `${planner} sealed additional mutation ${index + 1}`
       );
     }
     const callCount = 1 + (plan.apply.additionalCalls?.length ?? 0);
@@ -497,12 +592,6 @@ test("all five planners share one apply envelope a generic consumer can submit",
       `${planner} must not under-report Undo steps`
     );
 
-    // 3) 兼容期：旧字段仍在，且与 apply 内容完全一致（不是另一份计划）。
-    const legacy = plan[legacyField];
-    assert.ok(legacy, `${planner} must keep ${legacyField} for one release`);
-    const legacyFirst = Array.isArray(legacy) ? legacy[0] : legacy;
-    assert.equal(legacyFirst.tool, plan.apply.tool);
-    assert.deepEqual(legacyFirst.arguments, plan.apply.arguments);
   }
 });
 
@@ -544,6 +633,7 @@ test("lyric and harmony planners default to complete plan references without inl
     ["lyrics", lyric],
     ["harmony", harmony],
   ]) {
+    assertPlanRefOnly(plan, label);
     const reference = plan.apply.arguments.planRef;
     assert.equal(plan.apply.arguments.action, "dry_run");
     // 裸 artifactId 字符串：没有 kind / contentHash / resourceUri / firstPageUri。
@@ -559,7 +649,7 @@ test("lyric and harmony planners default to complete plan references without inl
     );
     assert.doesNotMatch(
       JSON.stringify(plan.apply.preconditions),
-      /TTL expiry invalidates/,
+      /TTL expiry invalidates|Inline apply/,
       `${label} preconditions must describe plan leases accurately`
     );
   }
@@ -626,9 +716,9 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
     { onsetBlick: 20 * Q, durationBlick: Q, pitch: 64, lyrics: "c" },
     { onsetBlick: 21 * Q, durationBlick: Q, pitch: 65, lyrics: "d" },
   ]);
-  const notes = context.stored.context.occurrences[0].noteFingerprints;
+  const fixture = createPlannerFixture(ExpressionPlanService, store, "multi_call");
   // 同一参数的两个互不相邻表现手法簇 → 必须拆成两次调用（两条 Undo 记录）。
-  const plan = await new ExpressionPlanService({ store, now: () => 2000 }).plan({
+  const plan = await fixture.service.plan({
     contextId: context.stored.contextId,
     gestures: [
       {
@@ -646,15 +736,21 @@ test("the apply envelope reports multiple sequential calls honestly", async () =
     ],
   });
 
-  assert.equal(plan.applyRequests.length, 2);
+  assertPlanRefOnly(plan, "multi-call expression plan");
   assert.equal(plan.apply.callCount, 2);
   assert.equal(plan.apply.callIndex, 0);
   assert.equal(plan.apply.expectedUserUndoSteps, 2);
   assert.equal(plan.apply.additionalCalls.length, 1);
   assert.equal(plan.apply.additionalCalls[0].callIndex, 1);
+  assert.notEqual(
+    plan.apply.arguments.planRef,
+    plan.apply.additionalCalls[0].arguments.planRef,
+    "each independently committed call needs its own replay ledger identity"
+  );
   // 不得暗示多次调用是一个事务。
   assert.match(plan.apply.sequencing, /does NOT roll back earlier committed calls/);
-  assert.deepEqual(plan.apply.additionalCalls[0].arguments, plan.applyRequests[1].arguments);
+  assert.equal(resolvePlanCall(plan, fixture, 0).tool, "sv_patch_parameter_curves");
+  assert.equal(resolvePlanCall(plan, fixture, 1).tool, "sv_patch_parameter_curves");
 });
 
 test("a partial multi-call artifact seal releases every artifact from that attempt", async () => {
@@ -665,7 +761,6 @@ test("a partial multi-call artifact seal releases every artifact from that attem
     { onsetBlick: 20 * Q, durationBlick: Q, pitch: 64, lyrics: "c" },
     { onsetBlick: 21 * Q, durationBlick: Q, pitch: 65, lyrics: "d" },
   ]);
-  const notes = context.stored.context.occurrences[0].noteFingerprints;
   const artifactStore = new ArtifactStore({
     now: () => 2000,
     quotas: { maxEntries: 1 },
@@ -676,27 +771,49 @@ test("a partial multi-call artifact seal releases every artifact from that attem
     artifactStore,
     sessionId: "sess_partial_seal",
   });
-  const plan = await service.plan({
-    contextId: context.stored.contextId,
-    gestures: [
-      {
-        type: "hairpin",
-        from: 0,
-        to: 1,
-        amounts: { loudness: 3 },
-      },
-      {
-        type: "hairpin",
-        from: 2,
-        to: 3,
-        amounts: { loudness: 3 },
-      },
-    ],
-  });
-
-  assert.equal(plan.applyRequests.length, 2);
+  await assert.rejects(
+    service.plan({
+      contextId: context.stored.contextId,
+      gestures: [
+        {
+          type: "hairpin",
+          from: 0,
+          to: 1,
+          amounts: { loudness: 3 },
+        },
+        {
+          type: "hairpin",
+          from: 2,
+          to: 3,
+          amounts: { loudness: 3 },
+        },
+      ],
+    }),
+    (error) => {
+      assert.equal(error.code, "PLAN_SEAL_FAILED");
+      assert.match(error.message, /no planRef to hand back/);
+      return true;
+    }
+  );
   assert.equal(artifactStore.entries.size, 0);
-  assert.ok(plan.warnings.some((warning) => warning.code === "ARTIFACT_SEAL_FAILED"));
+});
+
+test("an actionable plan without an ArtifactStore fails instead of returning inline mutation data", async () => {
+  const store = new SnapshotStore({ now: () => 1000 });
+  const context = createStoredContext(store, [
+    { onsetBlick: Q / 8, durationBlick: Q, pitch: 60, lyrics: "a" },
+  ]);
+
+  await assert.rejects(
+    new QuantizePlanService({ store, now: () => 2000 }).plan({
+      contextId: context.stored.contextId,
+      grid: { division: "1/16" },
+    }),
+    (error) => {
+      assert.equal(error.code, "PLAN_SEAL_FAILED");
+      return true;
+    }
+  );
 });
 
 test("a no-op plan returns apply:null instead of an empty request", async () => {
@@ -712,7 +829,35 @@ test("a no-op plan returns apply:null instead of an empty request", async () => 
   });
   assert.equal(plan.status, "no_change");
   assert.equal(plan.apply, null);
-  assert.equal(plan.patchRequest, null);
+  assert.equal(Object.hasOwn(plan, "patchRequest"), false);
+});
+
+test("the shared seal boundary rejects missing, extra, duplicate, or incomplete PlanRefs", () => {
+  const envelope = buildApplyEnvelope([
+    { tool: "sv_patch_notes", arguments: { action: "dry_run" } },
+    { tool: "sv_patch_notes", arguments: { action: "dry_run" } },
+  ]);
+  const expiresAt = "2026-08-02T12:00:00.000Z";
+  const assertSealFailure = (refs, lease = expiresAt) => {
+    assert.throws(
+      () => sealApplyEnvelope(envelope, refs, lease),
+      (error) => error.code === "PLAN_SEAL_FAILED"
+    );
+  };
+
+  assertSealFailure(["a_first"]);
+  assertSealFailure(["a_first", "a_second", "a_extra"]);
+  assertSealFailure(["a_same", "a_same"]);
+  assertSealFailure(["a_first", ""]);
+  assertSealFailure(["a_first", "a_second"], null);
+  assert.equal(sealApplyEnvelope(null, null, null), null);
+
+  const sealed = sealApplyEnvelope(envelope, ["a_first", "a_second"], expiresAt);
+  assert.deepEqual(sealed.arguments, { planRef: "a_first", action: "dry_run" });
+  assert.deepEqual(sealed.additionalCalls[0].arguments, {
+    planRef: "a_second",
+    action: "dry_run",
+  });
 });
 
 test("generalized harmony input validates against the served sv_generate_harmony schema", async () => {

@@ -3,7 +3,7 @@ import { artifactReference, planReference } from "./artifact-store.js";
 import { buildPlanArtifact } from "./plan-reference.js";
 
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
-import { buildApplyEnvelope } from "./plan-envelope.js";
+import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import { COMPACT_MAX_BYTES } from "./response-budget.js";
 import { ServiceTiming } from "./service-timing.js";
 import {
@@ -1268,7 +1268,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     ? [
         "Review every operation's parameter, unit, and value range before applying.",
         "replace mode overwrites existing control points inside each operation range; the planner does not read the host and did not check for existing points (use sv_get_parameter_curve if unsure).",
-        "Apply through the returned applyRequests (sv_patch_parameter_curves) with action dry_run first, then commit each call.",
+        "Apply through apply.arguments (sv_patch_parameter_curves) with action dry_run first, then commit each apply call.",
         "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
       ]
     : ["No melodic intent target remained after special-event filtering; no host write is needed."];
@@ -1344,33 +1344,23 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
         }
       }
     } catch (error) {
+      // 部分封存必须整批释放：留下半套 planRef 会让调用方以为可以提交一部分，
+      // 而那一部分对应的 Undo 边界与其余调用是分开的。
       for (const artifactId of planArtifactRefs) {
         artifactStore.release({ artifactId, sessionId });
       }
       planArtifactRefs.length = 0;
       planExpiresAt = null;
-      warnings.push({
-        code: "ARTIFACT_SEAL_FAILED",
-        message: `Failed to seal expression plan artifact: ${error.message}`,
-      });
+      // 有 actionable plan 却封不进 artifact：不降级成内联（§11 条目 7），如实失败。
+      throw planSealError(error);
     }
   }
 
   const applyEnvelope = buildApplyEnvelope(applyRequests, {
     sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
   });
-  if (planArtifactRefs.length === applyRequests.length && applyEnvelope?.arguments) {
-    applyEnvelope.arguments = { planRef: planArtifactRefs[0], action: "dry_run" };
-    // 租期挂在信封上而不是塞回 planRef：planRef 是身份，过期时间是关于这次交接的
-    // 事实，两者混在一个字符串里就没法表达了。
-    applyEnvelope.expiresAt = planExpiresAt;
-    for (let index = 0; index < (applyEnvelope.additionalCalls?.length ?? 0); index += 1) {
-      applyEnvelope.additionalCalls[index].arguments = {
-        planRef: planArtifactRefs[index + 1],
-        action: "dry_run",
-      };
-    }
-  }
+  // 租期挂在信封上而不是塞回 planRef：planRef 是身份，过期时间是关于这次交接的事实。
+  const sealedEnvelope = sealApplyEnvelope(applyEnvelope, planArtifactRefs, planExpiresAt);
 
   return applyPlanByteBudget({
     ok: true,
@@ -1400,11 +1390,8 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
     gestures: publicGestures,
     operations: operationsMeta,
     ...(input.presetExpansion ? { presetExpansion: input.presetExpansion } : {}),
-    apply: applyEnvelope,
+    apply: sealedEnvelope,
     ...(continuation ? { continuation } : {}),
-    ...(planArtifactRefs.length > 0 && planArtifactRefs.length === applyRequests.length
-      ? {}
-      : { applyRequests }),
     review: {
       requiresHumanAudition: true,
       requiresSharedTargetConfirmation,

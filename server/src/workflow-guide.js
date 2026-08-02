@@ -101,7 +101,7 @@ const GLOBAL_RULES = {
     "apply.atomicity is always \"verified_compensation\" — read-back compensation, never ACID.",
     "apply.expectedUserUndoSteps says how many Undo records the human will see. When apply.callCount > 1, submit apply.arguments first and then each apply.additionalCalls entry in callIndex order; they are separate transactions, so a later failure does NOT roll back earlier commits.",
     "apply.preconditions describes what the plan assumed. The target tool re-validates against the live host anyway — a plan is never a token for skipping preflight, because SynthV exposes no project revision.",
-    "The older applyRequests / patchRequest / restructureRequest fields still carry the identical payload but are deprecated; prefer apply.",
+    "Every actionable planner result is handed off only through apply.arguments.planRef plus action. Mutation payloads are sealed server-side and are never duplicated inline.",
   ],
   writeSafety: [
     "Always dry-run a write first and read its plannedDiff; then commit the identical arguments with action commit.",

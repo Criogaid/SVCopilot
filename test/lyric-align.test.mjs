@@ -7,6 +7,10 @@ import {
   splitKanaMorae,
 } from "../server/src/lyric-align.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
+import {
+  createPlannerService,
+  sealedPlannerRequest as sealedRequest,
+} from "./helpers/planner-artifact-fixture.mjs";
 
 const Q = 705600000;
 
@@ -60,8 +64,12 @@ function createStoredContext(store, options = {}) {
   return { stored };
 }
 
-function createService(store) {
-  return new LyricAlignService({ store, now: () => 2000 });
+function createService(store, artifactStore = null) {
+  return createPlannerService(LyricAlignService, {
+    store,
+    method: "align",
+    artifactStore,
+  });
 }
 
 function uniformNotes(lyricsList, options = {}) {
@@ -123,7 +131,7 @@ test("fixture lyrics align 1:1 and an identical plan reports no_change", async (
   });
   assert.equal(result.ok, true);
   assert.equal(result.status, "no_change");
-  assert.equal(result.patchRequest, null);
+  assert.equal(result.apply, null);
   assert.equal(result.summary.unitCount, 12);
   assert.equal(result.summary.assignedCount, 12);
   assert.equal(result.summary.changedCount, 0);
@@ -151,18 +159,18 @@ test("a single lyric change produces one guarded patch", async () => {
   });
   assert.equal(result.status, "planned");
   assert.equal(result.summary.changedCount, 1);
-  const patches = result.patchRequest.arguments.patches;
+  const patches = sealedRequest(result).arguments.patches;
   assert.equal(patches.length, 1);
   assert.deepEqual(patches[0], {
     note: 3,
     expected: { lyrics: "see" },
     set: { lyrics: "saw" },
   });
-  assert.equal(result.patchRequest.tool, "sv_patch_notes");
-  assert.equal(result.patchRequest.arguments.action, "dry_run");
-  assert.equal(result.patchRequest.arguments.atomic, true);
-  assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
-  assert.equal(result.patchRequest.arguments.occurrence, 0);
+  assert.equal(sealedRequest(result).tool, "sv_patch_notes");
+  assert.equal(sealedRequest(result).arguments.action, "dry_run");
+  assert.equal(sealedRequest(result).arguments.atomic, true);
+  assert.equal(sealedRequest(result).arguments.contextId, stored.contextId);
+  assert.equal(sealedRequest(result).arguments.occurrence, 0);
 });
 
 function mandarinLyrics(count) {
@@ -202,8 +210,8 @@ test("oversized plans emit one submittable batch plus an honest continuation, ne
   assert.equal(result.summary.changedCount, count);
   // 唯一可提交批：当前 context 下的前 200 项。预烤第二批必然 UNKNOWN_CONTEXT（提交成功即删
   // context），因此响应里不允许存在 patchRequests 数组。
-  assert.equal(result.patchRequest.arguments.patches.length, 200);
-  assert.equal(result.patchRequest.arguments.contextId, stored.contextId);
+  assert.equal(sealedRequest(result).arguments.patches.length, 200);
+  assert.equal(sealedRequest(result).arguments.contextId, stored.contextId);
   assert.equal(result.patchRequests, undefined);
   assert.equal(result.continuation.reason, "PATCH_CAP");
   assert.equal(result.continuation.patchCapPerCall, 200);
@@ -223,26 +231,27 @@ test("continuation rounds converge: commit, re-snapshot, re-align until no_chang
   // 第 1 轮：200 项可提交，1 项留给续轮。
   const round1Context = createStoredContext(store, { notes });
   const round1 = await service.align({ contextId: round1Context.stored.contextId, lyrics, language: "mandarin" });
-  assert.equal(round1.patchRequest.arguments.patches.length, 200);
+  assert.equal(sealedRequest(round1).arguments.patches.length, 200);
   assert.equal(round1.continuation.remainingChangedCount, 1);
-  notes = applyPatchesToNotes(notes, round1.patchRequest.arguments.patches);
+  notes = applyPatchesToNotes(notes, sealedRequest(round1).arguments.patches);
 
   // 第 2 轮：新快照新 contextId；已应用的 200 项自动 no-change，恰好只剩 1 个 patch。
   const round2Context = createStoredContext(store, { notes });
   assert.notEqual(round2Context.stored.contextId, round1Context.stored.contextId);
   const round2 = await service.align({ contextId: round2Context.stored.contextId, lyrics, language: "mandarin" });
   assert.equal(round2.status, "planned");
-  assert.equal(round2.patchRequest.arguments.patches.length, 1);
+  assert.equal(sealedRequest(round2).arguments.patches.length, 1);
   assert.equal(round2.continuation, undefined);
   // 续轮 patch 落在新 occurrence 的组内 index 上——这正是预烤批次不可能提前知道的部分。
-  assert.equal(round2.patchRequest.arguments.patches[0].note, 200);
-  notes = applyPatchesToNotes(notes, round2.patchRequest.arguments.patches);
+  assert.equal(sealedRequest(round2).arguments.patches[0].note, 200);
+  notes = applyPatchesToNotes(notes, sealedRequest(round2).arguments.patches);
 
   // 第 3 轮：全部就位 → no_change，循环终止。
   const round3Context = createStoredContext(store, { notes });
   const round3 = await service.align({ contextId: round3Context.stored.contextId, lyrics, language: "mandarin" });
   assert.equal(round3.status, "no_change");
-  assert.equal(round3.patchRequest, null);
+  assert.equal(round3.apply, null);
+  assert.equal(Object.hasOwn(round3, "patchRequest"), false);
   assert.equal(round3.continuation, undefined);
 });
 
@@ -265,9 +274,9 @@ test("PATCH_CAP continuation can replay an explicit occurrence ordinal and start
     contextId: round1Context.stored.contextId,
     ...originalOptions,
   });
-  assert.equal(round1.patchRequest.arguments.patches.length, 200);
+  assert.equal(sealedRequest(round1).arguments.patches.length, 200);
   assert.equal(round1.continuation.remainingChangedCount, 1);
-  notes = applyPatchesToNotes(notes, round1.patchRequest.arguments.patches);
+  notes = applyPatchesToNotes(notes, sealedRequest(round1).arguments.patches);
   // 模拟提交成功消费旧上下文；continuation 明确承诺新快照后可用同一组 options 重跑。
   store.delete(round1Context.stored.contextId);
   const round2Context = createStoredContext(store, {
@@ -282,9 +291,9 @@ test("PATCH_CAP continuation can replay an explicit occurrence ordinal and start
     });
   });
   assert.equal(round2.status, "planned");
-  assert.equal(round2.patchRequest.arguments.patches.length, 1);
+  assert.equal(sealedRequest(round2).arguments.patches.length, 1);
   assert.equal(
-    round2.patchRequest.arguments.patches[0].note,
+    sealedRequest(round2).arguments.patches[0].note,
     201
   );
 });
@@ -308,7 +317,7 @@ test("PATCH_CAP continuation refuses positional re-anchor when target or start-n
     contextId: round1Context.stored.contextId,
     ...originalOptions,
   });
-  notes = applyPatchesToNotes(notes, round1.patchRequest.arguments.patches);
+  notes = applyPatchesToNotes(notes, sealedRequest(round1).arguments.patches);
   store.delete(round1Context.stored.contextId);
   const round2Context = createStoredContext(store, {
     notes,
@@ -353,7 +362,7 @@ test("exactly the patch cap stays a single request with no continuation", async 
     language: "mandarin",
   });
   assert.equal(result.summary.changedCount, count);
-  assert.equal(result.patchRequest.arguments.patches.length, 200);
+  assert.equal(sealedRequest(result).arguments.patches.length, 200);
   assert.equal(result.continuation, undefined);
   assert.ok(!result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_PATCH_CAP"));
 });
@@ -692,6 +701,6 @@ test("a clean alignment reports empty overflow lists rather than omitting them",
   assert.equal(result.alignment.unassignedCount, 0);
   assert.equal(result.alignment.unfilledCount, 0);
   assert.equal(result.alignment.detailRef, undefined);
-  assert.ok(result.patchRequest.arguments.patches.length === 2);
+  assert.ok(sealedRequest(result).arguments.patches.length === 2);
   assert.match(result.planId, /^lyr_[0-9a-f]{16}$/);
 });

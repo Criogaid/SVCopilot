@@ -199,6 +199,10 @@ test("the guide covers the required recipes and never invents host capabilities"
     index.globalRules.planHandoff.some((line) => /never a token for skipping preflight/i.test(line)),
     "the guide must state that a plan does not authorize skipping live preflight"
   );
+  const handoffRules = index.globalRules.planHandoff.join(" ");
+  assert.match(handoffRules, /apply\.arguments\.planRef/);
+  assert.match(handoffRules, /never duplicated inline/i);
+  assert.doesNotMatch(handoffRules, /applyRequests|patchRequest|restructureRequest|deprecated/i);
 });
 
 test("the audition recipe offers A/B without promising an undoable temporary edit", () => {

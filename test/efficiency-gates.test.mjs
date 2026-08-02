@@ -231,6 +231,10 @@ test("no served description promises a field the surface no longer returns", () 
       "occurrenceId",
       "sourceOccurrenceId",
       "targetOccurrenceId",
+      "applyRequests",
+      "patchRequest",
+      "patchRequests",
+      "restructureRequest",
     ]) {
       if (description.includes(banned)) offenders.push(`${tool.name}: ${banned}`);
     }
@@ -238,7 +242,7 @@ test("no served description promises a field the surface no longer returns", () 
   assert.deepEqual(
     offenders,
     [],
-    `descriptions still promise removed identity fields: ${offenders.join(", ")}`
+    `descriptions still promise removed fields: ${offenders.join(", ")}`
   );
 });
 

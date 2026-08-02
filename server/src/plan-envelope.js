@@ -1,6 +1,6 @@
 // 规划器统一交接信封（主计划 P0-D）。
 //
-// 问题：expression / lyrics / quantize / harmony 四个规划器各自返回 applyRequests、
+// 问题：expression / lyrics / quantize / harmony / pitch gesture 五个规划器各自返回 applyRequests、
 // patchRequest、restructureRequest 三种形状，LLM 必须记住四套协议才能找到"下一步调什么"。
 // 本模块把它们收敛成一个 apply 顶层字段，各规划器仍自行决定 tool 与 arguments。
 //
@@ -13,7 +13,7 @@
 // - expectedUserUndoSteps 是"用户需要按几次撤销"的诚实计数：expression 的非相邻表现手法簇
 //   会拆成 K 次调用即 K 条 Undo 记录，不能谎报为 1。
 //
-// 大型计划优先通过 planRef 交接，避免在响应里重复内联 mutation 请求。
+// actionable plan 只通过 planRef 交接，响应不再内联 mutation 请求。
 
 export const PLAN_ATOMICITY = "verified_compensation";
 
@@ -27,7 +27,7 @@ function preconditionsFor(calls) {
       kind: "context_valid",
       contextId: args.contextId,
       detail:
-        "Inline apply needs a live snapshot context. A sealed planRef may restore its bounded context capsule while the artifact lease remains valid; both paths still resolve the live target and reject target drift before writing.",
+        "The sealed plan may restore its bounded context capsule while the artifact lease remains valid; the target tool still resolves the live target and rejects target drift before writing.",
     });
   }
   if (args.target?.contextId) {
@@ -35,7 +35,7 @@ function preconditionsFor(calls) {
       kind: "context_valid",
       contextId: args.target.contextId,
       detail:
-        "Inline apply needs a live snapshot context. A sealed planRef may restore its bounded context capsule while the artifact lease remains valid; both paths still resolve the live target and reject target drift before writing.",
+        "The sealed plan may restore its bounded context capsule while the artifact lease remains valid; the target tool still resolves the live target and rejects target drift before writing.",
     });
   }
   if (Array.isArray(args.patches) && args.patches.some((patch) => patch.expected)) {
@@ -105,4 +105,71 @@ export function buildApplyEnvelope(calls, options = {}) {
     planIsNotAPreflightToken:
       "This plan does not authorize skipping live preflight: SynthV exposes no project revision, so the target tool re-validates against the live host before writing.",
   };
+}
+
+/**
+ * 把封存好的 PlanRef 装进 apply 信封，并把 planRef-only 规则钉在**这一个**边界上。
+ *
+ * 为什么规则住在这里而不是各 planner 里：五个 planner 此前各写一遍"seal 成功就替换
+ * arguments、失败就留着 inline 的那份"，于是"失败会内联"这条行为被抄了五份，没有任何
+ * 一处能被单独修好。§11 条目 7 删除 inline apply，因此这里只有两种合法结局：
+ *
+ * 1. actionable plan（有 mutation 要提交）→ apply.arguments 恒为 {planRef, action}。
+ *    封存失败不再降级成内联：内联既超出 §4.4 的 16 KiB 预算（实测 320 KB），又绕过
+ *    plan-ledger 的防重放——一份没有 planRef 的 payload 可以被无限次提交，而 mode:"add"
+ *    的曲线补丁会因此叠加两次。失败必须是结构化错误，让调用方知道计划没有产出。
+ * 2. no-change plan（没有任何要提交的东西）→ apply 允许为 null。这不是降级：没有
+ *    mutation 就没有什么可封存，返回一个空的 planRef 才是编造。
+ *
+ * @param {object|null} envelope - buildApplyEnvelope 的返回值（no-change 时为 null）
+ * @param {string|string[]|null} planRef - 已封存的 artifactId；多调用计划按调用顺序传数组
+ * @param {string|null} expiresAt
+ * @returns {object|null}
+ */
+export function sealApplyEnvelope(envelope, planRef, expiresAt) {
+  // no-change：没有 actionable 内容，apply:null 是诚实答案（结局 2）。
+  if (!envelope?.arguments) return envelope ?? null;
+  // 单个 planRef 与 K 个（expression 的多次调用）走同一条路径：把它们统一成数组，
+  // 避免"一次调用"和"多次调用"各写一份替换逻辑——那正是内联兜底被抄五份的成因。
+  const refs = Array.isArray(planRef) ? planRef : [planRef];
+  const callCount = 1 + (envelope.additionalCalls?.length ?? 0);
+  // 每一次调用都必须有自己的 planRef：少一个就意味着那一次要么内联、要么静默消失。
+  if (
+    refs.length !== callCount ||
+    refs.some((ref) => typeof ref !== "string" || ref.length === 0) ||
+    new Set(refs).size !== refs.length ||
+    typeof expiresAt !== "string" ||
+    expiresAt.length === 0
+  ) {
+    throw planSealError();
+  }
+  return {
+    ...envelope,
+    arguments: { planRef: refs[0], action: "dry_run" },
+    expiresAt,
+    ...(envelope.additionalCalls
+      ? {
+          additionalCalls: envelope.additionalCalls.map((call, index) => ({
+            ...call,
+            arguments: { planRef: refs[index + 1], action: "dry_run" },
+          })),
+        }
+      : {}),
+  };
+}
+
+/**
+ * 封存失败的结构化错误。单独成函数，方便 planner 在 seal 抛错时复用同一个错误码，
+ * 而不是各自造一个近似的。
+ */
+export function planSealError(cause) {
+  const error = new Error(
+    "the plan could not be sealed into an artifact, so there is no planRef to hand back; " +
+      "plans are submitted by planRef only (the inline payload path was removed because it " +
+      "exceeds the response budget and bypasses replay protection). If the artifact quota is " +
+      "full, release old artifacts you already hold, then re-run the planner."
+  );
+  error.code = "PLAN_SEAL_FAILED";
+  if (cause?.message) error.details = { cause: cause.message };
+  return error;
 }

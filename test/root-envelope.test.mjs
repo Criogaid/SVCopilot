@@ -247,6 +247,13 @@ test("the contract field set is exactly the plan's fifteen", () => {
   }
   assert.equal(classifyRootField("status"), "contract");
   assert.equal(classifyRootField("contextId"), "legacy");
+  for (const removed of ["applyRequests", "patchRequest", "restructureRequest"]) {
+    assert.equal(
+      classifyRootField(removed),
+      "violation",
+      `${removed} must not return through the legacy allowlist`
+    );
+  }
   assert.equal(classifyRootField("brandNewField"), "violation");
 });
 

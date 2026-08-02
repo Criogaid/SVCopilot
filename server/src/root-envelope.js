@@ -117,9 +117,6 @@ export const LEGACY_ROOT_FIELDS = Object.freeze({
   handleOwnership: "sv_raw(run) -> data",
   timings: "全部服务：应当统一为契约字段 `timing`（单数）并只在 diagnostics 时返回",
   apply: "plan：交接信封 -> data.apply（§10.5 已如此规定）",
-  applyRequests: "plan：已弃用别名，B2 删除",
-  patchRequest: "plan：已弃用别名，B2 删除",
-  restructureRequest: "plan：已弃用别名，B2 删除",
   detail: "根级 detail 违反 §10.2.1 的固定层级；移入 data.detail 或 error.detail",
 });
 

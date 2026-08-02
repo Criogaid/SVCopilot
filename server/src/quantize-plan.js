@@ -3,7 +3,7 @@ import { artifactReference, planReference } from "./artifact-store.js";
 import { buildPlanArtifact } from "./plan-reference.js";
 
 import { MAX_PATCHES } from "./note-patch.js";
-import { buildApplyEnvelope } from "./plan-envelope.js";
+import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { unknownContextError } from "./snapshot.js";
@@ -12,8 +12,8 @@ import { unknownContextError } from "./snapshot.js";
 //
 // 关键契约：
 // - 纯内存只读：只读取 range context 的音符指纹与 meterMarks，不进 ExecutionCoordinator、
-//   绝不写宿主。真正落地由调用方把 patchRequest 交给现有 sv_patch_notes（expected
-//   前置条件防快照后漂移，冲突检查/Undo/读回/补偿全部复用）。
+//   绝不写宿主。真正落地由 apply 中的 PlanRef 交给现有 sv_patch_notes（expected
+//   前置条件封存在 Artifact 内，冲突检查/Undo/读回/补偿全部复用）。
 // - 确定性且不重排：同一 context + 同一请求 → 相同 planId；量化保持原音符顺序，两音符
 //   落同一格时后者保留原位（QUANTIZE_COLLISION），不自作主张挪半格。
 // - 不做 humanize：随机微时移与确定性规划器契约冲突，明确不提供。
@@ -384,7 +384,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
           patchCapPerCall: MAX_PATCHES,
           remainingChangedCount,
           workflow: [
-            "Commit the returned patchRequest (action dry_run first, then action commit).",
+            "Submit apply.arguments with action dry_run first, then the identical PlanRef with action commit.",
             "A successful commit invalidates this contextId, so re-run sv_snapshot_range over the same range for a fresh context.",
             "Re-run sv_quantize_notes with the same grid/strength/swing options against the fresh contextId and its current occurrence ordinal: already-quantized notes come back unchanged, so the next round plans exactly the remaining patches. The short-lived continuation identity verifies the target UUID before planning the next slice.",
             "Repeat until the response carries no continuation (or reports status no_change).",
@@ -394,7 +394,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   if (continuation) {
     warnings.push({
       code: "PLAN_EXCEEDS_PATCH_CAP",
-      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; patchRequest carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow continuation.workflow: commit, re-snapshot, re-quantize with identical options. Each round is its own transaction and Undo record.`,
+      message: `${patches.length} note patches exceed the ${MAX_PATCHES}-patch per-call cap; the sealed plan carries the first ${submittable.length} and ${remainingChangedCount} remain. Follow continuation.workflow: commit, re-snapshot, re-quantize with identical options. Each round is its own transaction and Undo record.`,
     });
   }
   const planId = `qnt_${canonicalHashHex({
@@ -418,7 +418,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
   }
   const checklist = [
     "Review perNote deltas; quantization is a deterministic grid snap, not a musical judgment (no humanize is provided).",
-    "Apply through the returned patchRequest (sv_patch_notes) with action dry_run first, then commit; expected onset/duration preconditions guard against post-snapshot drift.",
+    "Apply through apply.arguments (sv_patch_notes) with action dry_run first, then commit; sealed onset/duration preconditions guard against post-snapshot drift.",
   ];
   if (revertedCount > 0) {
     checklist.push(
@@ -461,20 +461,15 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
       planArtifactRef = planReference(planArtifact);
       planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
-      warnings.push({
-        code: "ARTIFACT_SEAL_FAILED",
-        message: `Failed to seal quantize plan artifact: ${error.message}`,
-      });
+      // 有要提交的 patch 却封不进 artifact：不降级成内联（§11 条目 7），如实失败。
+      throw planSealError(error);
     }
   }
 
   const applyEnvelope = buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
     sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
   });
-  if (planArtifactRef && applyEnvelope?.arguments) {
-    applyEnvelope.arguments = { planRef: planArtifactRef, action: "dry_run" };
-    applyEnvelope.expiresAt = planExpiresAt;
-  }
+  const sealedEnvelope = sealApplyEnvelope(applyEnvelope, planArtifactRef, planExpiresAt);
 
   return {
     ok: true,
@@ -520,8 +515,7 @@ function buildQuantizeResponse(loaded, input, planned, warnings, timings, artifa
       ...(item.onsetReverted ? { onsetReverted: true, revertReason: item.revertReason } : {}),
     })),
     perNoteTruncated: planned.length > cap,
-    apply: applyEnvelope,
-    ...(planArtifactRef ? {} : { patchRequest }),
+    apply: sealedEnvelope,
     ...(continuation ? { continuation } : {}),
     review: { requiresHumanReview: revertedCount > 0, requiresSharedTargetConfirmation, checklist },
     provenance: PROVENANCE,

@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { HarmonyPlanService } from "../server/src/harmony-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
+import {
+  createPlannerService,
+  sealedPlannerRequest as sealedRequest,
+} from "./helpers/planner-artifact-fixture.mjs";
 
 const Q = 705600000;
 
@@ -77,8 +81,8 @@ function createStoredContext(store, options = {}) {
   return { stored };
 }
 
-function createService(store) {
-  return new HarmonyPlanService({ store, now: () => 2000 });
+function createService(store, artifactStore = null) {
+  return createPlannerService(HarmonyPlanService, { store, artifactStore });
 }
 
 // C 大调音阶旋律：C4 D4 E4 F4 G4（全部调内）。
@@ -112,7 +116,7 @@ test("third_below maps diatonic scale degrees with an explicit key", async () =>
   assert.equal(result.summary.needsReview, 0);
   assert.equal(result.source.occurrence, 0);
   assert.equal(result.target.occurrence, 1);
-  const request = result.restructureRequest;
+  const request = sealedRequest(result);
   assert.equal(request.tool, "sv_restructure_notes");
   assert.equal(request.arguments.occurrence, 1);
   assert.equal(request.arguments.operations.length, 5);
@@ -197,7 +201,7 @@ test("register bounds trigger octave shifts and skip unreachable notes", async (
   assert.ok(shifted.every((item) => item.status === "skipped" && item.skipReason === "voice_crossing"));
   assert.ok(result.warnings.some((warning) => warning.code === "VOICE_CROSSING_AVOIDED"));
   assert.equal(result.summary.planned, 3);
-  assert.equal(result.restructureRequest.arguments.operations.length, 3);
+  assert.equal(sealedRequest(result).arguments.operations.length, 3);
 });
 
 test("register windows that cannot host the harmony skip with REGISTER_UNREACHABLE", async () => {
@@ -288,7 +292,7 @@ test("insert onsets are converted to the target's local coordinates", async () =
   assert.equal(result.perNote[1].skipReason, "before_target_offset");
   assert.ok(result.warnings.some((warning) => warning.code === "BEFORE_TARGET_OFFSET"));
   assert.deepEqual(
-    result.restructureRequest.arguments.operations.map((op) => op.note.onsetBlick),
+    sealedRequest(result).arguments.operations.map((op) => op.note.onsetBlick),
     [0, Q, 2 * Q]
   );
 });
@@ -313,7 +317,7 @@ test("existing identical target notes are skipped as already_applied; different 
   assert.equal(result.conflicts.length, 1);
   assert.equal(result.conflicts[0].existingPitch, 50);
   assert.ok(result.warnings.some((warning) => warning.code === "TARGET_NOTE_CONFLICT"));
-  assert.equal(result.restructureRequest.arguments.operations.length, 3);
+  assert.equal(sealedRequest(result).arguments.operations.length, 3);
 });
 
 test("same pitch and span with different lyrics is a target conflict, not already_applied", async () => {
@@ -347,7 +351,7 @@ test("occurrence pitch offsets are applied in sounding space and converted to ta
     targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
-  assert.equal(sourceResult.restructureRequest.arguments.operations[0].note.pitch, 69);
+  assert.equal(sealedRequest(sourceResult).arguments.operations[0].note.pitch, 69);
   assert.equal(sourceResult.perNote[0].harmonySoundingPitch, 69);
 
   const targetShifted = createStoredContext(store, {
@@ -359,7 +363,7 @@ test("occurrence pitch offsets are applied in sounding space and converted to ta
     targetOccurrence: 1,
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
-  assert.equal(targetResult.restructureRequest.arguments.operations[0].note.pitch, 45);
+  assert.equal(sealedRequest(targetResult).arguments.operations[0].note.pitch, 45);
   assert.equal(targetResult.perNote[0].harmonyPitch, 45);
   assert.equal(targetResult.perNote[0].harmonySoundingPitch, 57);
   assert.equal(targetResult.source.pitchOffsetSemitone, 0);
@@ -399,7 +403,7 @@ test("plans above the operation cap return the first 64 plus a continuation work
     harmony: { interval: "third_below", key: { tonic: "C", mode: "major" } },
   });
   assert.equal(result.summary.planned, count);
-  assert.equal(result.restructureRequest.arguments.operations.length, 64);
+  assert.equal(sealedRequest(result).arguments.operations.length, 64);
   assert.equal(result.continuation.reason, "OPERATION_CAP");
   assert.equal(result.continuation.remainingCount, 1);
   assert.ok(result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_OPERATION_CAP"));
@@ -435,7 +439,7 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
     targetOccurrence: 1,
     ...options,
   });
-  assert.equal(first.restructureRequest.arguments.operations.length, 64);
+  assert.equal(sealedRequest(first).arguments.operations.length, 64);
   assert.equal(first.continuation.remainingCount, 1);
 
   // 模拟提交：前 64 条和声已进目标组；重拍快照产生新 contextId。
@@ -456,7 +460,7 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
   });
   assert.ok(second.warnings.some((warning) => warning.code === "CONTINUATION_IDENTITY_VERIFIED"));
   assert.equal(second.summary.alreadyApplied, 64);
-  assert.equal(second.restructureRequest.arguments.operations.length, 1);
+  assert.equal(sealedRequest(second).arguments.operations.length, 1);
   assert.equal(second.continuation, undefined);
 
   store.delete(round2.stored.contextId);
@@ -542,7 +546,12 @@ test("identical requests produce identical planIds and perNote is capped at one 
   const first = await service.plan(request);
   const second = await service.plan(request);
   assert.equal(first.planId, second.planId);
-  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  // PlanRef 是一次封存租约的身份，每次规划都应不同；业务计划与 sealed mutation 才必须确定。
+  assert.notEqual(first.apply.arguments.planRef, second.apply.arguments.planRef);
+  assert.deepEqual(first.summary, second.summary);
+  assert.deepEqual(first.perNote, second.perNote);
+  assert.deepEqual(first.review, second.review);
+  assert.deepEqual(sealedRequest(first), sealedRequest(second));
   // 唯一形状（§10.6 规则 14）：perNote 恒定返回并按同一上限截断，调用方不再挑档。
   assert.equal(first.perNote.length, 5);
   assert.equal(first.summary.planned, 5);

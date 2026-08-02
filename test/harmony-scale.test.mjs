@@ -7,6 +7,10 @@ import {
   HarmonyPlanService,
 } from "../server/src/harmony-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
+import {
+  createPlannerService,
+  sealedPlannerRequest as sealedRequest,
+} from "./helpers/planner-artifact-fixture.mjs";
 
 const Q = 705600000;
 
@@ -58,8 +62,8 @@ function createStoredContext(store, { sourceNotes = [], targetNotes = [] } = {})
   return { stored };
 }
 
-function service(store) {
-  return new HarmonyPlanService({ store, now: () => 2000 });
+function service(store, artifactStore = null) {
+  return createPlannerService(HarmonyPlanService, { store, artifactStore });
 }
 
 const notesFromPitches = (pitches) =>

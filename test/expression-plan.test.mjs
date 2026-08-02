@@ -8,6 +8,11 @@ import {
 } from "../server/src/expression-plan.js";
 import { normalizeCurveInput, normalizeTarget } from "../server/src/parameter-curve.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
+import {
+  allSealedPlannerRequests as allSealedRequests,
+  createPlannerService,
+  sealedPlannerRequest as sealedRequest,
+} from "./helpers/planner-artifact-fixture.mjs";
 
 const Q = 705600000;
 
@@ -72,8 +77,8 @@ function createStoredContext(store, options = {}) {
   return { stored };
 }
 
-function createService(store) {
-  return new ExpressionPlanService({ store, now: () => 2000 });
+function createService(store, artifactStore = null) {
+  return createPlannerService(ExpressionPlanService, { store, artifactStore });
 }
 
 function approx(actual, expected, tolerance = 1e-6) {
@@ -86,8 +91,8 @@ function approx(actual, expected, tolerance = 1e-6) {
 // applyRequests 的每条 curve 必须能通过 parameter-curve 的真实入参归一化——
 // 这是"规划器产物可直接交给现有事务核"契约的可执行证明。
 function assertApplyRequestsWellFormed(result) {
-  assert.ok(Array.isArray(result.applyRequests) && result.applyRequests.length >= 1);
-  for (const request of result.applyRequests) {
+  assert.ok(result.apply?.arguments?.planRef);
+  for (const request of allSealedRequests(result)) {
     assert.equal(request.tool, "sv_patch_parameter_curves");
     assert.equal(request.arguments.action, "dry_run");
     assert.equal(request.arguments.atomic, true);
@@ -141,7 +146,7 @@ test("explicit scoop compiles to a guarded pitchDelta replace operation", async 
   assert.equal(operation.unit, "cents");
   assert.equal(operation.writeSurface, "automation");
   assert.equal(operation.mode, "replace");
-  const curve = result.applyRequests[0].arguments.curves[0];
+  const curve = sealedRequest(result, 0).arguments.curves[0];
   // 守卫点：onset 前 ε 处回基线 0，让 replace 与周围曲线只跨极小过渡。
   assert.equal(curve.points[0].value, 0);
   assert.ok(curve.points[0].blick < 2 * Q && curve.points[0].blick >= 0);
@@ -167,7 +172,7 @@ test("explicit fall ends at -depth with a trailing baseline guard", async () => 
     contextId: stored.contextId,
     gestures: [{ type: "fall", targets: [[0, 50]], lengthQuarter: 0.5 }],
   });
-  const points = result.applyRequests[0].arguments.curves[0].points;
+  const points = sealedRequest(result, 0).arguments.curves[0].points;
   approx(points[0].value, 0, 1e-9);
   approx(points[points.length - 2].value, -50);
   assert.equal(points[points.length - 2].blick, 2 * Q);
@@ -193,7 +198,7 @@ test("portamento bends symmetrically so perceived pitch stays continuous", async
       },
     ],
   });
-  const points = result.applyRequests[0].arguments.curves[0].points;
+  const points = sealedRequest(result, 0).arguments.curves[0].points;
   const beforeBoundary = points.find((point) => point.blick === Q - 1);
   const atBoundary = points.find((point) => point.blick === Q);
   approx(beforeBoundary.value, 100, 0.5);
@@ -245,7 +250,7 @@ test("vibrato renders a bounded sine with envelope and honest stacking warning",
   const operation = result.operations[0];
   assert.equal(operation.parameter, "pitchDelta");
   assert.ok(operation.pointCount > 20, `pointCount ${operation.pointCount}`);
-  const values = result.applyRequests[0].arguments.curves[0].points.map((point) => point.value);
+  const values = sealedRequest(result, 0).arguments.curves[0].points.map((point) => point.value);
   assert.ok(Math.max(...values.map(Math.abs)) <= 40 + 1e-9);
   assert.ok(Math.max(...values.map(Math.abs)) > 20, "sine should reach a meaningful depth");
   assert.ok(result.warnings.some((warning) => warning.code === "NATURAL_VIBRATO_UNOBSERVABLE"));
@@ -296,7 +301,7 @@ test("vibratoEnv shapes the envelope with baseline-1 guards and conflicts are re
   assert.equal(operation.parameter, "vibratoEnv");
   assert.equal(operation.unit, "x");
   assert.equal(operation.baselineValue, 1);
-  const points = result.applyRequests[0].arguments.curves[0].points;
+  const points = sealedRequest(result, 0).arguments.curves[0].points;
   assert.equal(points[0].value, 1); // onset 前守卫回基线 1
   assert.equal(points[1].value, 0); // 延迟段压平包络
   approx(points[points.length - 1].value, 1, 1e-9); // level 默认 1，音尾即基线
@@ -336,7 +341,7 @@ test("hairpin peaks at the requested position in the parameter's own unit", asyn
   assert.equal(operation.parameter, "loudness");
   assert.equal(operation.unit, "dB");
   approx(operation.stats.max, 3, 1e-6);
-  const peak = result.applyRequests[0].arguments.curves[0].points.find(
+  const peak = sealedRequest(result, 0).arguments.curves[0].points.find(
     (point) => point.blick === 2 * Q
   );
   approx(peak.value, 3, 1e-6);
@@ -357,7 +362,7 @@ test("overlapping gestures on one parameter merge additively into one operation"
   assert.equal(result.summary.operationCount, 1);
   assert.equal(result.operations[0].fromGestures.length, 2);
   assert.equal(result.summary.applyCallCount, 1);
-  const onsetPoint = result.applyRequests[0].arguments.curves[0].points.find(
+  const onsetPoint = sealedRequest(result, 0).arguments.curves[0].points.find(
     (point) => point.blick === 0
   );
   approx(onsetPoint.value, -30);
@@ -381,7 +386,7 @@ test("disjoint clusters of one parameter partition into sequential apply calls",
   assert.equal(result.summary.operationCount, 2);
   assert.equal(result.summary.applyCallCount, 2);
   assert.equal(result.summary.expectedUserUndoSteps, 2);
-  assert.equal(result.applyRequests.length, 2);
+  assert.equal(1 + (result.apply.additionalCalls?.length ?? 0), 2);
   assert.ok(result.review.checklist.some((item) => /2 sequential batch calls/.test(item)));
   assertApplyRequestsWellFormed(result);
 });
@@ -410,7 +415,7 @@ test("jpop intent derives deterministic per-phrase scoops with heuristic confide
   assert.equal(gesture.confidence.kind, "heuristic_score");
   assert.equal(gesture.confidence.calibrated, false);
   assert.equal(first.planId, second.planId); // 确定性：同数据同请求 → 同 planId
-  assert.deepEqual(first.applyRequests, second.applyRequests);
+  assert.deepEqual(allSealedRequests(first), allSealedRequests(second));
 });
 
 test("intent-derived gestures skip every non-melodic event with structured warnings", async () => {
@@ -529,7 +534,7 @@ test("an all-excluded intent range returns no_change with warnings instead of an
   assert.equal(result.summary.applyCallCount, 0);
   assert.equal(result.summary.expectedUserUndoSteps, 0);
   assert.equal(result.apply, null);
-  assert.deepEqual(result.applyRequests, []);
+  assert.equal(result.apply, null);
   assert.equal(
     result.warnings.filter(
       (warning) => warning.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
@@ -628,7 +633,7 @@ test("plan attaches referenced note fingerprints to each apply target (F1 drift 
       },
     ],
   });
-  const target = result.applyRequests[0].arguments.target;
+  const target = sealedRequest(result, 0).arguments.target;
   // R2：快照时 reference 偏移被一并锁进 target，setTimeOffset 移动在 apply 预检即失败。
   assert.equal(target.expectedTimeOffsetBlick, 2 * Q);
   assert.ok(Array.isArray(target.expectedNotes));
@@ -667,7 +672,7 @@ test("constraint clamping bounds values and reports honestly", async () => {
     constraints: { maxAbsPitchDeltaCents: 100 },
     gestures: [{ type: "scoop", targets: [[0, 300]] }],
   });
-  const values = result.applyRequests[0].arguments.curves[0].points.map((point) => point.value);
+  const values = sealedRequest(result, 0).arguments.curves[0].points.map((point) => point.value);
   assert.equal(Math.min(...values), -100);
   assert.ok(result.operations[0].clampedCount > 0);
   assert.ok(result.warnings.some((warning) => warning.code === "CONSTRAINT_CLAMPED"));
@@ -781,7 +786,7 @@ test("a small plan keeps its gestures and operations inline", async () => {
   assert.ok(result.gestures.length > 0);
   assert.ok(result.operations.length > 0);
   assert.ok(result.summary);
-  assert.ok(result.applyRequests[0].arguments.curves[0].points.length > 0);
+  assert.ok(sealedRequest(result, 0).arguments.curves[0].points.length > 0);
   assert.ok(result.review.checklist.length > 0);
   assert.ok(!result.warnings.some((warning) => warning.code === "RESPONSE_BUDGET_APPLIED"));
 });
@@ -844,13 +849,26 @@ test("an over-budget plan moves gestures and operations to detailRef, never drop
   assert.ok(trimmed.apply);
   assert.ok(trimmed.review.checklist.length > 0);
 
-  // 没有 Artifact 可指向时宁可超预算：裁剪必须是"移走"，绝不能变成静默删证据。
+  // actionable Plan 已成功封存，但可选明细封存失败时，宁可超预算也不能静默删证据。
+  const detailFailureStore = new ArtifactStore({ now: () => 2000 });
+  const sealArtifact = detailFailureStore.seal.bind(detailFailureStore);
+  detailFailureStore.seal = (input) => {
+    if (input.kind === "planner-detail") throw new Error("injected detail seal failure");
+    return sealArtifact(input);
+  };
   const unsealed = createStore();
   const unsealedContext = createStoredContext(unsealed, { notes });
-  const kept = await createService(unsealed).plan(request(unsealedContext.stored.contextId));
+  const kept = await new ExpressionPlanService({
+    store: unsealed,
+    now: () => 2000,
+    artifactStore: detailFailureStore,
+    sessionId: "sess_budget_detail_failure",
+  }).plan(request(unsealedContext.stored.contextId));
   assert.equal(kept.detailRef, undefined);
   assert.ok(kept.gestures.length > 0, "no detailRef means the detail must stay inline");
   assert.ok(kept.operations.length > 0);
+  assert.ok(kept.apply.arguments.planRef);
+  assert.ok(kept.warnings.some((warning) => warning.code === "ARTIFACT_SEAL_FAILED"));
 });
 
 test("shared targets surface in review and default constraints are exposed", async () => {

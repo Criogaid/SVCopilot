@@ -4,7 +4,7 @@ import { buildPlanArtifact } from "./plan-reference.js";
 
 import { MAX_OPERATIONS } from "./note-structure.js";
 import { analyzeKey } from "./phrase-analysis.js";
-import { buildApplyEnvelope } from "./plan-envelope.js";
+import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { ServiceTiming } from "./service-timing.js";
 import { isBreathEventLyrics } from "./vocal-event-semantics.js";
@@ -687,20 +687,14 @@ function buildHarmonyResponse(
       planRef = planReference(planArtifact);
       planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
-      warnings.push({
-        code: "ARTIFACT_SEAL_FAILED",
-        message: `Failed to seal harmony plan artifact: ${error.message}`,
-      });
+      // 有 actionable plan 却封不进 artifact：不降级成内联（§11 条目 7），如实失败。
+      throw planSealError(error);
     }
   }
   const apply = buildApplyEnvelope(restructureRequest ? [restructureRequest] : null, {
     sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
   });
-  if (planRef && apply?.arguments) {
-    apply.arguments = { planRef, action: "dry_run" };
-    // 租期是关于这次交接的事实，挂在信封上；planRef 只承载身份（§4.3）。
-    apply.expiresAt = planExpiresAt;
-  }
+  const sealedEnvelope = sealApplyEnvelope(apply, planRef, planExpiresAt);
 
   return {
     ok: true,
@@ -757,8 +751,7 @@ function buildHarmonyResponse(
     })),
     perNoteTruncated: planned.items.length > cap,
     conflicts: planned.conflicts.slice(0, cap),
-    apply,
-    ...(!planRef ? { restructureRequest } : {}),
+    apply: sealedEnvelope,
     ...(continuation ? { continuation } : {}),
     review: {
       requiresHumanAudition: true,

@@ -251,7 +251,7 @@ test("breath targets default to warn-and-skip with a zero-write no-change plan",
 
   assert.equal(result.status, "no_change");
   assert.equal(result.apply, null);
-  assert.deepEqual(result.applyRequests, []);
+  assert.equal(Object.hasOwn(result, "applyRequests"), false);
   assert.equal(result.summary.requestedGestureCount, 1);
   assert.equal(result.summary.gestureCount, 0);
   assert.equal(result.summary.skippedGestureCount, 1);

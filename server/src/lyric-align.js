@@ -4,7 +4,7 @@ import { buildPlanArtifact } from "./plan-reference.js";
 
 import { ServiceTiming } from "./service-timing.js";
 import { MAX_PATCHES } from "./note-patch.js";
-import { buildApplyEnvelope } from "./plan-envelope.js";
+import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import {
   analyzeVocalEventSequence,
   classifyVocalEvent,
@@ -689,10 +689,8 @@ function buildAlignResponse(
       planRef = planReference(planArtifact);
       planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
-      warnings.push({
-        code: "ARTIFACT_SEAL_FAILED",
-        message: `Failed to seal lyric alignment plan artifact: ${error.message}`,
-      });
+      // 有 actionable plan 却封不进 artifact：不降级成内联（§11 条目 7），如实失败。
+      throw planSealError(error);
     }
   }
   let alignmentDetailRef = null;
@@ -726,11 +724,7 @@ function buildAlignResponse(
   const apply = buildApplyEnvelope(patchRequest ? [patchRequest] : null, {
     sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
   });
-  if (planRef && apply?.arguments) {
-    apply.arguments = { planRef, action: "dry_run" };
-    // 租期是关于这次交接的事实，挂在信封上；planRef 只承载身份（§4.3）。
-    apply.expiresAt = planExpiresAt;
-  }
+  const sealedEnvelope = sealApplyEnvelope(apply, planRef, planExpiresAt);
 
   return {
     ok: true,
@@ -768,8 +762,7 @@ function buildAlignResponse(
     })),
     perNote: mapped.perNote,
     alignment: formatAlignment(mapped, alignmentDetailRef),
-    apply,
-    ...(!planRef ? { patchRequest } : {}),
+    apply: sealedEnvelope,
     ...(continuation ? { continuation } : {}),
     review: { requiresHumanReview: needsReviewCount > 0, requiresSharedTargetConfirmation, checklist },
     provenance: PROVENANCE,

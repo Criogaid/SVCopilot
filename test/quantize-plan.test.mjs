@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { QuantizePlanService } from "../server/src/quantize-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
+import {
+  createPlannerService,
+  sealedPlannerRequest as sealedRequest,
+} from "./helpers/planner-artifact-fixture.mjs";
 
 const Q = 705600000;
 const BAR_4_4 = 4 * Q;
@@ -63,8 +67,8 @@ function createStoredContext(store, options = {}) {
   return { stored };
 }
 
-function createService(store) {
-  return new QuantizePlanService({ store, now: () => 2000 });
+function createService(store, artifactStore = null) {
+  return createPlannerService(QuantizePlanService, { store, artifactStore });
 }
 
 test("full-strength 1/8 quantization snaps offsets and emits expected preconditions", async () => {
@@ -90,7 +94,7 @@ test("full-strength 1/8 quantization snaps offsets and emits expected preconditi
     result.perNote.map((item) => item.plannedOnsetBlick),
     [0, Q, 2.5 * Q, 3 * Q]
   );
-  const patch = result.patchRequest;
+  const patch = sealedRequest(result);
   assert.equal(patch.tool, "sv_patch_notes");
   assert.equal(patch.arguments.contextId, stored.contextId);
   assert.equal(patch.arguments.occurrence, 0);
@@ -263,12 +267,12 @@ test("set.onsetBlick is written in group-local coordinates when the occurrence h
   });
   assert.equal(result.perNote[0].originalOnsetBlick, offset + Q / 8);
   assert.equal(result.perNote[0].plannedOnsetBlick, offset);
-  const patch = result.patchRequest.arguments.patches[0];
+  const patch = sealedRequest(result).arguments.patches[0];
   assert.deepEqual(patch.expected, { onsetBlick: Q / 8, durationBlick: Q });
   assert.deepEqual(patch.set, { onsetBlick: 0 });
 });
 
-test("already-quantized ranges report no_change without a patchRequest", async () => {
+test("already-quantized ranges report no_change without an actionable apply envelope", async () => {
   const store = createStore();
   const { stored } = createStoredContext(store, {
     notes: [
@@ -281,7 +285,7 @@ test("already-quantized ranges report no_change without a patchRequest", async (
     grid: { division: "1/4" },
   });
   assert.equal(result.status, "no_change");
-  assert.equal(result.patchRequest, null);
+  assert.equal(result.apply, null);
   assert.equal(result.continuation, undefined);
 });
 
@@ -298,7 +302,7 @@ test("plans above the patch cap return the first 200 plus a continuation workflo
     grid: { division: "1/4" },
   });
   assert.equal(result.summary.changedCount, count);
-  assert.equal(result.patchRequest.arguments.patches.length, 200);
+  assert.equal(sealedRequest(result).arguments.patches.length, 200);
   assert.equal(result.continuation.reason, "PATCH_CAP");
   assert.equal(result.continuation.remainingChangedCount, 1);
   assert.ok(result.warnings.some((warning) => warning.code === "PLAN_EXCEEDS_PATCH_CAP"));
@@ -321,7 +325,7 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
     occurrence: 0,
     ...options,
   });
-  assert.equal(first.patchRequest.arguments.patches.length, 200);
+  assert.equal(sealedRequest(first).arguments.patches.length, 200);
   assert.equal(first.continuation.remainingChangedCount, 1);
 
   // 模拟提交：前 200 项已应用，context 失效，重拍快照产生新 contextId。
@@ -334,10 +338,10 @@ test("the continuation loop converges across simulated commit/re-snapshot rounds
     ...options,
   });
   assert.ok(second.warnings.some((warning) => warning.code === "CONTINUATION_IDENTITY_VERIFIED"));
-  assert.equal(second.patchRequest.arguments.patches.length, 1);
+  assert.equal(sealedRequest(second).arguments.patches.length, 1);
   // 续轮 patch 落在新 occurrence 的组内 index 上（预烤批次不可能提前知道）。
   assert.ok(
-    Number.isSafeInteger(second.patchRequest.arguments.patches[0].note)
+    Number.isSafeInteger(sealedRequest(second).arguments.patches[0].note)
   );
   assert.equal(second.continuation, undefined);
 
@@ -401,7 +405,7 @@ test("notes select a subset and perNote is capped at one size", async () => {
     grid: { division: "1/4" },
   });
   assert.equal(subset.summary.noteCount, 2);
-  assert.equal(subset.patchRequest.arguments.patches.length, 2);
+  assert.equal(sealedRequest(subset).arguments.patches.length, 2);
 
   // 唯一形状：perNote 恒定返回、按 MAX_LIST_ITEMS 截断并给出截断警告；
   // summary 始终覆盖全部音符，因此截断不会让计数失真。

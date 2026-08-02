@@ -2,7 +2,7 @@ import { canonicalHashHex } from "./canonical-json.js";
 import { planReference } from "./artifact-store.js";
 import { buildPlanArtifact } from "./plan-reference.js";
 import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
-import { buildApplyEnvelope } from "./plan-envelope.js";
+import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import { ServiceTiming } from "./service-timing.js";
 import { analyzeVocalEventSequence } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
@@ -768,22 +768,15 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
       planArtifactRef = planReference(planArtifact);
       planExpiresAt = planArtifact.expiresAt;
     } catch (error) {
-      warnings.push({
-        code: "ARTIFACT_SEAL_FAILED",
-        message: `Failed to seal pitch gesture plan artifact: ${error.message}`,
-      });
+      // 有 actionable plan 却封不进 artifact：不降级成内联（§11 条目 7），如实失败。
+      throw planSealError(error);
     }
   }
 
   const applyEnvelope = buildApplyEnvelope(hasOperations ? applyRequests : null, {
     sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
   });
-  // planArtifactRef 存在时，apply.arguments 使用 planRef 而不是内联完整请求。
-  if (planArtifactRef && applyEnvelope?.arguments) {
-    applyEnvelope.arguments = { planRef: planArtifactRef, action: "dry_run" };
-    // 租期是关于这次交接的事实，挂在信封上；planRef 只承载身份（§4.3）。
-    applyEnvelope.expiresAt = planExpiresAt;
-  }
+  const sealedEnvelope = sealApplyEnvelope(applyEnvelope, planArtifactRef, planExpiresAt);
 
   return {
     ok: true,
@@ -813,8 +806,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
     },
     gestures: publicGestures,
     operations: operationsMeta,
-    apply: applyEnvelope,
-    ...(planArtifactRef ? {} : { applyRequests }),
+    apply: sealedEnvelope,
     review: {
       requiresHumanAudition: true,
       requiresSharedTargetConfirmation,
