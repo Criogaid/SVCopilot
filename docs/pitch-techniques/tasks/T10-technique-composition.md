@@ -1,6 +1,6 @@
 # T10 — 确定性技法组合与约束
 
-- 状态：`blocked`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F5b、F6、§9.3、§17 提交 10
 - 依赖：T09
 - 解锁：T11
@@ -25,3 +25,11 @@
 ## 完成条件
 
 组合器产生唯一、可验证、可交给 T11 编译的贡献曲线。
+
+## 完成记录
+
+- 证据：[T10-technique-composition.md](../evidence/T10-technique-composition.md)
+- 提交：本任务的独立提交见 Git history。
+- 宿主：未接触；零 host call、零 setter、零 Undo。
+- 序列化：未新增公开 schema、MCP 或 Artifact surface，公开字节变化为 0；dense 结果保持内部，
+  后续 planner 负责 Artifact 分页投影。
