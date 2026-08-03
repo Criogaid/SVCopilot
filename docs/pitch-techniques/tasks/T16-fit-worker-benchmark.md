@@ -1,6 +1,6 @@
 # T16 — FitWorker Benchmark 与选型
 
-- 状态：`blocked`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F8、§11、§17 提交 16
 - 依赖：T01 corpus；T05–T07 前向模型
 - 解锁：T17
@@ -25,3 +25,14 @@
 ## 完成条件
 
 形成可审计的选型结论，生产依赖与 NOTICE 更新范围明确。
+
+## 完成记录
+
+- 证据：[T16-fit-worker-benchmark.md](../evidence/T16-fit-worker-benchmark.md) 与
+  [machine-readable report](../evidence/T16-fit-worker-benchmark.json)。
+- 提交：本任务的独立提交见 Git history。
+- 选型：`node-bounded-richards`；它在固定 corpus、seed、20 次预热和同一协议下通过全部 F8/§11
+  门禁，且未增加生产运行时依赖或 NOTICE 条目。
+- 生产边界：SciPy adapter 仅为 benchmark 对照，未加入 `server/package.json`；Rust/WASM 没有已固定的
+  实现或可分发构件，未被 benchmark。T16 不新增 MCP surface 或 host/PIPE 写入路径。
+- 宿主：未接触；零 host call、零 setter、零 Undo。T17 仍被 T08/H1 阻塞，不能据此开始。

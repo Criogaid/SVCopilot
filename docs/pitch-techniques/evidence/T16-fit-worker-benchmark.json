@@ -1,0 +1,317 @@
+{
+  "kind": "svcopilot-fit-worker-benchmark",
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "corpus": {
+    "hash": "sha256_8a214e57d33bac9ed6e94235880ca857258a2944b92990160387efdeb70bc484",
+    "cleanCaseIds": [
+      "richards-upward-symmetric-clean",
+      "richards-downward-strong-asymmetry-clean"
+    ],
+    "noisyCaseIds": [
+      "richards-upward-symmetric-noisy_null",
+      "richards-downward-strong-asymmetry-noisy_null"
+    ],
+    "degenerateCaseIds": [
+      "richards-upward-symmetric-clean-all-null",
+      "richards-downward-strong-asymmetry-clean-all-null"
+    ]
+  },
+  "configuration": {
+    "warmupRuns": 20,
+    "measuredRuns": 20,
+    "phraseFits": 12,
+    "gates": {
+      "minimumCleanRecoveryRate": 0.95,
+      "maximumCleanTruthRmseCents": 0.000001,
+      "maximumCleanNormalizedParameterError": 0.0001,
+      "minimumNoisyRecoveryRate": 0.95,
+      "maximumNoisyTruthRmseCents": 2,
+      "maximumNoisyNormalizedParameterError": 0.05,
+      "maximumSingleFitP95Ms": 100,
+      "maximumPhraseFitP95Ms": 1500
+    }
+  },
+  "candidates": [
+    {
+      "id": "node-bounded-richards",
+      "engine": {
+        "name": "node-bounded-richards",
+        "version": "1"
+      },
+      "packaging": {
+        "eligible": true,
+        "status": "existing_node_runtime",
+        "addedRuntimeDependencies": 0,
+        "windowsMacosInstall": "inherits_existing_node_package"
+      },
+      "dependencyFootprint": {
+        "addedRuntimePackages": 0,
+        "addedRuntimeBytes": 0,
+        "status": "no_new_runtime_dependency"
+      },
+      "license": {
+        "eligible": true,
+        "status": "no_new_third_party_dependency"
+      },
+      "crashIsolation": {
+        "eligible": true,
+        "status": "not_applicable_in_process"
+      },
+      "quality": {
+        "clean": [
+          {
+            "id": "richards-upward-symmetric-clean",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 4.050541714742606e-13,
+            "canonicalForwardMaxDeviationCents": 9.094947017729282e-13,
+            "normalizedParameterError": 2.7328566760003855e-16
+          },
+          {
+            "id": "richards-downward-strong-asymmetry-clean",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 3.507872024055678e-13,
+            "canonicalForwardMaxDeviationCents": 9.094947017729282e-13,
+            "normalizedParameterError": 4.654616610023148e-16
+          }
+        ],
+        "noisy": [
+          {
+            "id": "richards-upward-symmetric-noisy_null",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 0.054657854610242355,
+            "canonicalForwardMaxDeviationCents": 0.16641449308099254,
+            "normalizedParameterError": 0.0004936151070393744
+          },
+          {
+            "id": "richards-downward-strong-asymmetry-noisy_null",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 0.02984710461725516,
+            "canonicalForwardMaxDeviationCents": 0.13832056536102755,
+            "normalizedParameterError": 0.00044314102876402613
+          }
+        ],
+        "degenerate": [
+          {
+            "id": "richards-upward-symmetric-clean-all-null",
+            "termination": "rejected",
+            "accepted": false,
+            "truthRmseCents": null,
+            "canonicalForwardMaxDeviationCents": null,
+            "normalizedParameterError": null
+          },
+          {
+            "id": "richards-downward-strong-asymmetry-clean-all-null",
+            "termination": "rejected",
+            "accepted": false,
+            "truthRmseCents": null,
+            "canonicalForwardMaxDeviationCents": null,
+            "normalizedParameterError": null
+          }
+        ],
+        "cleanRecoveryRate": 1,
+        "noisyRecoveryRate": 1,
+        "degenerateRejectionRate": 1
+      },
+      "determinism": {
+        "firstHash": "sha256_138e0cc98792508c4b73e2ff39268d22409ba2ce7b90759ef8691382858fbff5",
+        "secondHash": "sha256_138e0cc98792508c4b73e2ff39268d22409ba2ce7b90759ef8691382858fbff5",
+        "eligible": true
+      },
+      "timeoutRecovery": {
+        "eligible": true,
+        "timedOutTermination": "timeout",
+        "recoveredTermination": "converged"
+      },
+      "performance": {
+        "startupCostMs": 0,
+        "singleFit": {
+          "runs": 20,
+          "medianMs": 22.06510000000003,
+          "p95Ms": 22.841699999999946
+        },
+        "phraseFit": {
+          "runs": 20,
+          "medianMs": 245.99340000000007,
+          "p95Ms": 261.8926999999999
+        }
+      },
+      "gates": {
+        "canonicalForwardParity": true,
+        "cleanRecovery": true,
+        "noisyNullRecovery": true,
+        "degenerateRejection": true,
+        "deterministicReplay": true,
+        "singleFitP95": true,
+        "phraseFitP95": true,
+        "timeoutRecovery": true,
+        "crashIsolation": true,
+        "packaging": true,
+        "license": true,
+        "eligible": true
+      }
+    },
+    {
+      "id": "scipy-least-squares",
+      "engine": {
+        "name": "scipy-least-squares",
+        "version": "1.16.1"
+      },
+      "packaging": {
+        "eligible": false,
+        "status": "benchmark_only_not_packaged",
+        "addedRuntimeDependencies": "SciPy runtime not declared by server/package.json",
+        "windowsMacosInstall": "not_automated"
+      },
+      "dependencyFootprint": {
+        "addedRuntimePackages": 2,
+        "addedRuntimeBytes": 153047221,
+        "localPackageBytes": {
+          "numpy": 32833850,
+          "scipy": 120213371
+        },
+        "status": "local_benchmark_environment_only"
+      },
+      "license": {
+        "eligible": false,
+        "status": "benchmark_only_notice_not_added"
+      },
+      "crashIsolation": {
+        "eligible": true,
+        "status": "subprocess"
+      },
+      "quality": {
+        "clean": [
+          {
+            "id": "richards-upward-symmetric-clean",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 5.787693556736816e-13,
+            "canonicalForwardMaxDeviationCents": 1.8189894035458565e-12,
+            "normalizedParameterError": 5.465713352000771e-16
+          },
+          {
+            "id": "richards-downward-strong-asymmetry-clean",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 4.452526236602604e-13,
+            "canonicalForwardMaxDeviationCents": 1.8189894035458565e-12,
+            "normalizedParameterError": 3.188332788667116e-16
+          }
+        ],
+        "noisy": [
+          {
+            "id": "richards-upward-symmetric-noisy_null",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 0.054657773802016085,
+            "canonicalForwardMaxDeviationCents": 0.16641427100057626,
+            "normalizedParameterError": 0.0004936136723117102
+          },
+          {
+            "id": "richards-downward-strong-asymmetry-noisy_null",
+            "termination": "converged",
+            "accepted": true,
+            "truthRmseCents": 0.029846965359732004,
+            "canonicalForwardMaxDeviationCents": 0.13831991583538183,
+            "normalizedParameterError": 0.00044313620910976104
+          }
+        ],
+        "degenerate": [
+          {
+            "id": "richards-upward-symmetric-clean-all-null",
+            "termination": "rejected",
+            "accepted": false,
+            "truthRmseCents": null,
+            "canonicalForwardMaxDeviationCents": null,
+            "normalizedParameterError": null
+          },
+          {
+            "id": "richards-downward-strong-asymmetry-clean-all-null",
+            "termination": "rejected",
+            "accepted": false,
+            "truthRmseCents": null,
+            "canonicalForwardMaxDeviationCents": null,
+            "normalizedParameterError": null
+          }
+        ],
+        "cleanRecoveryRate": 1,
+        "noisyRecoveryRate": 1,
+        "degenerateRejectionRate": 1
+      },
+      "determinism": {
+        "firstHash": "sha256_7cc1864f995d11ea68dd7803cf49e768499f5dfe99e1fc80fd61185f9dfb7c66",
+        "secondHash": "sha256_7cc1864f995d11ea68dd7803cf49e768499f5dfe99e1fc80fd61185f9dfb7c66",
+        "eligible": true
+      },
+      "timeoutRecovery": {
+        "eligible": false,
+        "status": "not_selected_for_timeout_packaging"
+      },
+      "performance": {
+        "startupCostMs": 587.8570999999993,
+        "singleFit": {
+          "runs": 20,
+          "medianMs": 137.60540000000037,
+          "p95Ms": 143.78540000000066
+        },
+        "phraseFit": {
+          "runs": 20,
+          "medianMs": 1563.9314999999988,
+          "p95Ms": 1691.4429999999993
+        }
+      },
+      "gates": {
+        "canonicalForwardParity": true,
+        "cleanRecovery": true,
+        "noisyNullRecovery": true,
+        "degenerateRejection": true,
+        "deterministicReplay": true,
+        "singleFitP95": false,
+        "phraseFitP95": false,
+        "timeoutRecovery": false,
+        "crashIsolation": true,
+        "packaging": false,
+        "license": false,
+        "eligible": false
+      }
+    }
+  ],
+  "selection": {
+    "status": "selected",
+    "selectedCandidateId": "node-bounded-richards",
+    "reason": "Node meets every fixed P4 gate without adding a runtime dependency"
+  },
+  "environment": {
+    "node": "v24.16.0",
+    "platform": "win32",
+    "arch": "x64",
+    "python": {
+      "executable": "python",
+      "version": "3.12.6",
+      "scipyVersion": "1.16.1"
+    },
+    "hardware": {
+      "cpuModel": "12th Gen Intel(R) Core(TM) i9-12900KS",
+      "logicalCores": 24,
+      "totalMemoryBytes": 68472627200
+    }
+  },
+  "excludedCandidates": [
+    {
+      "id": "rust-or-wasm",
+      "status": "not_benchmarked",
+      "reason": "no pinned implementation or distributable artifact exists in this repository"
+    }
+  ],
+  "artifact": {
+    "kind": "fit-worker-benchmark",
+    "schemaVersion": "1",
+    "contentHash": "sha256_166734bfbcbcfd4c219b0bd4baba5dce41cbd3dbb09b878a329b704457aea0a1",
+    "totalBytes": 6937
+  }
+}
