@@ -1,6 +1,6 @@
 # T09 — TechniqueIR 与 Canonicalization
 
-- 状态：`blocked`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F5、F5a–F5c、F9、§8、§17 提交 9
 - 依赖：T05、T06、T07
 - 解锁：T10、T11
@@ -25,3 +25,11 @@
 ## 完成条件
 
 T10/T11 只能消费规范化且冻结的 IR，不存在旁路对象形状。
+
+## 完成记录
+
+- 证据：[T09-technique-ir.md](../evidence/T09-technique-ir.md)
+- 提交：本任务的独立提交见 Git history。
+- 宿主：未接触；零 host call、零 setter、零 Undo。
+- 序列化：未新增公开 schema、MCP 或 Artifact surface，字节变化为 0；文档 F5 形状的
+  canonical IR 为 1,200 UTF-8 bytes，低于 8 KiB inline budget。
