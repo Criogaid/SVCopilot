@@ -1,6 +1,6 @@
 # T05 — Richards Transition 模型
 
-- 状态：`ready`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F1、F1b、§8、§17 提交 5
 - 依赖：T01 corpus
 - 解锁：T09
@@ -25,3 +25,10 @@
 ## 完成条件
 
 模型可以作为 T09 的单一 transition primitive，且误差与来源分类可追溯。
+
+## 完成记录
+
+- 证据：[T05-richards-model.md](../evidence/T05-richards-model.md)
+- 提交：本任务的独立提交见 Git history。
+- 宿主：未接触；零 host call、零 setter、零 Undo。
+- 序列化：未新增公开 schema、MCP 或 Artifact surface，字节变化为 0。
