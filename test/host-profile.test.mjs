@@ -3,17 +3,60 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  compileReadOnlyHostProfile,
+  compileHostBehaviorProfile,
   computedPitchScenarioFromProfile,
   diffHostBehaviorProfiles,
   validateHostBehaviorProfile,
 } from "../tools/lib/host-behavior-profile.mjs";
+import { blickAtSeconds, secondsAtBlick } from "../server/src/musical-time.js";
+import {
+  createTimeAxisProbePlan,
+  evaluateTimeAxisProbe,
+} from "../tools/lib/time-axis-evidence.mjs";
 import { createPitchHostModel } from "./helpers/pitch-host.mjs";
 
 const FIXTURE_URL = new URL(
-  "./fixtures/host-profiles/synthv-2.2.1-win32-readonly-v1.json",
+  "./fixtures/host-profiles/synthv-2.2.1-win32-v2.json",
   import.meta.url
 );
+
+function timeAxisReport(scenario, tempoMarks, shiftSeconds = 0) {
+  const plan = createTimeAxisProbePlan({
+    scenario,
+    quarterBlick: 1000,
+    durationBlick: 240000,
+    tempoMarks,
+  });
+  return evaluateTimeAxisProbe({
+    scenario,
+    quarterBlick: plan.quarterBlick,
+    durationBlick: plan.durationBlick,
+    tempoMarks: plan.tempoMarks,
+    samples: plan.positions.map((blick) => {
+      const hostSeconds = secondsAtBlick(plan.tempoMarks, plan.quarterBlick, blick) + shiftSeconds;
+      return {
+        blick,
+        hostSeconds,
+        hostBlickFromSeconds: blickAtSeconds(plan.tempoMarks, plan.quarterBlick, hostSeconds),
+      };
+    }),
+  });
+}
+
+function completeTimeAxisReports(shiftSeconds = 0) {
+  return [
+    timeAxisReport("constant", [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }], shiftSeconds),
+    timeAxisReport("tempo_step", [
+      { positionBlick: 0, positionSeconds: 0, bpm: 120 },
+      { positionBlick: 120000, positionSeconds: 60, bpm: 90 },
+    ], shiftSeconds),
+    timeAxisReport("dense_tempo", [
+      { positionBlick: 0, positionSeconds: 0, bpm: 120 },
+      { positionBlick: 60000, positionSeconds: 30, bpm: 100 },
+      { positionBlick: 120000, positionSeconds: 66, bpm: 140 },
+    ], shiftSeconds),
+  ];
+}
 
 function syntheticProbeEvidence() {
   const sensitiveUuid = "secret-target-uuid";
@@ -113,7 +156,7 @@ async function loadFixture() {
 }
 
 test("read-only probe evidence compiles into a strict de-identified profile", () => {
-  const profile = compileReadOnlyHostProfile({
+  const profile = compileHostBehaviorProfile({
     ...syntheticProbeEvidence(),
     capturedAt: "2026-07-28T00:00:00.000Z",
   });
@@ -125,6 +168,11 @@ test("read-only probe evidence compiles into a strict de-identified profile", ()
   assert.equal(profile.semantics["computedPitch.coordinateSpace"].status, "unknown");
   assert.equal(profile.semantics["computedPitch.pendingRepresentation"].value, "requested_length_null_array");
   assert.equal(profile.semantics["pitchControl.clone.deepPoints"].status, "not_observable");
+  assert.equal(profile.semantics["timeAxis.nodeParityMaxDeviationSeconds"].status, "unknown");
+  assert.equal(
+    profile.semantics["automation.interpolationSetterAvailability"].value,
+    "unavailable"
+  );
 
   const serialized = JSON.stringify(profile);
   for (const secret of [
@@ -142,11 +190,50 @@ test("read-only probe evidence compiles into a strict de-identified profile", ()
   }
 });
 
+test("v2 profile binds full replayable TimeAxis evidence to a terminal H1 fact", () => {
+  const profile = compileHostBehaviorProfile({
+    ...syntheticProbeEvidence(),
+    timeAxisReports: completeTimeAxisReports(),
+    capturedAt: "2026-08-03T00:00:00.000Z",
+  });
+  const parity = profile.semantics["timeAxis.nodeParityMaxDeviationSeconds"];
+  assert.equal(parity.status, "confirmed");
+  assert.equal(parity.value, 0);
+  assert.deepEqual(parity.evidenceIds, ["EV-TIME-AXIS-H1-1"]);
+  assert.equal(profile.semantics["timeAxis.tempoRampSupported"].status, "unknown");
+  const evidence = profile.evidence.find((item) => item.id === "EV-TIME-AXIS-H1-1");
+  assert.equal(evidence.timeAxis.coverage.completeRequiredScenarios, true);
+  assert.equal(evidence.timeAxis.t03Disposition, "not_required");
+});
+
+test("v2 profiles preserve unknown, partial, confirmed, and contradicted H1 states", async () => {
+  const unobserved = compileHostBehaviorProfile({
+    ...syntheticProbeEvidence(),
+    capturedAt: "2026-08-03T00:00:00.000Z",
+  });
+  const partial = await loadFixture();
+  const confirmed = compileHostBehaviorProfile({
+    ...syntheticProbeEvidence(),
+    timeAxisReports: completeTimeAxisReports(),
+    capturedAt: "2026-08-03T00:00:00.000Z",
+  });
+  const contradicted = compileHostBehaviorProfile({
+    ...syntheticProbeEvidence(),
+    timeAxisReports: completeTimeAxisReports(1e-4),
+    capturedAt: "2026-08-03T00:00:00.000Z",
+  });
+  const key = "timeAxis.nodeParityMaxDeviationSeconds";
+  assert.equal(unobserved.semantics[key].status, "unknown");
+  assert.equal(partial.semantics[key].status, "partially_observed");
+  assert.equal(confirmed.semantics[key].status, "confirmed");
+  assert.equal(contradicted.semantics[key].status, "contradicted");
+});
+
 test("profile compilation rejects probe evidence that is not explicitly read-only", () => {
   const evidence = syntheticProbeEvidence();
   evidence.hostEnvelope.result.readOnly = false;
   assert.throws(
-    () => compileReadOnlyHostProfile(evidence),
+    () => compileHostBehaviorProfile(evidence),
     (error) =>
       error.code === "INVALID_HOST_PROFILE" &&
       /must declare readOnly:true/.test(error.message)
@@ -158,7 +245,7 @@ test("profile validation rejects unknown fields and optimistic values on unknown
   profile.semantics["pitchControl.ordering"].value = "position_then_insertion";
   assert.throws(
     () => validateHostBehaviorProfile(profile),
-    (error) => error.code === "INVALID_HOST_PROFILE" && /forbidden unless confirmed/.test(error.message)
+    (error) => error.code === "INVALID_HOST_PROFILE" && /forbidden unless observed/.test(error.message)
   );
 
   const extra = structuredClone(await loadFixture());
@@ -221,7 +308,7 @@ test("confirmed semantics reject evidence collected for another semantic", async
 test("a single all-null observation remains unknown instead of being called stable", () => {
   const evidence = syntheticProbeEvidence();
   evidence.pitchEnvelope.observations = evidence.pitchEnvelope.observations.slice(0, 1);
-  const profile = compileReadOnlyHostProfile({
+  const profile = compileHostBehaviorProfile({
     ...evidence,
     capturedAt: "2026-07-28T00:00:00.000Z",
   });
@@ -370,13 +457,13 @@ test("strict evidence policy also covers computed-pitch coordinates and referenc
 
 test("profile diff reports constant drift that changes the fake-host model", () => {
   const baselineEvidence = syntheticProbeEvidence();
-  const baseline = compileReadOnlyHostProfile({
+  const baseline = compileHostBehaviorProfile({
     ...baselineEvidence,
     capturedAt: "2026-07-28T00:00:00.000Z",
   });
   const candidateEvidence = syntheticProbeEvidence();
   candidateEvidence.hostEnvelope.result.quarterBlick += 1;
-  const candidate = compileReadOnlyHostProfile({
+  const candidate = compileHostBehaviorProfile({
     ...candidateEvidence,
     capturedAt: "2026-07-28T00:00:00.000Z",
   });
@@ -392,7 +479,10 @@ test("profile diff reports constant drift that changes the fake-host model", () 
 });
 
 test("profile diff reports semantic drift without last-write-wins promotion", async () => {
-  const baseline = await loadFixture();
+  const baseline = compileHostBehaviorProfile({
+    ...syntheticProbeEvidence(),
+    capturedAt: "2026-07-28T00:00:00.000Z",
+  });
   const evidence = syntheticProbeEvidence();
   evidence.pitchEnvelope.observations = evidence.pitchEnvelope.observations.map((item) => ({
     ...item,
@@ -413,7 +503,7 @@ test("profile diff reports semantic drift without last-write-wins promotion", as
       },
     },
   }));
-  const candidate = compileReadOnlyHostProfile({
+  const candidate = compileHostBehaviorProfile({
     ...evidence,
     capturedAt: "2026-07-28T00:00:00.000Z",
   });

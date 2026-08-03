@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 
+import {
+  summarizeTimeAxisEvidence,
+  validateTimeAxisEvidenceSummary,
+} from "./time-axis-evidence.mjs";
+
 export const HOST_PROFILE_KIND = "svcopilot-host-profile";
-export const HOST_PROFILE_SCHEMA_VERSION = "1.0.0";
+export const HOST_PROFILE_SCHEMA_VERSION = "2.0.0";
 
 export const HOST_SEMANTIC_KEYS = Object.freeze([
   "occurrence.referenceBoundsIndependentOfNoteBounds",
@@ -19,12 +24,42 @@ export const HOST_SEMANTIC_KEYS = Object.freeze([
   "pitchControl.remove.indexAfterRemove",
   "pitchControl.scriptData.missingValue",
   "pitchControl.numericStorage",
+  "timeAxis.nodeParityMaxDeviationSeconds",
+  "timeAxis.tempoRampSupported",
+  "automation.interpolationSetterAvailability",
+  "automation.boundaryInclusion",
+  "pitchControl.getValueAtInterpolationFamily",
+  "pitchSurfaces.pitchDeltaWithPitchControl",
+  "pitchSurfaces.absoluteMidiToGroupCurveTransform",
+  "vibrato.hostEnvelopeWithExplicitPitchDelta",
+  "vibrato.hostEnvelopeWithExplicitPitchControl",
+  "vibrato.noteModulationInteraction",
+  "computedPitch.recomputeLatency",
+  "computedPitch.stabilityAfterWrite",
+  "computedPitch.staleNonEmptyAfterWrite",
+  "computedPitch.fineFluctuationPresent",
+  "undo.multiCandidateSingleBoundary",
 ]);
 
-const FACT_STATUSES = new Set(["confirmed", "contradicted", "unknown", "not_observable"]);
-const EVIDENCE_SOURCES = new Set(["live_read_only", "official_doc", "live_reversible_write"]);
-const EVIDENCE_SCOPES = new Set(["host_version", "fixture_observation"]);
-const CONFIRMED_SEMANTIC_VALUES = Object.freeze({
+const FACT_STATUSES = new Set([
+  "confirmed",
+  "contradicted",
+  "partially_observed",
+  "unknown",
+  "not_observable",
+]);
+const EVIDENCE_SOURCES = new Set([
+  "live_read_only",
+  "official_doc",
+  "live_reversible_write",
+  "human_observed_undo",
+]);
+const EVIDENCE_SCOPES = new Set([
+  "host_version",
+  "fixture_observation",
+  "time_axis_probe",
+]);
+const OBSERVED_SEMANTIC_VALUES = Object.freeze({
   "occurrence.referenceBoundsIndependentOfNoteBounds": (value) => typeof value === "boolean",
   "computedPitch.coordinateSpace": oneOf("occurrence_absolute_blick", "group_local_blick"),
   "computedPitch.pendingRepresentation": oneOf("requested_length_null_array"),
@@ -44,6 +79,21 @@ const CONFIRMED_SEMANTIC_VALUES = Object.freeze({
   "pitchControl.remove.indexAfterRemove": (value) => Number.isSafeInteger(value),
   "pitchControl.scriptData.missingValue": oneOf("undefined", "null"),
   "pitchControl.numericStorage": oneOf("double", "float32"),
+  "timeAxis.nodeParityMaxDeviationSeconds": (value) => Number.isFinite(value) && value >= 0,
+  "timeAxis.tempoRampSupported": (value) => typeof value === "boolean",
+  "automation.interpolationSetterAvailability": oneOf("available", "unavailable"),
+  "automation.boundaryInclusion": genericObservation,
+  "pitchControl.getValueAtInterpolationFamily": genericObservation,
+  "pitchSurfaces.pitchDeltaWithPitchControl": genericObservation,
+  "pitchSurfaces.absoluteMidiToGroupCurveTransform": genericObservation,
+  "vibrato.hostEnvelopeWithExplicitPitchDelta": genericObservation,
+  "vibrato.hostEnvelopeWithExplicitPitchControl": genericObservation,
+  "vibrato.noteModulationInteraction": genericObservation,
+  "computedPitch.recomputeLatency": genericObservation,
+  "computedPitch.stabilityAfterWrite": genericObservation,
+  "computedPitch.staleNonEmptyAfterWrite": genericObservation,
+  "computedPitch.fineFluctuationPresent": genericObservation,
+  "undo.multiCandidateSingleBoundary": genericObservation,
 });
 const FORBIDDEN_PERSISTED_KEYS = new Set([
   "projectFileName",
@@ -57,10 +107,11 @@ const FORBIDDEN_PERSISTED_KEYS = new Set([
   "values",
 ]);
 
-export function compileReadOnlyHostProfile({
+export function compileHostBehaviorProfile({
   hostEnvelope,
   groupsEnvelope,
   pitchEnvelope,
+  timeAxisReports = [],
   capturedAt = new Date().toISOString(),
 } = {}) {
   const host = requireSuccessfulEnvelope(hostEnvelope, "host");
@@ -75,7 +126,11 @@ export function compileReadOnlyHostProfile({
   const pitchEvidence = summarizePitchEvidence(pitchAttempts);
   const hostVersion = requireNonEmptyString(hostInfo.hostVersion, "hostInfo.hostVersion");
   const platform = normalizePlatform(hostInfo.osType);
-  const profileId = `synthv-${hostVersion}-${platform}-readonly-v1`;
+  const profileId = `synthv-${hostVersion}-${platform}-v2`;
+  const normalizedTimeAxisReports = requireArray(timeAxisReports, "timeAxisReports");
+  const timeAxisSummary = normalizedTimeAxisReports.length === 0
+    ? null
+    : summarizeTimeAxisEvidence(normalizedTimeAxisReports);
 
   const evidence = [
     {
@@ -102,6 +157,16 @@ export function compileReadOnlyHostProfile({
         ? { requestedFrames: pitchEvidence.requestedFrames }
         : {}),
     },
+    {
+      id: "EV-AUTOMATION-INTERPOLATION-SETTER-1",
+      source: "official_doc",
+      scope: "host_version",
+      supports: ["automation.interpolationSetterAvailability"],
+      oracleVersion: 1,
+      resultCode: "NO_INTERPOLATION_SETTER_IN_API_MANIFEST",
+      sampleCount: 1,
+    },
+    ...(timeAxisSummary ? [timeAxisProfileEvidence(timeAxisSummary)] : []),
   ];
   const semantics = {
     "occurrence.referenceBoundsIndependentOfNoteBounds": groupEvidence.divergenceObserved
@@ -117,6 +182,8 @@ export function compileReadOnlyHostProfile({
       ? confirmedFact("requested_length_null_array", ["EV-COMPUTED-PITCH-1"])
       : unknownFact("NO_STABLE_ALL_NULL_OBSERVATION", ["EV-COMPUTED-PITCH-1"]),
     ...pitchControlUnknownFacts(),
+    ...timeAxisFacts(timeAxisSummary),
+    ...v2UnknownFacts(),
   };
   const sanitizedEvidence = {
     hostSelector: {
@@ -132,7 +199,7 @@ export function compileReadOnlyHostProfile({
   const profile = {
     kind: HOST_PROFILE_KIND,
     schemaVersion: HOST_PROFILE_SCHEMA_VERSION,
-    profileRevision: 1,
+    profileRevision: 2,
     profileId,
     hostSelector: sanitizedEvidence.hostSelector,
     producer: {
@@ -141,9 +208,9 @@ export function compileReadOnlyHostProfile({
         host.protocolVersion,
         "host.protocolVersion"
       ),
-      suite: "common-readonly",
-      suiteVersion: 1,
-      sanitizerVersion: 1,
+      suite: "host-behavior-v2",
+      suiteVersion: 2,
+      sanitizerVersion: 2,
       readOnly: true,
     },
     capturedAt,
@@ -180,7 +247,9 @@ export function validateHostBehaviorProfile(value) {
   if (profile.schemaVersion !== HOST_PROFILE_SCHEMA_VERSION) {
     throw profileError(`profile.schemaVersion must be ${HOST_PROFILE_SCHEMA_VERSION}`);
   }
-  requirePositiveSafeInteger(profile.profileRevision, "profile.profileRevision");
+  if (requirePositiveSafeInteger(profile.profileRevision, "profile.profileRevision") !== 2) {
+    throw profileError("profile.profileRevision must be 2 for schema v2");
+  }
   requireNonEmptyString(profile.profileId, "profile.profileId");
   validateHostSelector(profile.hostSelector);
   validateProducer(profile.producer);
@@ -409,8 +478,73 @@ function pitchControlUnknownFacts() {
   );
 }
 
+function timeAxisProfileEvidence(summary) {
+  const supports = ["timeAxis.nodeParityMaxDeviationSeconds"];
+  if (summary.rampSupported) supports.push("timeAxis.tempoRampSupported");
+  return {
+    id: "EV-TIME-AXIS-H1-1",
+    source: "live_read_only",
+    scope: "time_axis_probe",
+    supports,
+    oracleVersion: 1,
+    resultCode: summary.resultCode,
+    sampleCount: summary.metrics.sampleCount,
+    timeAxis: summary,
+  };
+}
+
+function timeAxisFacts(summary) {
+  if (!summary) {
+    return {
+      "timeAxis.nodeParityMaxDeviationSeconds": unknownFact("NO_TIME_AXIS_EVIDENCE"),
+      "timeAxis.tempoRampSupported": unknownFact("RAMP_NOT_OBSERVED"),
+    };
+  }
+  const evidenceIds = ["EV-TIME-AXIS-H1-1"];
+  const value = summary.metrics.nodeParityMaxDeviationSeconds;
+  const nodeParity = summary.status === "confirmed"
+    ? confirmedFact(value, evidenceIds)
+    : summary.status === "contradicted"
+      ? contradictedFact(value, evidenceIds)
+      : partiallyObservedFact(value, "REQUIRED_TEMPO_SCENARIOS_INCOMPLETE", evidenceIds);
+  return {
+    "timeAxis.nodeParityMaxDeviationSeconds": nodeParity,
+    "timeAxis.tempoRampSupported": summary.rampSupported
+      ? confirmedFact(true, evidenceIds)
+      : unknownFact("RAMP_NOT_OBSERVED"),
+  };
+}
+
+function v2UnknownFacts() {
+  return {
+    "automation.interpolationSetterAvailability": confirmedFact("unavailable", [
+      "EV-AUTOMATION-INTERPOLATION-SETTER-1",
+    ]),
+    "automation.boundaryInclusion": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "pitchControl.getValueAtInterpolationFamily": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "pitchSurfaces.pitchDeltaWithPitchControl": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "pitchSurfaces.absoluteMidiToGroupCurveTransform": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "vibrato.hostEnvelopeWithExplicitPitchDelta": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "vibrato.hostEnvelopeWithExplicitPitchControl": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "vibrato.noteModulationInteraction": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "computedPitch.recomputeLatency": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "computedPitch.stabilityAfterWrite": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "computedPitch.staleNonEmptyAfterWrite": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "computedPitch.fineFluctuationPresent": unknownFact("AWAITING_HOST_EVIDENCE"),
+    "undo.multiCandidateSingleBoundary": unknownFact("AWAITING_HUMAN_UNDO_EVIDENCE"),
+  };
+}
+
 function confirmedFact(value, evidenceIds) {
   return { status: "confirmed", value, evidenceIds };
+}
+
+function contradictedFact(value, evidenceIds) {
+  return { status: "contradicted", value, evidenceIds };
+}
+
+function partiallyObservedFact(value, reason, evidenceIds) {
+  return { status: "partially_observed", value, reason, evidenceIds };
 }
 
 function unknownFact(reason, evidenceIds = []) {
@@ -446,11 +580,15 @@ function validateProducer(value) {
   );
   if (producer.probe !== "SVLiveProbe") throw profileError("profile.producer.probe is unsupported");
   requirePositiveSafeInteger(producer.probeProtocolVersion, "profile.producer.probeProtocolVersion");
-  if (producer.suite !== "common-readonly") {
+  if (producer.suite !== "host-behavior-v2") {
     throw profileError("profile.producer.suite is unsupported");
   }
-  requirePositiveSafeInteger(producer.suiteVersion, "profile.producer.suiteVersion");
-  requirePositiveSafeInteger(producer.sanitizerVersion, "profile.producer.sanitizerVersion");
+  if (requirePositiveSafeInteger(producer.suiteVersion, "profile.producer.suiteVersion") !== 2) {
+    throw profileError("profile.producer.suiteVersion must be 2");
+  }
+  if (requirePositiveSafeInteger(producer.sanitizerVersion, "profile.producer.sanitizerVersion") !== 2) {
+    throw profileError("profile.producer.sanitizerVersion must be 2");
+  }
   if (producer.readOnly !== true) throw profileError("profile.producer.readOnly must be true");
 }
 
@@ -468,6 +606,7 @@ function validateEvidence(value, index) {
       "resultCode",
       "sampleCount",
       "requestedFrames",
+      "timeAxis",
     ],
     label
   );
@@ -491,6 +630,29 @@ function validateEvidence(value, index) {
   if (evidence.requestedFrames !== undefined) {
     requirePositiveSafeInteger(evidence.requestedFrames, `${label}.requestedFrames`);
   }
+  if (evidence.timeAxis !== undefined) {
+    if (evidence.source !== "live_read_only") {
+      throw profileError(`${label}.timeAxis requires live_read_only evidence`);
+    }
+    if (!new Set(["fixture_observation", "time_axis_probe"]).has(evidence.scope)) {
+      throw profileError(`${label}.timeAxis has an invalid scope`);
+    }
+    const summary = validateTimeAxisEvidenceSummary(evidence.timeAxis);
+    if (evidence.resultCode !== summary.resultCode) {
+      throw profileError(`${label}.resultCode does not match timeAxis evidence`);
+    }
+    if (evidence.sampleCount !== summary.metrics.sampleCount) {
+      throw profileError(`${label}.sampleCount does not match timeAxis evidence`);
+    }
+    const hasParity = evidence.supports.includes("timeAxis.nodeParityMaxDeviationSeconds");
+    const hasRamp = evidence.supports.includes("timeAxis.tempoRampSupported");
+    if (!hasParity || hasRamp !== summary.rampSupported) {
+      throw profileError(`${label}.supports does not match timeAxis evidence`);
+    }
+  }
+  if (evidence.scope === "time_axis_probe" && evidence.timeAxis === undefined) {
+    throw profileError(`${label}.timeAxis is required for time_axis_probe evidence`);
+  }
 }
 
 function validateFact(value, key, evidenceById) {
@@ -507,29 +669,27 @@ function validateFact(value, key, evidenceById) {
       throw profileError(`${label}.evidenceIds contains evidence for another semantic`);
     }
   }
-  if (fact.status === "confirmed" && !Object.hasOwn(fact, "value")) {
-    throw profileError(`${label}.value is required when confirmed`);
+  const observed = ["confirmed", "contradicted", "partially_observed"].includes(fact.status);
+  if (observed && !Object.hasOwn(fact, "value")) {
+    throw profileError(`${label}.value is required when ${fact.status}`);
   }
-  if (fact.status === "confirmed" && refs.length === 0) {
-    throw profileError(`${label}.evidenceIds must not be empty when confirmed`);
+  if (observed && refs.length === 0) {
+    throw profileError(`${label}.evidenceIds must not be empty when ${fact.status}`);
   }
-  if (
-    fact.status === "confirmed" &&
-    !CONFIRMED_SEMANTIC_VALUES[key](fact.value)
-  ) {
+  if (observed && !OBSERVED_SEMANTIC_VALUES[key](fact.value)) {
     throw profileError(`${label}.value is not supported for this semantic`);
   }
   if (
-    fact.status === "confirmed" &&
-    !refs.some((id) => evidenceCanConfirm(key, evidenceById.get(id)))
+    ["confirmed", "contradicted"].includes(fact.status) &&
+    !refs.some((id) => evidenceCanDetermine(key, evidenceById.get(id)))
   ) {
-    throw profileError(`${label}.evidenceIds do not contain confirmation-grade evidence`);
+    throw profileError(`${label}.evidenceIds do not contain determination-grade evidence`);
   }
-  if (fact.status !== "confirmed" && Object.hasOwn(fact, "value")) {
-    throw profileError(`${label}.value is forbidden unless confirmed`);
+  if (!observed && Object.hasOwn(fact, "value")) {
+    throw profileError(`${label}.value is forbidden unless observed`);
   }
   if (
-    (fact.status === "unknown" || fact.status === "not_observable") &&
+    ["partially_observed", "unknown", "not_observable"].includes(fact.status) &&
     (typeof fact.reason !== "string" || !fact.reason)
   ) {
     throw profileError(`${label}.reason is required for ${fact.status}`);
@@ -555,7 +715,29 @@ function privacyLint(value, path = "profile") {
   }
 }
 
-function evidenceCanConfirm(key, evidence) {
+function evidenceCanDetermine(key, evidence) {
+  if (key === "timeAxis.nodeParityMaxDeviationSeconds") {
+    return (
+      evidence.source === "live_read_only" &&
+      evidence.timeAxis?.coverage?.completeRequiredScenarios === true &&
+      ["confirmed", "contradicted"].includes(evidence.timeAxis?.status)
+    );
+  }
+  if (key === "timeAxis.tempoRampSupported") {
+    return (
+      evidence.source === "live_read_only" &&
+      evidence.timeAxis?.rampSupported === true
+    );
+  }
+  if (key === "automation.interpolationSetterAvailability") {
+    return (
+      evidence.source === "official_doc" &&
+      evidence.resultCode === "NO_INTERPOLATION_SETTER_IN_API_MANIFEST"
+    );
+  }
+  if (key === "undo.multiCandidateSingleBoundary") {
+    return evidence.source === "human_observed_undo";
+  }
   if (key.startsWith("pitchControl.")) {
     return evidence.source === "live_reversible_write";
   }
@@ -577,6 +759,17 @@ function evidenceCanConfirm(key, evidence) {
       evidence.source === "live_read_only" &&
       evidence.resultCode === "REFERENCE_BOUNDS_DIVERGE_FROM_NOTE_BOUNDS"
     );
+  }
+  if (key === "computedPitch.fineFluctuationPresent") {
+    return evidence.source === "live_read_only" || evidence.source === "live_reversible_write";
+  }
+  if (
+    key.startsWith("automation.") ||
+    key.startsWith("pitchSurfaces.") ||
+    key.startsWith("vibrato.") ||
+    key.startsWith("computedPitch.")
+  ) {
+    return evidence.source === "live_reversible_write";
   }
   return false;
 }
@@ -646,6 +839,27 @@ function requirePositiveSafeInteger(value, label) {
 
 function oneOf(...allowed) {
   return (value) => allowed.some((candidate) => Object.is(candidate, value));
+}
+
+function genericObservation(value, depth = 0) {
+  if (typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return value.length > 0 && value.length <= 256 && !/[\\/]/.test(value);
+  if (depth >= 4 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.length <= 64 && value.every((item) => genericObservation(item, depth + 1));
+  }
+  const entries = Object.entries(value);
+  return (
+    entries.length > 0 &&
+    entries.length <= 32 &&
+    entries.every(
+      ([key, nested]) =>
+        /^[A-Za-z][A-Za-z0-9]*$/.test(key) &&
+        !FORBIDDEN_PERSISTED_KEYS.has(key) &&
+        genericObservation(nested, depth + 1)
+    )
+  );
 }
 
 function profileError(message) {

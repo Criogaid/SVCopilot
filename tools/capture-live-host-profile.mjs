@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
-  compileReadOnlyHostProfile,
+  compileHostBehaviorProfile,
   diffHostBehaviorProfiles,
   validateHostBehaviorProfile,
 } from "./lib/host-behavior-profile.mjs";
@@ -46,10 +46,14 @@ async function main(args = process.argv.slice(2)) {
     "--delay-ms",
     String(options.delayMs),
   ]);
-  const profile = compileReadOnlyHostProfile({
+  const timeAxisReports = options.timeAxisEvidence.map((input) =>
+    JSON.parse(readFileSync(path.resolve(input), "utf8"))
+  );
+  const profile = compileHostBehaviorProfile({
     hostEnvelope,
     groupsEnvelope,
     pitchEnvelope,
+    timeAxisReports,
   });
 
   const outputPath = resolveOutputPath(options.output, profile.profileId);
@@ -153,11 +157,19 @@ function parseArgs(args) {
     frames: 160,
     repeat: 3,
     delayMs: 250,
+    timeAxisEvidence: [],
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--force") {
       options.force = true;
+      continue;
+    }
+    if (arg === "--time-axis-evidence") {
+      const value = args[index + 1];
+      if (!value) throw new Error(`${arg} requires a value`);
+      options.timeAxisEvidence.push(value);
+      index += 1;
       continue;
     }
     if (["--output", "--baseline", "--probe-cli"].includes(arg)) {

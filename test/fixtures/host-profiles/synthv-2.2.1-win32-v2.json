@@ -1,0 +1,274 @@
+{
+  "kind": "svcopilot-host-profile",
+  "schemaVersion": "2.0.0",
+  "profileRevision": 2,
+  "profileId": "synthv-2.2.1-win32-v2",
+  "hostSelector": {
+    "product": "Synthesizer V Studio 2 Pro",
+    "version": "2.2.1",
+    "versionNumber": 131585,
+    "platform": "win32"
+  },
+  "producer": {
+    "probe": "SVLiveProbe",
+    "probeProtocolVersion": 1,
+    "suite": "host-behavior-v2",
+    "suiteVersion": 2,
+    "sanitizerVersion": 2,
+    "readOnly": true
+  },
+  "capturedAt": "2026-07-28T02:40:43.479Z",
+  "evidenceSha256": "sha256:af527e13dde3518c63f0c548c807f58d70e113cd431ddcb9812754d0e4175246",
+  "constants": {
+    "quarterBlick": 705600000
+  },
+  "semantics": {
+    "occurrence.referenceBoundsIndependentOfNoteBounds": {
+      "status": "confirmed",
+      "value": true,
+      "evidenceIds": [
+        "EV-OCCURRENCE-BOUNDS-1"
+      ]
+    },
+    "computedPitch.coordinateSpace": {
+      "status": "unknown",
+      "reason": "NO_DISCRIMINATING_FINITE_FRAMES",
+      "evidenceIds": [
+        "EV-COMPUTED-PITCH-1"
+      ]
+    },
+    "computedPitch.pendingRepresentation": {
+      "status": "confirmed",
+      "value": "requested_length_null_array",
+      "evidenceIds": [
+        "EV-COMPUTED-PITCH-1"
+      ]
+    },
+    "pitchControl.ordering": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.equalAnchorTieBreak": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.add.returnIndexBase": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.attachedSet.reorders": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.clone.attachedAllowed": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.clone.detachedSourceAllowed": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.clone.detached": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.clone.deepPoints": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.clone.copiesScriptData": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.remove.indexAfterRemove": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.scriptData.missingValue": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "pitchControl.numericStorage": {
+      "status": "not_observable",
+      "reason": "REQUIRES_REVERSIBLE_MUTATION",
+      "evidenceIds": []
+    },
+    "timeAxis.nodeParityMaxDeviationSeconds": {
+      "status": "partially_observed",
+      "value": 0,
+      "reason": "REQUIRED_TEMPO_SCENARIOS_INCOMPLETE",
+      "evidenceIds": [
+        "EV-TIME-AXIS-H1-20260803"
+      ]
+    },
+    "timeAxis.tempoRampSupported": {
+      "status": "unknown",
+      "reason": "RAMP_NOT_OBSERVED",
+      "evidenceIds": []
+    },
+    "automation.interpolationSetterAvailability": {
+      "status": "confirmed",
+      "value": "unavailable",
+      "evidenceIds": [
+        "EV-AUTOMATION-INTERPOLATION-SETTER-1"
+      ]
+    },
+    "automation.boundaryInclusion": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "pitchControl.getValueAtInterpolationFamily": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "pitchSurfaces.pitchDeltaWithPitchControl": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "pitchSurfaces.absoluteMidiToGroupCurveTransform": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "vibrato.hostEnvelopeWithExplicitPitchDelta": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "vibrato.hostEnvelopeWithExplicitPitchControl": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "vibrato.noteModulationInteraction": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "computedPitch.recomputeLatency": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "computedPitch.stabilityAfterWrite": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "computedPitch.staleNonEmptyAfterWrite": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "computedPitch.fineFluctuationPresent": {
+      "status": "unknown",
+      "reason": "AWAITING_HOST_EVIDENCE",
+      "evidenceIds": []
+    },
+    "undo.multiCandidateSingleBoundary": {
+      "status": "unknown",
+      "reason": "AWAITING_HUMAN_UNDO_EVIDENCE",
+      "evidenceIds": []
+    }
+  },
+  "evidence": [
+    {
+      "id": "EV-OCCURRENCE-BOUNDS-1",
+      "source": "live_read_only",
+      "scope": "fixture_observation",
+      "supports": [
+        "occurrence.referenceBoundsIndependentOfNoteBounds"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "REFERENCE_BOUNDS_DIVERGE_FROM_NOTE_BOUNDS",
+      "sampleCount": 31
+    },
+    {
+      "id": "EV-COMPUTED-PITCH-1",
+      "source": "live_read_only",
+      "scope": "fixture_observation",
+      "supports": [
+        "computedPitch.coordinateSpace",
+        "computedPitch.pendingRepresentation"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "BOTH_COORDINATES_STABLE_ALL_NULL",
+      "sampleCount": 3,
+      "requestedFrames": 160
+    },
+    {
+      "id": "EV-AUTOMATION-INTERPOLATION-SETTER-1",
+      "source": "official_doc",
+      "scope": "host_version",
+      "supports": [
+        "automation.interpolationSetterAvailability"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "NO_INTERPOLATION_SETTER_IN_API_MANIFEST",
+      "sampleCount": 1
+    },
+    {
+      "id": "EV-TIME-AXIS-H1-20260803",
+      "source": "live_read_only",
+      "scope": "fixture_observation",
+      "supports": [
+        "timeAxis.nodeParityMaxDeviationSeconds"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "TIME_AXIS_NODE_PARITY_PARTIAL",
+      "sampleCount": 45,
+      "timeAxis": {
+        "kind": "svcopilot-time-axis-evidence-summary",
+        "schemaVersion": "1.0.0",
+        "status": "partially_observed",
+        "resultCode": "TIME_AXIS_NODE_PARITY_PARTIAL",
+        "coverage": {
+          "requiredScenarios": [
+            "constant",
+            "tempo_step",
+            "dense_tempo"
+          ],
+          "observedScenarios": [
+            "constant"
+          ],
+          "sampleCountByScenario": {
+            "constant": 45
+          },
+          "completeRequiredScenarios": false
+        },
+        "metrics": {
+          "sampleCount": 45,
+          "nodeParityMaxDeviationSeconds": 0,
+          "nodeParityMedianDeviationSeconds": null,
+          "nodeParityP95DeviationSeconds": null,
+          "nodeParityMaxDeviationBlick": null,
+          "nodeParityMedianDeviationBlick": null,
+          "nodeParityP95DeviationBlick": null,
+          "hostRoundTripMaxDeviationBlick": 1,
+          "hostRoundTripMedianDeviationBlick": null,
+          "hostRoundTripP95DeviationBlick": null,
+          "nodeRoundTripMaxDeviationBlick": null,
+          "nodeRoundTripMedianDeviationBlick": null,
+          "nodeRoundTripP95DeviationBlick": null
+        },
+        "t03Disposition": "not_determined",
+        "rampSupported": false,
+        "artifactSha256": []
+      }
+    }
+  ]
+}
