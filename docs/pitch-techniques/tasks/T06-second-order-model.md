@@ -1,6 +1,6 @@
 # T06 — 二阶瞬态模型
 
-- 状态：`ready`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F2、F2b、F3、§8、§17 提交 6
 - 依赖：T01 corpus
 - 解锁：T09
@@ -25,3 +25,10 @@
 ## 完成条件
 
 瞬态 primitive 可由 T09 消费，且论文响应与工程边界没有混写。
+
+## 完成记录
+
+- 证据：[T06-second-order-model.md](../evidence/T06-second-order-model.md)
+- 提交：本任务的独立提交见 Git history。
+- 宿主：未接触；零 host call、零 setter、零 Undo。
+- 序列化：未新增公开 schema、MCP 或 Artifact surface，字节变化为 0。
