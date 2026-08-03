@@ -1,0 +1,29 @@
+{
+  "kind": "svcopilot-pitch-techniques-corpus-manifest",
+  "schemaVersion": 1,
+  "corpusFile": "synthetic-corpus.v1.json",
+  "corpusHash": "sha256_8a214e57d33bac9ed6e94235880ca857258a2944b92990160387efdeb70bc484",
+  "caseCount": 20,
+  "caseIds": [
+    "richards-upward-symmetric",
+    "richards-downward-strong-asymmetry",
+    "richards-degenerate-segment",
+    "richards-inflection-overflow",
+    "transient-underdamped-first-peak",
+    "transient-critical-first-peak",
+    "transient-undamped-continuous-taper",
+    "transient-generic-overdamped-response",
+    "transient-unsettled-tail",
+    "vibrato-fixed-4hz",
+    "vibrato-fixed-5_5hz",
+    "vibrato-fixed-7hz-center-drift",
+    "vibrato-swept-9hz-to-4hz",
+    "tempo-change-uniform-seconds-frequency",
+    "open-loop-correction-null-gap",
+    "open-loop-correction-all-null",
+    "open-loop-correction-low-coverage",
+    "composition-portamento-transient-vibrato-overlap",
+    "transition-time-resolution-too-coarse",
+    "vibrato-large-representable-phase"
+  ]
+}

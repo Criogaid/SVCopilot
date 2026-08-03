@@ -45,12 +45,16 @@ const cases = [
 console.log(`\n--- real sv_describe responses (budget ${MAX_DESCRIBE_BYTES}) ---`);
 for (const [label, picked] of cases) {
   const response = facade.describe(picked.map((row) => row.operation));
+  const payload = response.data;
+  if (!payload || !Array.isArray(payload.operations)) {
+    throw new Error("sv_describe response is missing data.operations");
+  }
   const size = bytes(response);
-  const deferred = response.deferred?.operations.map((item) => item.operation) ?? [];
+  const deferred = payload.deferred?.operations.map((item) => item.operation) ?? [];
   console.log(
     `  ${label.padEnd(7)} ${String(size).padStart(7)} bytes  ${
       size > MAX_DESCRIBE_BYTES ? "OVER BUDGET" : "within budget"
-    }  returned=${response.operations.length}${deferred.length ? ` deferred=${deferred.join(",")}` : ""}`
+    }  returned=${payload.operations.length}${deferred.length ? ` deferred=${deferred.join(",")}` : ""}`
   );
 }
 
