@@ -1,6 +1,6 @@
 # T07 — 时变颤音模型
 
-- 状态：`ready`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F3b、F9、§8、§17 提交 7
 - 依赖：T01 corpus
 - 解锁：T09
@@ -25,3 +25,10 @@
 ## 完成条件
 
 颤音 primitive 可进入 T09，且宿主共存未知量仍保持显式 gate。
+
+## 完成记录
+
+- 证据：[T07-time-varying-vibrato.md](../evidence/T07-time-varying-vibrato.md)
+- 提交：本任务的独立提交见 Git history。
+- 宿主：未接触；零 host call、零 setter、零 Undo。
+- 序列化：未新增公开 schema、MCP 或 Artifact surface，字节变化为 0。
