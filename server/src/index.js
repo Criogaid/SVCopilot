@@ -48,6 +48,7 @@ import {
 } from "./parameter-curve.js";
 import { PITCH_CONTROL_LIMITS } from "./pitch-control.js";
 import { PitchControlPatchService } from "./pitch-control-patch.js";
+import { PitchCorrectionPlanService } from "./pitch-correction-plan.js";
 import { PitchGesturePlanService } from "./pitch-gesture-plan.js";
 import {
   HOST_INTERPOLATION_MAX_ADAPTIVE_MIDPOINTS,
@@ -140,6 +141,11 @@ const computedPitchCompareService = new ComputedPitchCompareService({
   store: snapshotService.store,
 });
 const pitchTechniqueAnalysisService = new PitchTechniqueAnalysisService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
+});
+const pitchCorrectionPlanService = new PitchCorrectionPlanService({
   store: snapshotService.store,
   artifactStore,
   sessionId: serverSessionId,
@@ -2128,6 +2134,50 @@ export const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
   {
+    name: "sv_plan_pitch_correction",
+    description:
+      'Plan exactly one open-loop pitchDelta correction from a previously committed sv_plan_pitch_gesture PlanRef that retained its correction target. Capture a new matching range with include ["notes","automation","computedPitch"] after the source plan has committed, then provide its contextId. The planner is pure in-memory: it validates the committed source artifact and target identity, maps observed pitch to the sealed uniform-seconds grid without crossing null gaps, solves each finite run independently with a bounded five-diagonal Cholesky system, applies the requested post-solve amplitude clamp, and returns a new sealed sv_patch_parameter_curves PlanRef only when projected RMSE improves. It never iterates, commits, opens Undo, or claims observed improvement; re-snapshot and compare after commit. Short/null runs are reported as insufficient_evidence, and source plans without retainCorrectionTarget:true fail before any write exists. If a client collapses nested types to unknown, read svcopilot://schemas/sv_plan_pitch_correction for the exact validated input schema.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["sourcePlanRef", "observedContextId"],
+      properties: {
+        sourcePlanRef: {
+          type: "string",
+          pattern: "^a_[A-Za-z0-9_-]+$",
+          description:
+            "A successfully committed sv_plan_pitch_gesture PlanRef created with retainCorrectionTarget:true.",
+        },
+        observedContextId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Post-source-plan range context with notes, pitchDelta Automation, and computed pitch for the same target occurrence.",
+        },
+        evidence: {
+          type: "object",
+          additionalProperties: false,
+          default: {},
+          properties: {
+            minimumCoverage: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
+            minimumRunFrames: { type: "integer", minimum: 1, maximum: 1000, default: 3 },
+          },
+        },
+        regularization: {
+          type: "object",
+          additionalProperties: false,
+          default: {},
+          properties: {
+            smoothnessLambda: { type: "number", minimum: 0, maximum: 100, default: 0.4 },
+            magnitudeMu: { type: "number", minimum: 0.000001, maximum: 100, default: 0.01 },
+            maxAbsCorrectionCent: { type: "number", minimum: 0.000001, maximum: 1200, default: 50 },
+          },
+        },
+      },
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "sv_plan_pitch_gesture",
     description:
       'Compile explicit pitch techniques into a deterministic Automation replacement plan. Capture the selected range with include ["notes", "automation"] and pitchDelta; either vibrato variant also requires vibratoEnv. transition writes a score-step-cancelling pitchDelta contribution, transient writes a bounded first-peak response, and vibrato selects either an explicit pitchDelta model or a host-envelope scale. The planner never touches the host: it composes captured Automation baseline plus contributions, seals an sv_patch_parameter_curves PlanRef, and includes interpolation read-back postconditions. Exact lowercase "br" and other non-melodic special events are skipped with structured warnings; an all-skipped request returns no_change. vibrato requires confirmed H2 host-profile semantics and otherwise returns HOST_SEMANTIC_UNCONFIRMED before any mutation exists. Submit apply.arguments unchanged with action dry_run first, then commit after human audition. No execution, surface, referenceFrame, or mode field is accepted because this MVP has one fixed write surface and transaction path. If a client collapses nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
@@ -2988,6 +3038,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       mimeType: "application/json",
     },
     {
+      uri: "svcopilot://schemas/sv_plan_pitch_correction",
+      name: "sv_plan_pitch_correction input schema",
+      description: "Exact JSON input schema used to validate sv_plan_pitch_correction.",
+      mimeType: "application/json",
+    },
+    {
       uri: "svcopilot://schemas/sv_bake_computed_pitch",
       name: "sv_bake_computed_pitch input schema",
       description: "Exact JSON input schema used to validate sv_bake_computed_pitch.",
@@ -3227,6 +3283,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_plan_expression":
         result = await expressionPlanService.plan(args);
+        break;
+      case "sv_plan_pitch_correction":
+        result = await pitchCorrectionPlanService.plan(args);
         break;
       case "sv_align_lyrics":
         result = await lyricAlignService.align(args);
@@ -3547,6 +3606,7 @@ function capabilities() {
         "sv_get_parameter_curve",
         "sv_patch_parameter_curves",
         "sv_patch_pitch_controls",
+        "sv_plan_pitch_correction",
         "sv_plan_pitch_gesture",
         "sv_bake_computed_pitch",
         "sv_edit_phrase",
@@ -3621,6 +3681,7 @@ function capabilities() {
         sv_compare_computed_pitch: ["range"],
         sv_analyze_pitch_techniques: ["range"],
         sv_plan_expression: ["range"],
+        sv_plan_pitch_correction: ["range"],
         sv_plan_pitch_gesture: ["range"],
         sv_bake_computed_pitch: ["range"],
         sv_align_lyrics: ["range"],
@@ -3704,6 +3765,7 @@ function musicWorkflowSchemaIndex() {
   const names = [
     "sv_patch_parameter_curves",
     "sv_patch_pitch_controls",
+    "sv_plan_pitch_correction",
     "sv_plan_pitch_gesture",
     "sv_bake_computed_pitch",
     "sv_edit_phrase",
@@ -3736,6 +3798,7 @@ function toolInputSchema(name) {
       [
         "sv_patch_parameter_curves",
         "sv_patch_pitch_controls",
+        "sv_plan_pitch_correction",
         "sv_plan_pitch_gesture",
         "sv_bake_computed_pitch",
         "sv_edit_phrase",

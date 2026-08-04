@@ -18,6 +18,7 @@ import { normalizeTechniqueIr } from "./pitch-techniques/ir.js";
 import { composeTechniqueContributions } from "./pitch-techniques/compose.js";
 import { compilePitchDeltaMutationPlan } from "./pitch-techniques/pitch-delta-compiler.js";
 import { buildHostInterpolationPostcondition } from "./pitch-techniques/host-interpolation.js";
+import { buildUniformSecondsGrid } from "./pitch-techniques/time-grid.js";
 import {
   captureRemediation,
   createCapturedAutomationBaseline,
@@ -64,9 +65,9 @@ const DENSE_POINT_PROFILE = Object.freeze({
 const CORRECTION_TARGET_PROFILE = Object.freeze({
   schemaVersion: "1",
   kind: "pitch-technique-correction-target",
-  maxRows: 2000,
+  maxRows: 4000,
   columns: Object.freeze([
-    Object.freeze({ name: "absoluteBlick", unit: "blick", type: "integer", encoding: "delta" }),
+    Object.freeze({ name: "frame", type: "integer", encoding: "delta" }),
     Object.freeze({
       name: "targetCent",
       unit: "cent",
@@ -1340,8 +1341,38 @@ function sealPlanResponse({ input, loaded, ir, compiled, warnings, artifactStore
 
 function buildCorrectionTarget(detail, loaded) {
   const captured = loaded.stored.context.computedPitchByOccurrence?.[loaded.scope.occurrenceOrdinal];
-  if (!captured || !Array.isArray(captured.values) || !Number.isSafeInteger(captured.startBlick) || !Number.isSafeInteger(captured.intervalBlick)) {
+  if (
+    !captured
+    || !Array.isArray(captured.values)
+    || !Number.isSafeInteger(captured.startBlick)
+    || captured.startBlick < 0
+    || !Number.isSafeInteger(captured.intervalBlick)
+    || captured.intervalBlick < 1
+    || !Number.isSafeInteger(captured.frames)
+    || captured.frames < 1
+    || captured.frames !== captured.values.length
+    || !isRecord(captured.evidence)
+    || !Number.isSafeInteger(captured.evidence.requestedFrames)
+    || !Number.isSafeInteger(captured.evidence.observedFrames)
+    || !Array.isArray(captured.evidence.nullFrameIndices)
+  ) {
     throw codedError("CORRECTION_TARGET_UNAVAILABLE", "retainCorrectionTarget needs captured computedPitch sampling", {
+      remediation: {
+        include: ["notes", "automation", "computedPitch"],
+        automationParameters: ["pitchDelta"],
+      },
+    });
+  }
+  const finiteFrames = captured.values.filter(Number.isFinite).length;
+  const nullFrameIndices = captured.values.flatMap((value, index) => (
+    Number.isFinite(value) ? [] : [index]
+  ));
+  if (
+    captured.evidence.requestedFrames !== captured.frames
+    || captured.evidence.observedFrames !== finiteFrames
+    || !sameIntegerArray(captured.evidence.nullFrameIndices, nullFrameIndices)
+  ) {
+    throw codedError("CORRECTION_TARGET_UNAVAILABLE", "captured computedPitch provenance disagrees", {
       remediation: {
         include: ["notes", "automation", "computedPitch"],
         automationParameters: ["pitchDelta"],
@@ -1352,24 +1383,55 @@ function buildCorrectionTarget(detail, loaded) {
   if (!composition) {
     throw codedError("CORRECTION_TARGET_UNAVAILABLE", "the plan has no additive pitchDelta composition");
   }
+  const grid = buildUniformSecondsGrid({
+    startBlick: captured.startBlick,
+    intervalBlick: captured.intervalBlick,
+    values: captured.values,
+    tempoMarks: loaded.tempoMarks,
+    quarterBlick: loaded.quarterBlick,
+  });
+  if (grid.status !== "ready") {
+    throw codedError(
+      "CORRECTION_TARGET_UNAVAILABLE",
+      "captured computedPitch cannot form a uniform-seconds correction target",
+      { reason: grid.reason },
+    );
+  }
+  if (grid.frames > CORRECTION_TARGET_PROFILE.maxRows) {
+    throw codedError(
+      "CORRECTION_TARGET_UNAVAILABLE",
+      "captured computedPitch exceeds the retained correction-target frame budget",
+      {
+        frames: grid.frames,
+        maximumFrames: CORRECTION_TARGET_PROFILE.maxRows,
+        remediation: { computedPitchSampling: { frames: CORRECTION_TARGET_PROFILE.maxRows } },
+      },
+    );
+  }
   const rows = [];
-  for (let index = 0; index < captured.values.length; index += 1) {
-    const midi = captured.values[index];
+  for (let index = 0; index < grid.frames; index += 1) {
+    const midi = grid.values[index];
     if (!Number.isFinite(midi)) continue;
-    const absoluteBlick = captured.startBlick + index * captured.intervalBlick;
-    const seconds = secondsAtBlick(loaded.tempoMarks, loaded.quarterBlick, absoluteBlick);
-    if (!Number.isFinite(seconds)) continue;
-    const contribution = interpolateComposition(composition, seconds);
+    const contribution = interpolateComposition(composition, grid.timeSeconds[index]);
     if (!Number.isFinite(contribution)) continue;
-    rows.push({ absoluteBlick, targetCent: quantize(midi * 100 + contribution) });
+    const targetCent = midi * 100 + contribution;
+    if (!Number.isFinite(targetCent)) continue;
+    rows.push({ frame: index, targetCent: quantize(targetCent) });
   }
   if (rows.length === 0) {
     throw codedError("CORRECTION_TARGET_UNAVAILABLE", "captured computedPitch has no finite frames in the planned range");
   }
   return {
+    schemaVersion: 2,
     encoding: "dense-table-v1",
     points: encodeDense(rows, CORRECTION_TARGET_PROFILE),
     finiteFrames: rows.length,
+    grid: {
+      timeGrid: "uniform_seconds",
+      startSeconds: grid.timeSeconds[0],
+      sampleIntervalSeconds: grid.sampleIntervalSeconds,
+      frames: grid.frames,
+    },
   };
 }
 
@@ -1383,6 +1445,12 @@ function interpolateComposition(composition, seconds) {
   const ratio = (seconds - leftSeconds) / (rightSeconds - leftSeconds);
   return (1 - ratio) * composition.contributionCents[index - 1]
     + ratio * composition.contributionCents[index];
+}
+
+function sameIntegerArray(left, right) {
+  return left.length === right.length && left.every((value, index) => (
+    Number.isSafeInteger(value) && value === right[index]
+  ));
 }
 
 function noChangeResponse(input, warnings, { techniques = 0 } = {}) {

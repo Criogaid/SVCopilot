@@ -45,6 +45,11 @@ const CALLS = [
     { mode: "compare_to_target", contextId: MISSING_CONTEXT },
   ],
   ["sv_plan", "plan_expression", { contextId: MISSING_CONTEXT, intent: { genre: "jpop" } }],
+  [
+    "sv_plan",
+    "plan_pitch_correction",
+    { sourcePlanRef: "a_missing0000000", observedContextId: MISSING_CONTEXT },
+  ],
   ["sv_plan", "align_lyrics", { contextId: MISSING_CONTEXT, lyrics: "占" }],
   [
     "sv_plan",

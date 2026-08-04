@@ -96,7 +96,7 @@ const GLOBAL_RULES = {
     "On STALE_CONTEXT or UNKNOWN_CONTEXT: re-run sv_snapshot_range and re-run the planner with the same options. Never retry the old request and never reuse note indexes from the old context.",
   ],
   planHandoff: [
-    "Every planner (sv_plan_expression, sv_plan_pitch_gesture, sv_align_lyrics, sv_quantize_notes, sv_generate_harmony) returns the SAME apply envelope. Read apply.tool, submit apply.arguments verbatim to that tool. You never need to parse planner-specific field names.",
+    "Every planner (sv_plan_expression, sv_plan_pitch_gesture, sv_plan_pitch_correction, sv_align_lyrics, sv_quantize_notes, sv_generate_harmony) returns the SAME apply envelope. Read apply.tool, submit apply.arguments verbatim to that tool. You never need to parse planner-specific field names.",
     "apply is null when there is nothing to do (status no_change). That is success, not an error.",
     "Submit apply.arguments with action dry_run for the review pass, then the identical arguments with action commit.",
     "apply.atomicity is always \"verified_compensation\" — read-back compensation, never ACID.",
@@ -1064,6 +1064,11 @@ const TOOL_SELECTION = {
     { need: "Write Automation curves", tool: "sv_patch_parameter_curves" },
     { need: "Read / write PitchControl points & curves", tool: "sv_patch_pitch_controls" },
     { need: "Plan a pitch gesture (transition/transient/vibrato)", tool: "sv_plan_pitch_gesture" },
+    {
+      need: "Plan one evidence-backed correction after a committed pitch gesture",
+      tool: "sv_plan_pitch_correction",
+      note: "First create the source gesture with retainCorrectionTarget:true and captured computedPitch, dry-run and commit it, then capture a fresh matching range with notes, automation/pitchDelta, and computedPitch. The correction is one open-loop plan, never a hidden retry loop.",
+    },
     {
       need: "Freeze host computed pitch into a curve",
       tool: "sv_bake_computed_pitch",

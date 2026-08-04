@@ -44,6 +44,7 @@ const FACADE_BY_TOOL = new Map([
   ["sv_validate_lyrics_prosody", "read"],
 
   ["sv_plan_expression", "plan"],
+  ["sv_plan_pitch_correction", "plan"],
   ["sv_plan_pitch_gesture", "plan"],
   ["sv_align_lyrics", "plan"],
   ["sv_quantize_notes", "plan"],

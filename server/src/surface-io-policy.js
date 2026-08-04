@@ -109,6 +109,11 @@ const OPERATION_POLICIES = {
     response: "mutation-plan-ref",
     hostTraffic: "none",
   },
+  plan_pitch_correction: {
+    request: "range-scoped-grouped",
+    response: "mutation-plan-ref",
+    hostTraffic: "none",
+  },
   plan_pitch_gesture: {
     request: "range-scoped-grouped",
     response: "mutation-plan-ref",

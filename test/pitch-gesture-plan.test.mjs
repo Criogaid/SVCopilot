@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ArtifactStore } from "../server/src/artifact-store.js";
+import { decodeDense } from "../server/src/dense-codec.js";
 import { ParameterCurveService, normalizeCurveInput } from "../server/src/parameter-curve.js";
 import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
@@ -62,6 +63,9 @@ function createFixture({
   includeVibratoEnv = true,
   hostProfile = null,
   pitchDeltaPoints = [],
+  computedPitchValues = null,
+  computedPitchStartBlick = 0,
+  computedPitchIntervalBlick = Q / 4,
 } = {}) {
   const model = createPitchHostModel({ notes, automationPoints: pitchDeltaPoints });
   const store = new SnapshotStore({ now: () => 1000 });
@@ -82,6 +86,25 @@ function createFixture({
           ...(includeVibratoEnv ? [automation("vibratoEnv")] : []),
         ],
       },
+      ...(computedPitchValues === null
+        ? {}
+        : {
+            computedPitchByOccurrence: {
+              0: {
+                startBlick: computedPitchStartBlick,
+                intervalBlick: computedPitchIntervalBlick,
+                frames: computedPitchValues.length,
+                values: computedPitchValues,
+                evidence: {
+                  requestedFrames: computedPitchValues.length,
+                  observedFrames: computedPitchValues.filter(Number.isFinite).length,
+                  nullFrameIndices: computedPitchValues.flatMap((value, index) => (
+                    Number.isFinite(value) ? [] : [index]
+                  )),
+                },
+              },
+            },
+          }),
       occurrences: [
         {
           occurrence: 0,
@@ -329,5 +352,45 @@ test("identical pitch requests produce the same sealed mutation payload", async 
   assert.equal(
     JSON.stringify(fixture.sealed(first).mutationRequest),
     JSON.stringify(fixture.sealed(second).mutationRequest),
+  );
+});
+
+test("retainCorrectionTarget seals the sampled target on the uniform-seconds axis", async () => {
+  const fixture = createFixture({ computedPitchValues: [60, 60.1, null, 60.3, 60.4] });
+  const plan = await fixture.planner.plan({
+    contextId: fixture.stored.contextId,
+    occurrence: 0,
+    gestures: [transition()],
+    retainCorrectionTarget: true,
+  });
+  assert.equal(plan.status, "planned");
+  assert.equal(plan.data.correctionTargetRetained, true);
+  const target = fixture.sealed(plan).pitchTechniques.correctionTarget;
+  assert.equal(target.schemaVersion, 2);
+  assert.equal(target.encoding, "dense-table-v1");
+  assert.equal(target.grid.timeGrid, "uniform_seconds");
+  assert.equal(target.grid.frames, 5);
+  assert.equal(target.grid.sampleIntervalSeconds, 0.125);
+  const rows = decodeDense(target.points);
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((row) => row.frame >= 0 && row.frame < target.grid.frames));
+  assert.ok(rows.every((row) => Number.isFinite(row.targetCent)));
+  assert.equal(target.finiteFrames, rows.length);
+});
+
+test("retainCorrectionTarget rejects a grid beyond the correction plan hard frame budget", async () => {
+  const fixture = createFixture({
+    computedPitchValues: Array(4001).fill(60),
+    computedPitchIntervalBlick: Q,
+  });
+  await assert.rejects(
+    fixture.planner.plan({
+      contextId: fixture.stored.contextId,
+      occurrence: 0,
+      gestures: [transition()],
+      retainCorrectionTarget: true,
+    }),
+    (error) => error.code === "CORRECTION_TARGET_UNAVAILABLE"
+      && error.details.maximumFrames === 4000,
   );
 });

@@ -111,6 +111,28 @@ export function compareUniformSecondsGridAxes(left, right) {
   return { compatible: true };
 }
 
+export function splitFiniteRuns(mask, minimumRunFrames = 1) {
+  if (!Array.isArray(mask) || mask.some((value) => typeof value !== "boolean")) {
+    throw gridError("INVALID_TIME_GRID_INPUT", "finite-run mask must be a boolean array");
+  }
+  if (!Number.isSafeInteger(minimumRunFrames) || minimumRunFrames < 1) {
+    throw gridError("INVALID_TIME_GRID_INPUT", "minimumRunFrames must be a positive safe integer");
+  }
+  const runs = [];
+  let start = null;
+  for (let index = 0; index <= mask.length; index += 1) {
+    if (index < mask.length && mask[index]) {
+      if (start === null) start = index;
+      continue;
+    }
+    if (start !== null && index - start >= minimumRunFrames) {
+      runs.push({ start, endExclusive: index });
+    }
+    start = null;
+  }
+  return runs;
+}
+
 function normalizeSource(input) {
   if (!isRecord(input)) throw gridError("INVALID_TIME_GRID_INPUT", "input must be an object");
   assertKnownKeys(

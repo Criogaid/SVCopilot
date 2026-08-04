@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildUniformSecondsGrid,
   compareUniformSecondsGridAxes,
+  splitFiniteRuns,
 } from "../server/src/pitch-techniques/time-grid.js";
 import { secondsAtBlick } from "../server/src/musical-time.js";
 
@@ -123,4 +124,18 @@ test("unavailable tempo mapping is explicit instead of producing a pseudo-second
 
   assert.equal(grid.status, "unavailable");
   assert.equal(grid.reason, "tempo_mapping_unavailable");
+});
+
+test("finite-run splitting preserves null gaps and reports only runs that meet the threshold", () => {
+  const mask = [true, true, false, true, false, true, true, true];
+  assert.deepEqual(splitFiniteRuns(mask), [
+    { start: 0, endExclusive: 2 },
+    { start: 3, endExclusive: 4 },
+    { start: 5, endExclusive: 8 },
+  ]);
+  assert.deepEqual(splitFiniteRuns(mask, 2), [
+    { start: 0, endExclusive: 2 },
+    { start: 5, endExclusive: 8 },
+  ]);
+  assert.throws(() => splitFiniteRuns([1]), (error) => error.code === "INVALID_TIME_GRID_INPUT");
 });

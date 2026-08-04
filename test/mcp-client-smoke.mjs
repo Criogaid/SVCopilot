@@ -224,6 +224,7 @@ try {
     "sv_compare_computed_pitch",
     "sv_analyze_pitch_techniques",
     "sv_plan_expression",
+    "sv_plan_pitch_correction",
     "sv_align_lyrics",
     "sv_analyze_phrase",
     "sv_style_profile",
@@ -247,6 +248,7 @@ try {
     "sv_set_lyrics",
     "sv_clone_track_from_template",
     "sv_patch_parameter_curves",
+    "sv_plan_pitch_correction",
     "sv_edit_phrase",
     "sv_snapshot_range",
     "sv_start_audition",
@@ -407,6 +409,11 @@ try {
   );
   assert.ok(
     resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/sv_plan_pitch_correction"
+    )
+  );
+  assert.ok(
+    resources.resources.some(
       (resource) => resource.uri === "svcopilot://guide/music-workflows"
     )
   );
@@ -433,6 +440,7 @@ try {
   assert.ok(capabilities.interfaces.music.includes("sv_compare_computed_pitch"));
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_pitch_techniques"));
   assert.ok(capabilities.interfaces.music.includes("sv_plan_expression"));
+  assert.ok(capabilities.interfaces.music.includes("sv_plan_pitch_correction"));
   assert.ok(capabilities.interfaces.music.includes("sv_align_lyrics"));
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_phrase"));
   assert.ok(capabilities.interfaces.music.includes("sv_style_profile"));
@@ -492,6 +500,7 @@ try {
     [
       "sv_patch_parameter_curves",
       "sv_patch_pitch_controls",
+      "sv_plan_pitch_correction",
       "sv_plan_pitch_gesture",
       "sv_bake_computed_pitch",
       "sv_edit_phrase",
@@ -582,6 +591,28 @@ try {
     })
   );
   assert.equal(techniqueInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  const correctionResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_plan_pitch_correction",
+  });
+  assert.ok(correctionResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const correctionSchema = parseResource(correctionResource).inputSchema;
+  assert.deepEqual(correctionSchema.required, ["sourcePlanRef", "observedContextId"]);
+  assert.equal(correctionSchema.additionalProperties, false);
+  assert.equal(
+    correctionSchema.properties.regularization.properties.magnitudeMu.minimum,
+    0.000001,
+  );
+  const correctionInvalidArguments = parseToolError(
+    await facadeCall({
+      name: "sv_plan_pitch_correction",
+      arguments: {
+        sourcePlanRef: "a_smoke",
+        observedContextId: "ctx_smoke",
+        evidence: { unknown: true },
+      },
+    })
+  );
+  assert.equal(correctionInvalidArguments.error.code, "INVALID_ARGUMENTS");
   const pitchGestureResource = await client.readResource({
     uri: "svcopilot://schemas/sv_plan_pitch_gesture",
   });

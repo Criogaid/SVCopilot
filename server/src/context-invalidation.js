@@ -95,6 +95,7 @@ export const CONTEXT_INVALIDATION_BY_OPERATION = Object.freeze({
   style_profile: { scope: "none", reason: "纯内存分析：只读 SnapshotStore，绝不碰宿主。" },
   check_prosody: { scope: "none", reason: "纯内存分析：只读 SnapshotStore，绝不碰宿主。" },
   plan_expression: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
+  plan_pitch_correction: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
   plan_pitch_gesture: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
   align_lyrics: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
   quantize_notes: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
