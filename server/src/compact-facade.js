@@ -14,6 +14,7 @@
 // 为一个空 enum 造一个工具只会增加元数据而不增加能力。
 
 import { FACADE_ORDER, buildOperationCatalog, operationNameForTool } from "./operation-catalog.js";
+import { jsonContentHash } from "./schema-identity.js";
 
 export const DESCRIBE_OPERATION_TOOL = "sv_describe";
 
@@ -145,6 +146,7 @@ export function createCompactFacade(tools) {
         // description 里，模型没有别的地方能读到它们。
         description: entry.description,
         annotations: entry.annotations,
+        schemaHash: entry.schemaHash,
         inputSchema: entry.inputSchema,
       });
     }
@@ -184,7 +186,7 @@ export function createCompactFacade(tools) {
   }
 
   function catalog(interfaceVersion) {
-    return {
+    const body = {
       schemaVersion: interfaceVersion,
       describeTool: DESCRIBE_OPERATION_TOOL,
       maxDescribeOperations: MAX_DESCRIBE_OPERATIONS,
@@ -197,10 +199,11 @@ export function createCompactFacade(tools) {
           annotations: tool.annotations,
           operations: tool.inputSchema.properties.operation.enum.map((name) => {
             const entry = operations.get(name);
-            return { operation: name, summary: entry.summary };
+            return { operation: name, schemaHash: entry.schemaHash, summary: entry.summary };
           }),
         })),
     };
+    return { ...body, catalogHash: jsonContentHash(body) };
   }
 
   return {

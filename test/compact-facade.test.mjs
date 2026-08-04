@@ -15,6 +15,7 @@ import {
   createCompactFacade,
 } from "../server/src/compact-facade.js";
 import { buildOperationCatalog, operationNameForTool } from "../server/src/operation-catalog.js";
+import { jsonContentHash } from "../server/src/schema-identity.js";
 
 // facade 是唯一 MCP surface 的跨层契约回归。
 //
@@ -209,6 +210,7 @@ test("sv_describe returns the operation's real schema and its facade tool", asyn
   // 与内部 handler 校验的是同一份 schema。
   const direct = TOOLS.find((tool) => tool.name === "sv_patch_notes");
   assert.deepEqual(patch.inputSchema, direct.inputSchema);
+  assert.equal(patch.schemaHash, jsonContentHash(direct.inputSchema));
 });
 
 test("sv_describe never exceeds its byte budget and defers honestly", async () => {
@@ -384,6 +386,9 @@ test("svcopilot://operations catalog matches the served facade tools", async () 
     };
   });
   assert.equal(catalog.describeTool, DESCRIBE_OPERATION_TOOL);
+  const { catalogHash, ...catalogBody } = catalog;
+  assert.match(catalogHash, /^sha256_[0-9a-f]{64}$/);
+  assert.equal(catalogHash, jsonContentHash(catalogBody));
   // 没有 profile 名可报告，也没有"被排除的工具"——facade 是唯一 surface。
   assert.equal("profile" in catalog, false);
   assert.equal("excludedTools" in catalog, false);
@@ -401,10 +406,48 @@ test("svcopilot://operations catalog matches the served facade tools", async () 
       entry.operations.map((operation) => operation.operation).sort(),
       [...enumerated].sort()
     );
+    for (const operation of entry.operations) {
+      assert.match(operation.schemaHash, /^sha256_[0-9a-f]{64}$/);
+      const direct = TOOLS.find(
+        (tool) => operationNameForTool(tool.name) === operation.operation
+      );
+      assert.equal(operation.schemaHash, jsonContentHash(direct.inputSchema));
+    }
   }
   // catalog 资源本身也要小：它是模型的第一跳。
   const bytes = Buffer.byteLength(JSON.stringify(catalog), "utf8");
   assert.ok(bytes < 16 * 1024, `operations catalog must stay under 16 KiB; got ${bytes}`);
+});
+
+test("catalog, describe and schema resource share one schemaHash", async () => {
+  const result = await withClient(async (client) => {
+    const catalogResource = await client.readResource({ uri: "svcopilot://operations" });
+    const described = await client.callTool({
+      name: DESCRIBE_OPERATION_TOOL,
+      arguments: { operations: ["edit_phrase"] },
+    });
+    const schemaResource = await client.readResource({
+      uri: "svcopilot://schemas/sv_edit_phrase",
+    });
+    return {
+      catalog: JSON.parse(catalogResource.contents[0].text),
+      described: described.structuredContent.data.operations[0],
+      schema: JSON.parse(schemaResource.contents[0].text),
+    };
+  });
+  const catalogEntry = result.catalog.facades
+    .flatMap((facade) => facade.operations)
+    .find((operation) => operation.operation === "edit_phrase");
+  assert.equal(result.described.schemaHash, catalogEntry.schemaHash);
+  assert.equal(result.schema.schemaHash, catalogEntry.schemaHash);
+  assert.equal(result.schema.schemaHash, jsonContentHash(result.schema.inputSchema));
+});
+
+test("schemaHash changes for any served schema byte change", () => {
+  const schema = { type: "object", properties: { value: { type: "number" } } };
+  const changed = { type: "object", properties: { value: { type: "integer" } } };
+  assert.equal(jsonContentHash(schema), jsonContentHash(structuredClone(schema)));
+  assert.notEqual(jsonContentHash(schema), jsonContentHash(changed));
 });
 
 test("capabilities reports one facade surface with a derived operation count", async () => {

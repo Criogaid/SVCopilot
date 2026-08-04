@@ -7,6 +7,8 @@
 // 每个工具都必须在 FACADE_BY_TOOL 登记。未登记时 buildOperationCatalog 抛错，让
 // 「加了工具但 facade 不认识」在服务器启动/npm test 阶段失败，而不是等到某个客户端
 // 发现工具不可达。没有「排除」选项：facade 是唯一 surface，被排除就等于不可达。
+import { jsonContentHash } from "./schema-identity.js";
+
 export const FACADE_ORDER = [
   "status",
   "read",
@@ -165,6 +167,7 @@ export function buildOperationCatalog(tools) {
       description: tool.description,
       // 同一对象引用，不做深拷贝：facade 与内部 handler 必须校验同一份 schema。
       inputSchema: tool.inputSchema,
+      schemaHash: jsonContentHash(tool.inputSchema),
       annotations: tool.annotations,
     };
     if (operations.has(operation.operation)) {

@@ -57,6 +57,10 @@ epoch，旧 epoch handle 必须拒绝。安装面没有 session namespace 或 co
 `server/src/operation-catalog.js` 是 operation 到 facade 的唯一映射。Facade 只负责路由，
 业务参数仍使用同一个 Ajv schema 和 handler；不存在 full/compact 双 profile，也不存在 direct
 tool 兼容入口。`svcopilot://operations` 提供可发现目录。
+目录中的每个 operation 携带稳定 `schemaHash`，根对象携带 `catalogHash`；`sv_describe` 与
+`svcopilot://schemas/{tool}` 返回同一 schema identity。客户端重连后先读目录，只重新获取 hash
+变化或本地尚未缓存的 schema。hash 是服务端针对实际 minified schema 字节生成的不透明缓存键，
+客户端不应依赖对象属性顺序自行重算。
 `svcopilot://capabilities` 独立发布连接状态、限制、可用能力和 capability-gated 分支，不通过
 `sv_status` operation 重复同一份数据。
 

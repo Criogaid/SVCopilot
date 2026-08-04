@@ -92,6 +92,7 @@ import {
 import { PlanExecutionLedger } from "./plan-ledger.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 import { dedupeSchema } from "./schema-defs.js";
+import { jsonContentHash } from "./schema-identity.js";
 import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
 import { loadRuntimeHostProfiles, selectRuntimeHostProfile } from "./runtime-host-profile.js";
 
@@ -2998,7 +2999,7 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://operations",
       name: "SV Copilot compact operation catalog",
       description:
-        "Facade-to-operation routing: which operation each facade tool accepts and a one-line summary per operation. Call sv_describe for an operation's exact arguments schema.",
+        "Facade-to-operation routing with stable schemaHash cache identities. Call sv_describe only for an operation whose hash is not cached.",
       mimeType: "application/json",
     },
     {
@@ -3728,6 +3729,7 @@ function capabilities() {
       schemas: {
         musicWorkflowIndex: "svcopilot://schemas/music-workflow",
         toolTemplate: "svcopilot://schemas/{tool}",
+        cacheIdentity: "schemaHash",
       },
     },
     // context 兼容矩阵：哪些工具接受哪种 contextId。range context 由 sv_snapshot_range 签发。
@@ -3874,10 +3876,14 @@ function musicWorkflowSchemaIndex() {
     schemaVersion: INTERFACE_VERSION,
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
-    tools: names.map((name) => ({
-      name,
-      uri: `svcopilot://schemas/${name}`,
-    })),
+    tools: names.map((name) => {
+      const tool = TOOLS.find((candidate) => candidate.name === name);
+      return {
+        name,
+        uri: `svcopilot://schemas/${name}`,
+        schemaHash: jsonContentHash(tool.inputSchema),
+      };
+    }),
   };
 }
 
@@ -3908,6 +3914,7 @@ function toolInputSchema(name) {
   return {
     schemaVersion: INTERFACE_VERSION,
     tool: tool.name,
+    schemaHash: jsonContentHash(tool.inputSchema),
     inputSchema: tool.inputSchema,
   };
 }
