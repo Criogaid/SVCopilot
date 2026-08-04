@@ -13,9 +13,9 @@ Thumbs.db
 .codex/
 .codegraph/
 
-# local-only project notes and generated API mirror
-docs/
+# 本地维护笔记与生成输出
 api-docs/
+tools/out/
 HANDOFF.md
 CLAUDE.md
 AGENTS.md

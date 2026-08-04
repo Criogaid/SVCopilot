@@ -782,7 +782,7 @@ function applyGates() {
   report.ok = report.gates.every((gate) => gate.passed);
   report.acceptanceComplete = false;
   report.acceptanceNote =
-    "Automated §15 steps only. Acceptance is complete when every humanGate above is answered and the independent-LLM session (docs/INDEPENDENT_LLM_ACCEPTANCE_PROTOCOL.md) is recorded alongside this report.";
+    "Automated §15 steps only. Acceptance is complete when every humanGate above is answered and the independent-LLM session (docs/acceptance/independent-llm.md) is recorded alongside this report.";
 }
 
 function writeReport() {
