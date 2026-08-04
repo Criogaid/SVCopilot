@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T06:41:46.648-03:00",
+  "capturedAt": "2026-08-04T06:48:02.673-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -24,7 +24,8 @@
     "mvp-01-richards-constant-tempo",
     "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
-    "mvp-05-explicit-pitch-delta-vibrato"
+    "mvp-05-explicit-pitch-delta-vibrato",
+    "mvp-06-overlap-composition-permutation"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -477,6 +478,133 @@
       }
     },
     {
+      "id": "mvp-06-overlap-composition-permutation",
+      "status": "passed",
+      "capturedAt": "2026-08-04T06:48:02.673-03:00",
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "constantTempoBpm": 130,
+          "baselinePoints": {
+            "pitchDelta": 67,
+            "vibratoEnv": 0
+          },
+          "computedPitch": {
+            "requestedFrames": 768,
+            "finiteFrames": 519,
+            "nullFrames": 249,
+            "coverage": 0.67578125
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 3,
+          "curveCount": 2,
+          "pointCount": 154,
+          "curvePointCounts": [
+            103,
+            51
+          ],
+          "overlappingContributors": [
+            "richards_transition",
+            "overshoot_transient",
+            "explicit_pitch_delta_vibrato"
+          ],
+          "canonicalPermutation": {
+            "ordersCompared": 2,
+            "secondOrder": "reverse_of_first",
+            "planIdMatched": true,
+            "curveCountMatched": true,
+            "pointCountMatched": true
+          }
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0,
+          "baselineInterpolationSamples": 11
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 154,
+          "readbackPoints": 154,
+          "hostWriteMs": 521,
+          "hostVerificationMs": 400,
+          "operationMs": 1122,
+          "maxPointValueDeltaCent": 0.000006904296867560333,
+          "hostInterpolation": {
+            "sampleCount": 166,
+            "maxAbsErrorCent": 0.000007607211060189911,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "stablePolls": 2,
+          "attempts": 2,
+          "elapsedMs": 105,
+          "coverage": 0.67578125
+        },
+        "compare": {
+          "status": "succeeded",
+          "comparedFrames": 519,
+          "nullFramesBefore": 249,
+          "nullFramesAfter": 249,
+          "overall": {
+            "meanCent": 9.730775278198006,
+            "medianCent": 1.354217529296875,
+            "maeCent": 17.51616079223868,
+            "rmseCent": 28.215681438694634,
+            "p95AbsCent": 76.14212036132812,
+            "maxAbsCent": 99.37629699707031
+          },
+          "focusNoteCenterDeltaCent": {
+            "transitionSource": 30.69195466883059,
+            "sharedTarget": 4.054585625143403
+          },
+          "unmatchedNotes": 0
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "dryRunEffects": "none",
+          "dryRunUndoBoundaryCalls": 0,
+          "pitchDeltaPoints": {
+            "before": 103,
+            "after": 7
+          },
+          "vibratoEnvPoints": {
+            "before": 51,
+            "after": 0
+          },
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "maxPointValueDelta": 0,
+          "restorationTokenMatched": true
+        }
+      },
+      "artifactLeaseCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedLeases": 5,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0
+      },
+      "transportMetrics": {
+        "status": "partial",
+        "reason": "Facade timings and Artifact bytes were observed; aggregate PIPE and MCP byte percentiles remain pending."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
+    {
       "id": "mvp-12-worker-timeout-or-crash",
       "status": "not_applicable",
       "gate": {
@@ -495,7 +623,6 @@
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
-    "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",

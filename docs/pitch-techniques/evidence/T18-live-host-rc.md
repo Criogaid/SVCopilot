@@ -13,8 +13,9 @@
 `24.22554 cent`。这证明该写入路径和量测链路可工作，不对自然度作自动化结论。
 
 清理事务移除了全部 117 个临时 `vibratoEnv` 点，最终内容 token 与实验前精确一致；本场景
-创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。另有 11 个 MVP 场景尚未完成，
-本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为 `unknown`，H3b 仅
+创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 5 个 MVP 场景通过、
+1 个条件场景不适用、8 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
+`unknown`，H3b 仅
 `partially_observed`，所以不启用 `PitchControlCurve`。
 
 场景 5（显式 `pitchDelta` 振音）已经完成 plan、零副作用 dry-run、一个 Undo 的 commit、
@@ -46,5 +47,15 @@ Undo，宿主插值 `140` 个样本的最大误差为 `4.03e-6 cent`。`519 / 76
 `+16.727 cent` 与 `-12.778 cent`，方向与请求一致；这些数值只证明模型写入和观测链路，不替代
 人工听感。恢复事务把两段范围从 `72 / 62` 点还原到 `11 / 0` 个基线点，最终 token 精确匹配；
 4 个 lease 全部显式释放，doctor 再次为 Artifact `0 entries / 0 bytes`。
+
+场景 6 在同一音符边界叠加 Richards transition、overshoot transient 和显式 `pitchDelta` 振音，
+并用 `vibratoEnv: 0` 抑制宿主包络。原顺序与完全反转顺序产生相同 `planId`、相同 2 条曲线和
+`154` 个点，证明规范化键不受调用方排列影响。dry-run 零写入、零 Undo；commit 为一个用户 Undo，
+逐点最大误差为 `6.90e-6 cent`，两条曲线共 `166` 个宿主插值样本的最大误差为
+`7.61e-6 cent`。处理稳定后仍有 `519 / 768` 个有效帧，before/after 比较 MAE 为
+`17.516 cent`、P95 为 `76.142 cent`；该观测只证明三种贡献同时到达宿主，不替代人工听感。
+恢复事务把 `pitchDelta` 从 103 点还原到 7 个基线点、`vibratoEnv` 从 51 点还原到 0 点，
+逐点恢复误差为零且最终 token 精确匹配。5 个 lease 全部显式释放，doctor 为 Artifact
+`0 entries / 0 bytes`、handle 0、pending execution 0。
 
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。

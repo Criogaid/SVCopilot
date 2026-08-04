@@ -41,5 +41,8 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
   transition 的 plan、dry-run、单 Undo commit、computed-pitch compare、精确 token 恢复与
   Artifact `0 entries / 0 bytes` 清理门禁。
 - 场景 3 已完成 overshoot / preparation 的双曲线闭环：默认阻尼分支、连续 taper、单 Undo、
-  宿主插值读回、computed-pitch 方向性观测、精确 token 恢复和零 Artifact 均通过。当前还剩
-  9 个 MVP 场景未完成。
+  宿主插值读回、computed-pitch 方向性观测、精确 token 恢复和零 Artifact 均通过。
+- 场景 6 已完成 Richards transition、overshoot transient、显式振音的重叠合成，并以完全反转
+  的输入顺序获得相同 `planId`、曲线数和点数。单 Undo commit、166 个宿主插值样本、
+  computed-pitch compare、精确 token 恢复与 Artifact `0 entries / 0 bytes` 均通过。当前还剩
+  8 个 MVP 场景未完成。

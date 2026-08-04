@@ -29,11 +29,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
+    "mvp-06-overlap-composition-permutation",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 9);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 8);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 5);
+  assert.equal(evidence.scenarios.length, 6);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -83,6 +84,20 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(explicitScenario.artifactLeaseCleanup.status, "succeeded");
   assert.equal(explicitScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(explicitScenario.id), false);
+  const overlapScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-06-overlap-composition-permutation",
+  );
+  assert.equal(overlapScenario.status, "passed");
+  assert.equal(overlapScenario.workflow.plan.techniqueCount, 3);
+  assert.equal(overlapScenario.workflow.plan.canonicalPermutation.planIdMatched, true);
+  assert.equal(overlapScenario.workflow.plan.canonicalPermutation.curveCountMatched, true);
+  assert.equal(overlapScenario.workflow.plan.canonicalPermutation.pointCountMatched, true);
+  assert.equal(overlapScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(overlapScenario.workflow.dryRun.undoBoundaryCalls, 0);
+  assert.equal(overlapScenario.workflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(overlapScenario.workflow.cleanup.restorationTokenMatched, true);
+  assert.equal(overlapScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(overlapScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );
