@@ -6,7 +6,7 @@ import { ExecutionCoordinator } from "../server/src/execution-coordinator.js";
 import { HostSession } from "../server/src/host-session.js";
 import { LyricsService } from "../server/src/lyrics.js";
 import { ProcessingService, waitForProcessing } from "../server/src/processing.js";
-import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
+import { SnapshotService, SnapshotStore, createHostScope } from "../server/src/snapshot.js";
 import { decodeWireValue, getWireArrayMetadata } from "../server/src/wire-codec.js";
 import { WorkflowExecutor, validatePlan } from "../server/src/workflow.js";
 
@@ -1315,6 +1315,54 @@ test("HostSession rejects epoch-less handles after any reconnect", async () => {
     await session.call({ handle: fresh.project, method: "getFileName", args: [] }),
     "test.svp"
   );
+});
+
+test("host scopes release epoch-bound handles after a reconnect", async () => {
+  class FakeBridge extends EventEmitter {
+    constructor() {
+      super();
+      this.epoch = 0;
+      this.freed = [];
+    }
+
+    getStatus() {
+      return { state: "listening", epoch: this.epoch };
+    }
+
+    async call(command) {
+      if (command.op === "root") {
+        return { project: { __handle__: 1, __type__: "Project" } };
+      }
+      if (command.op === "call" && command.method === "getHostInfo") {
+        return { hostVersion: "2.2.1" };
+      }
+      if (command.op === "call" && command.method === "getTimeAxis") {
+        return { __handle__: 2, __type__: "TimeAxis" };
+      }
+      if (command.op === "free") {
+        this.freed.push(command.handle);
+        return true;
+      }
+      throw new Error(`unsupported command: ${command.op}.${command.method ?? ""}`);
+    }
+  }
+
+  const bridge = new FakeBridge();
+  const session = new HostSession(bridge, { logger: { error() {} } });
+  bridge.epoch = 1;
+  bridge.emit("attach", { epoch: 1 });
+  bridge.epoch = 2;
+  bridge.emit("attach", { epoch: 2 });
+
+  await session.withExclusive(async (host) => {
+    const scope = createHostScope(host);
+    const roots = await scope.roots();
+    await scope.call(roots.project, "getTimeAxis", [], { inferredType: "TimeAxis" });
+    await scope.releaseAll();
+  });
+
+  assert.deepEqual(bridge.freed, [2, 1]);
+  assert.equal(session.getStatus().knownHandleCount, 0);
 });
 
 test("typed-v2 decoding caps aggregate declared array allocation", () => {

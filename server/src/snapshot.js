@@ -829,7 +829,7 @@ export function createHostScope(host) {
       return value;
     },
     async releaseAll() {
-      for (const handle of [...handles.keys()].reverse()) {
+      for (const handle of [...handles.values()].reverse()) {
         await host.free(handle).catch(() => {});
       }
     },
