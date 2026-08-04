@@ -276,14 +276,7 @@ export function validateHostBehaviorProfile(value) {
     validateFact(semantics[key], key, evidenceById);
   }
   privacyLint(profile);
-  const expectedDigest = sha256(
-    stableStringify({
-      hostSelector: profile.hostSelector,
-      quarterBlick: constants.quarterBlick,
-      evidence,
-      semantics,
-    })
-  );
+  const expectedDigest = hostBehaviorProfileEvidenceSha256(profile);
   if (profile.evidenceSha256 !== expectedDigest) {
     throw profileError("profile.evidenceSha256 does not match the profile evidence");
   }
@@ -334,6 +327,19 @@ export function diffHostBehaviorProfiles(baselineValue, candidateValue) {
       constantChanges.length > 0 ||
       semanticChanges.length > 0,
   };
+}
+
+export function hostBehaviorProfileEvidenceSha256(value) {
+  const profile = requireRecord(value, "profile");
+  const constants = requireRecord(profile.constants, "profile.constants");
+  return sha256(
+    stableStringify({
+      hostSelector: profile.hostSelector,
+      quarterBlick: constants.quarterBlick,
+      evidence: profile.evidence,
+      semantics: profile.semantics,
+    })
+  );
 }
 
 export function hostModelDefaultsFromProfile(value) {

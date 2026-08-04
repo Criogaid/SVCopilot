@@ -1115,6 +1115,22 @@ H3 必须拆成两份证据，不允许用一份实验同时宣称两项都成�
 宿主不支持或全 null 时不伪造结论；
 **H2/H3a/H3b 仍 unknown 时，对应 schema 组合必须在 preflight 零写入拒绝。**
 
+#### 7.4a 2026-08-04 T04 可恢复 host pitch 证据
+
+在 SynthV 2.2.1、bridge protocol 2 上，T04 使用克隆临时 track、新 library group、两个
+timeOffset reference 和三条临时 note 完成隔离探针。临时 track/library group 删除后，track/library
+数量以及同范围 snapshot token 均恢复；导出的 13 个 handle 已显式释放。完整数据见
+[T04-host-pitch-live.json](evidence/T04-host-pitch-live.json)。
+
+`PitchControlCurve.getValueAt()` 的 13 个非共线密集点确认为 `piecewise_linear`，因此 H4 为
+`confirmed`。H3b 已读回三个 local anchor 与两个 occurrence offset 的加法坐标映射，但所有
+computed-pitch 请求均为全 null，故仍为 `partially_observed`；这不能解锁 PitchControl 编译。
+
+H2 的 6 组请求、H3a 的三写面组合，以及 H5/H6/H8 的 69.33 Hz 采样均未得到有限 computed
+pitch，相关 facts 保持 `unknown`。H2 只有 default level 的两组完整写入；0.2/1.8
+`vibratoEnv` 读回 float32 值触发 strict equality 的 `partial` 后，按恢复规则没有重试写入，
+而是删除整套夹具并读回恢复状态。H7 没有人工 Ctrl+Z 观察，也保持 `unknown`。
+
 ## 8. P1：数学模型与秒域测量核心
 
 ### 8.1 模块

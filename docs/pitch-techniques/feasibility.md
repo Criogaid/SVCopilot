@@ -369,14 +369,14 @@ Saitou 论文按 5.6Sol 判定处置：JAIST 保存稿为 CC BY-NC-ND 4.0，
 | # | 未知量 | 为何阻塞 | 判定 |
 |---|---|---|---|
 | H1 | Node 自建秒↔BLICK 换算与宿主 `TimeAxis` 的一致性 | 2026-08-04 的 600 点三场景实机证据覆盖恒速、单点阶跃和密集变速，见 §5.2 | `confirmed`；Node 分段换算不再阻塞 Hz 门禁 |
-| H2 | `vibratoEnv` / `dF0VbrMod` 与显式正弦的组合关系（相加/覆盖/缩放） | 双重颤音是高可信风险，但叠加公式未经官方证明 | `host-gated`，阻塞任何显式颤音发布 |
-| H3a | `PitchControlCurve` 覆盖区间内 `pitchDelta` 是否仍参与结果 | 决定两个写面能否并列，以及跨面处置策略 | `host-gated` |
-| H3b | absolute MIDI/score/occurrence offset 与 group-relative PitchControl anchor/point 的坐标变换 | 决定 TechniqueIR 能否正确编译到 PitchControl；H3a 不能回答 | `host-gated` |
-| H4 | `PitchControlCurve.getValueAt()` 的内部插值族 | 决定 PitchControl 侧的压缩误差界 | `host-gated`（可用密集采样反推） |
-| H5 | 写入后 computed pitch 的重算延迟与稳定判据 | 决定闭环轮数与外层预算是否算术可行 | `host-gated` |
-| H6 | 写入后是否曾返回**旧的非空**结果（而非空数组） | 若会，则就绪判据必须是内容哈希而非"非空"（现有实现已用 `contentHash`，此实验是确认其必要性） | `host-gated` |
-| H7 | 宿主是否在长时间异步处理期间维持预期 Undo grouping | 决定单 Undo 闭环是否成立 | `host-gated`，需人工观察一次 Ctrl+Z |
-| H8 | 宿主生成的 computed pitch 是否包含 fine fluctuation（>10 Hz） | 决定 residual 的解释方式 | `host-gated`，需高密度采样 |
+| H2 | `vibratoEnv` / `dF0VbrMod` 与显式正弦的组合关系（相加/覆盖/缩放） | 6 组请求均读到全 null；仅 default level 两组完整写入，另外四组在 float32 strict assertion 后停止 | `unknown`，阻塞任何显式颤音发布 |
+| H3a | `PitchControlCurve` 覆盖区间内 `pitchDelta` 是否仍参与结果 | 三个写面组合均无可用 computed pitch | `unknown` |
+| H3b | absolute MIDI/score/occurrence offset 与 group-relative PitchControl anchor/point 的坐标变换 | 三个 local anchor、两个 occurrence 的 direct readback 已完成，但没有 computed-pitch 往返 | `partially_observed`，仍阻塞 PitchControl 编译 |
+| H4 | `PitchControlCurve.getValueAt()` 的内部插值族 | 13 个非共线密集点严格匹配分段线性读回 | `confirmed`：`piecewise_linear` |
+| H5 | 写入后 computed pitch 的重算延迟与稳定判据 | 隔离夹具 57 次只读轮询都全 null | `unknown` |
+| H6 | 写入后是否曾返回**旧的非空**结果（而非空数组） | 没有可作为新旧对照的非空 computed pitch | `unknown` |
+| H7 | 宿主是否在长时间异步处理期间维持预期 Undo grouping | API 边界计数不是人工 Ctrl+Z 观察 | `unknown`，仍需人工观察一次 Ctrl+Z |
+| H8 | 宿主生成的 computed pitch 是否包含 fine fluctuation（>10 Hz） | 69.33 Hz、384 帧采样没有有限帧 | `unknown` |
 
 ## 5. 唯一存活的单方独有发现：H1
 
@@ -436,6 +436,18 @@ SynthV 2.2.1、bridge protocol 2 下，恒速、单点阶跃与多点密集变�
 聚合 600 点的 Node 秒值最大偏差为 `1.4210854715202004e-14 s`，宿主 BLICK 往返最大偏差为
 `1`。H1 为 `confirmed`，T03 裁定 `not_required`，Node 分段换算可作为生产时间映射；tempo
 ramp 未被观测，相关 capability 仍保持 `unknown`。
+
+### 5.3 2026-08-04 隔离 host pitch fixture
+
+T04 用克隆临时 track、新 library group 和两个 reference 进行可恢复写入；删除夹具后 track/library
+数量以及全范围内容 token 都恢复，且所有导出 handle 已释放。完整脱敏记录见
+[T04-host-pitch-live.json](evidence/T04-host-pitch-live.json)。
+
+`PitchControlCurve.getValueAt()` 的 13 个密集点确认 `piecewise_linear`。其余 H2/H3a/H5/H6/H8
+在临时 reference 上一直得到全 null computed pitch，故只记录为 `unknown`；H3b 的 group-local 到
+occurrence offset 映射为 `partially_observed`，因为缺少 computed-pitch 往返；H7 没有人工 Ctrl+Z
+证据。0.2/1.8 `vibratoEnv` 写入在 strict double equality 下暴露 float32 回读差异，返回 `partial`
+后没有重试，而是删除夹具并验证恢复。
 
 ## 6. 终版能力判定矩阵
 

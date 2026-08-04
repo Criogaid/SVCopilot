@@ -1,0 +1,282 @@
+{
+  "kind": "svcopilot-host-pitch-evidence",
+  "schemaVersion": "1.0.0",
+  "capturedAt": "2026-08-04T02:33:04.428Z",
+  "host": {
+    "product": "Synthesizer V Studio 2 Pro",
+    "version": "2.2.1",
+    "platform": "win32",
+    "bridgeProtocolVersion": 2
+  },
+  "fixture": {
+    "strategy": "cloned_track_with_new_library_group",
+    "sourceGroupMutated": false,
+    "temporaryObjectCounts": {
+      "tracks": 1,
+      "libraryGroups": 1,
+      "references": 2,
+      "notes": 3
+    },
+    "baseline": {
+      "trackCount": 4,
+      "libraryGroupCount": 3
+    },
+    "recovery": {
+      "trackCount": 4,
+      "libraryGroupCount": 3,
+      "fullRangeContentTokenMatched": true
+    },
+    "handles": {
+      "exportedReleaseAttempts": 13,
+      "exportedReleaseSucceeded": 13,
+      "storedRawCleanupReleaseAttempts": 83,
+      "storedRawCleanupReleaseSucceeded": 83,
+      "automaticCleanupWarningObserved": true
+    }
+  },
+  "writeBoundaries": {
+    "workflowMode": "before-and-after",
+    "boundaryCallsCompletedPerWorkflow": 2,
+    "expectedUserUndoStepsPerWorkflow": 1,
+    "humanCtrlZObserved": false
+  },
+  "results": {
+    "H2": {
+      "status": "unknown",
+      "reason": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
+      "matrix": [
+        {
+          "id": "env_1_none",
+          "vibratoEnv": 1,
+          "explicitPitchDelta": false,
+          "vibratoEnvPointCount": 0,
+          "pitchDeltaPointCount": 0,
+          "computedPitchFiniteFrames": 0,
+          "writeStatus": "succeeded"
+        },
+        {
+          "id": "env_1_sine",
+          "vibratoEnv": 1,
+          "explicitPitchDelta": true,
+          "vibratoEnvPointCount": 0,
+          "pitchDeltaPointCount": 5,
+          "computedPitchFiniteFrames": 0,
+          "writeStatus": "succeeded"
+        },
+        {
+          "id": "env_0_2_none",
+          "vibratoEnv": 0.2,
+          "explicitPitchDelta": false,
+          "vibratoEnvPointCount": 1,
+          "pitchDeltaPointCount": 0,
+          "computedPitchFiniteFrames": 0,
+          "writeStatus": "partial",
+          "reason": "FLOAT32_READBACK_NOT_STRICTLY_EQUAL"
+        },
+        {
+          "id": "env_0_2_sine",
+          "vibratoEnv": 0.2,
+          "explicitPitchDelta": true,
+          "vibratoEnvPointCount": 1,
+          "pitchDeltaPointCount": 0,
+          "computedPitchFiniteFrames": 0,
+          "writeStatus": "partial",
+          "reason": "FLOAT32_READBACK_NOT_STRICTLY_EQUAL"
+        },
+        {
+          "id": "env_1_8_none",
+          "vibratoEnv": 1.8,
+          "explicitPitchDelta": false,
+          "vibratoEnvPointCount": 1,
+          "pitchDeltaPointCount": 0,
+          "computedPitchFiniteFrames": 0,
+          "writeStatus": "partial",
+          "reason": "FLOAT32_READBACK_NOT_STRICTLY_EQUAL"
+        },
+        {
+          "id": "env_1_8_sine",
+          "vibratoEnv": 1.8,
+          "explicitPitchDelta": true,
+          "vibratoEnvPointCount": 1,
+          "pitchDeltaPointCount": 0,
+          "computedPitchFiniteFrames": 0,
+          "writeStatus": "partial",
+          "reason": "FLOAT32_READBACK_NOT_STRICTLY_EQUAL"
+        }
+      ],
+      "noteModulation": {
+        "dF0VbrModReadback": 0.5,
+        "computedPitchFiniteFrames": 0
+      }
+    },
+    "H3a": {
+      "status": "unknown",
+      "reason": "THREE_SURFACE_CASES_ALL_NULL",
+      "cases": [
+        {
+          "id": "pitch_control_only",
+          "pitchDeltaPointCount": 0,
+          "pitchControlCount": 3,
+          "computedPitchFiniteFrames": 0
+        },
+        {
+          "id": "pitch_delta_and_pitch_control",
+          "pitchDeltaPointCount": 5,
+          "pitchControlCount": 3,
+          "computedPitchFiniteFrames": 0
+        },
+        {
+          "id": "pitch_delta_only",
+          "pitchDeltaPointCount": 5,
+          "pitchControlCount": 0,
+          "computedPitchFiniteFrames": 0
+        }
+      ]
+    },
+    "H3b": {
+      "status": "partially_observed",
+      "reason": "GROUP_RELATIVE_MAPPING_READBACK_WITHOUT_COMPUTED_PITCH",
+      "localAnchors": [
+        {
+          "positionBlick": 0,
+          "pitch": 60
+        },
+        {
+          "positionBlick": 2822400000,
+          "pitch": 62
+        },
+        {
+          "positionBlick": 5644800000,
+          "pitch": 64
+        }
+      ],
+      "occurrences": [
+        {
+          "timeOffsetBlick": 0,
+          "pitchOffsetSemitone": 0,
+          "absoluteTargets": [
+            {
+              "blick": 0,
+              "midi": 60
+            },
+            {
+              "blick": 2822400000,
+              "midi": 62
+            },
+            {
+              "blick": 5644800000,
+              "midi": 64
+            }
+          ]
+        },
+        {
+          "timeOffsetBlick": 14112000000,
+          "pitchOffsetSemitone": 12,
+          "absoluteTargets": [
+            {
+              "blick": 14112000000,
+              "midi": 72
+            },
+            {
+              "blick": 16934400000,
+              "midi": 74
+            },
+            {
+              "blick": 19756800000,
+              "midi": 76
+            }
+          ]
+        }
+      ],
+      "getValueAtHalfQuarter": 60.5,
+      "computedPitchFiniteFrames": 0
+    },
+    "H4": {
+      "status": "confirmed",
+      "family": "piecewise_linear",
+      "sampleCount": 13,
+      "samples": [
+        {
+          "relativeBlick": -705600000,
+          "groupRelativeMidi": 60
+        },
+        {
+          "relativeBlick": -529200000,
+          "groupRelativeMidi": 60.25
+        },
+        {
+          "relativeBlick": -352800000,
+          "groupRelativeMidi": 60.5
+        },
+        {
+          "relativeBlick": -176400000,
+          "groupRelativeMidi": 60.75
+        },
+        {
+          "relativeBlick": 0,
+          "groupRelativeMidi": 61
+        },
+        {
+          "relativeBlick": 176400000,
+          "groupRelativeMidi": 60.75
+        },
+        {
+          "relativeBlick": 352800000,
+          "groupRelativeMidi": 60.5
+        },
+        {
+          "relativeBlick": 529200000,
+          "groupRelativeMidi": 60.25
+        },
+        {
+          "relativeBlick": 705600000,
+          "groupRelativeMidi": 60
+        },
+        {
+          "relativeBlick": 882000000,
+          "groupRelativeMidi": 60.5
+        },
+        {
+          "relativeBlick": 1058400000,
+          "groupRelativeMidi": 61
+        },
+        {
+          "relativeBlick": 1234800000,
+          "groupRelativeMidi": 61.5
+        },
+        {
+          "relativeBlick": 1411200000,
+          "groupRelativeMidi": 62
+        }
+      ]
+    },
+    "H5": {
+      "status": "unknown",
+      "reason": "RECOMPUTE_LATENCY_UNOBSERVABLE_ALL_NULL",
+      "readOnlyPolls": 57,
+      "waitSecondsAtLeast": 57,
+      "computedPitchFiniteFrames": 0
+    },
+    "H6": {
+      "status": "unknown",
+      "reason": "NO_BASELINE_NONEMPTY_COMPUTED_PITCH",
+      "computedPitchFiniteFrames": 0
+    },
+    "H7": {
+      "status": "unknown",
+      "reason": "HUMAN_CTRL_Z_NOT_OBSERVED"
+    },
+    "H8": {
+      "status": "unknown",
+      "reason": "NO_FINITE_HIGH_DENSITY_COMPUTED_PITCH",
+      "frameCount": 384,
+      "sampleRateHz": 69.33333333333333,
+      "computedPitchFiniteFrames": 0
+    }
+  },
+  "partialWriteHandling": {
+    "detected": true,
+    "reason": "vibratoEnv float32 readback differed from a strict decimal equality assertion",
+    "action": "no_retry_fixture_deleted_and_recovery_verified"
+  }
+}

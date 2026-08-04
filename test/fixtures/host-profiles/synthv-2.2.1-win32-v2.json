@@ -17,8 +17,8 @@
     "sanitizerVersion": 2,
     "readOnly": true
   },
-  "capturedAt": "2026-08-04T02:06:30.462Z",
-  "evidenceSha256": "sha256:a6642180bc2bf88508c1e4a2caa17163ef10a83567f01bd367aadb0384d0d5f8",
+  "capturedAt": "2026-08-04T02:33:04.428Z",
+  "evidenceSha256": "sha256:7d436a6f6a19c46fd24dfe0f9dbf2a0a6db5acea0210bf005ab1f6bd1e5ba182",
   "constants": {
     "quarterBlick": 705600000
   },
@@ -129,24 +129,40 @@
       "evidenceIds": []
     },
     "pitchControl.getValueAtInterpolationFamily": {
-      "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "status": "confirmed",
+      "value": {
+        "family": "piecewise_linear",
+        "sampleCount": 13
+      },
+      "evidenceIds": [
+        "EV-T04-H4-1"
+      ]
     },
     "pitchSurfaces.pitchDeltaWithPitchControl": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "THREE_SURFACE_CASES_ALL_NULL",
+      "evidenceIds": [
+        "EV-T04-H3A-1"
+      ]
     },
     "pitchSurfaces.absoluteMidiToGroupCurveTransform": {
-      "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "status": "partially_observed",
+      "value": {
+        "mapping": "group_local_plus_occurrence_offsets",
+        "anchorCount": 3,
+        "occurrenceCount": 2
+      },
+      "reason": "GROUP_RELATIVE_MAPPING_READBACK_WITHOUT_COMPUTED_PITCH",
+      "evidenceIds": [
+        "EV-T04-H3B-1"
+      ]
     },
     "vibrato.hostEnvelopeWithExplicitPitchDelta": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
+      "evidenceIds": [
+        "EV-T04-H2-1"
+      ]
     },
     "vibrato.hostEnvelopeWithExplicitPitchControl": {
       "status": "unknown",
@@ -155,28 +171,38 @@
     },
     "vibrato.noteModulationInteraction": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
+      "evidenceIds": [
+        "EV-T04-H2-1"
+      ]
     },
     "computedPitch.recomputeLatency": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "RECOMPUTE_LATENCY_UNOBSERVABLE_ALL_NULL",
+      "evidenceIds": [
+        "EV-T04-H5_H6_H8-1"
+      ]
     },
     "computedPitch.stabilityAfterWrite": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "RECOMPUTE_LATENCY_UNOBSERVABLE_ALL_NULL",
+      "evidenceIds": [
+        "EV-T04-H5_H6_H8-1"
+      ]
     },
     "computedPitch.staleNonEmptyAfterWrite": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "NO_BASELINE_NONEMPTY_COMPUTED_PITCH",
+      "evidenceIds": [
+        "EV-T04-H5_H6_H8-1"
+      ]
     },
     "computedPitch.fineFluctuationPresent": {
       "status": "unknown",
-      "reason": "AWAITING_HOST_EVIDENCE",
-      "evidenceIds": []
+      "reason": "NO_FINITE_HIGH_DENSITY_COMPUTED_PITCH",
+      "evidenceIds": [
+        "EV-T04-H5_H6_H8-1"
+      ]
     },
     "undo.multiCandidateSingleBoundary": {
       "status": "unknown",
@@ -276,6 +302,65 @@
           "sha256:796c668467dad8b56ef66218800143a9b92254c8cfce10f5ef1ee237c039d52b"
         ]
       }
+    },
+    {
+      "id": "EV-T04-H2-1",
+      "source": "live_reversible_write",
+      "scope": "fixture_observation",
+      "supports": [
+        "vibrato.hostEnvelopeWithExplicitPitchDelta",
+        "vibrato.noteModulationInteraction"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
+      "sampleCount": 7
+    },
+    {
+      "id": "EV-T04-H3A-1",
+      "source": "live_reversible_write",
+      "scope": "fixture_observation",
+      "supports": [
+        "pitchSurfaces.pitchDeltaWithPitchControl"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "THREE_SURFACE_CASES_ALL_NULL",
+      "sampleCount": 3
+    },
+    {
+      "id": "EV-T04-H3B-1",
+      "source": "live_reversible_write",
+      "scope": "fixture_observation",
+      "supports": [
+        "pitchSurfaces.absoluteMidiToGroupCurveTransform"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "GROUP_RELATIVE_MAPPING_PARTIAL",
+      "sampleCount": 6
+    },
+    {
+      "id": "EV-T04-H4-1",
+      "source": "live_reversible_write",
+      "scope": "fixture_observation",
+      "supports": [
+        "pitchControl.getValueAtInterpolationFamily"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "PITCH_CONTROL_PIECEWISE_LINEAR",
+      "sampleCount": 13
+    },
+    {
+      "id": "EV-T04-H5_H6_H8-1",
+      "source": "live_reversible_write",
+      "scope": "fixture_observation",
+      "supports": [
+        "computedPitch.recomputeLatency",
+        "computedPitch.stabilityAfterWrite",
+        "computedPitch.staleNonEmptyAfterWrite",
+        "computedPitch.fineFluctuationPresent"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
+      "sampleCount": 57
     }
   ]
 }

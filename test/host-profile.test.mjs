@@ -6,6 +6,7 @@ import {
   compileHostBehaviorProfile,
   computedPitchScenarioFromProfile,
   diffHostBehaviorProfiles,
+  hostBehaviorProfileEvidenceSha256,
   validateHostBehaviorProfile,
 } from "../tools/lib/host-behavior-profile.mjs";
 import { blickAtSeconds, secondsAtBlick } from "../server/src/musical-time.js";
@@ -17,6 +18,10 @@ import { createPitchHostModel } from "./helpers/pitch-host.mjs";
 
 const FIXTURE_URL = new URL(
   "./fixtures/host-profiles/synthv-2.2.1-win32-v2.json",
+  import.meta.url
+);
+const T04_EVIDENCE_URL = new URL(
+  "../docs/pitch-techniques/evidence/T04-host-pitch-live.json",
   import.meta.url
 );
 
@@ -155,6 +160,10 @@ async function loadFixture() {
   return validateHostBehaviorProfile(JSON.parse(await readFile(FIXTURE_URL, "utf8")));
 }
 
+async function loadT04Evidence() {
+  return JSON.parse(await readFile(T04_EVIDENCE_URL, "utf8"));
+}
+
 test("read-only probe evidence compiles into a strict de-identified profile", () => {
   const profile = compileHostBehaviorProfile({
     ...syntheticProbeEvidence(),
@@ -271,6 +280,37 @@ test("profile validation rejects semantic edits that retain a stale evidence dig
       error.code === "INVALID_HOST_PROFILE" &&
       /does not match the profile evidence/.test(error.message)
   );
+});
+
+test("profile evidence digest helper matches a validated fixture", async () => {
+  const profile = await loadFixture();
+  assert.equal(hostBehaviorProfileEvidenceSha256(profile), profile.evidenceSha256);
+});
+
+test("T04 preserves conservative host gates after isolated-fixture recovery", async () => {
+  const [profile, evidence] = await Promise.all([loadFixture(), loadT04Evidence()]);
+  assert.equal(evidence.kind, "svcopilot-host-pitch-evidence");
+  assert.equal(evidence.fixture.sourceGroupMutated, false);
+  assert.equal(evidence.fixture.recovery.fullRangeContentTokenMatched, true);
+  assert.equal(evidence.fixture.handles.exportedReleaseSucceeded, 13);
+  assert.equal(evidence.fixture.handles.storedRawCleanupReleaseSucceeded, 83);
+  assert.equal(evidence.results.H2.matrix.length, 6);
+  assert.equal(evidence.results.H4.samples.length, 13);
+  assert.equal(evidence.results.H4.family, "piecewise_linear");
+  assert.equal(
+    profile.semantics["pitchControl.getValueAtInterpolationFamily"].status,
+    "confirmed"
+  );
+  assert.equal(
+    profile.semantics["pitchSurfaces.absoluteMidiToGroupCurveTransform"].status,
+    "partially_observed"
+  );
+  assert.equal(
+    profile.semantics["vibrato.hostEnvelopeWithExplicitPitchDelta"].status,
+    "unknown"
+  );
+  assert.equal(profile.semantics["computedPitch.recomputeLatency"].status, "unknown");
+  assert.equal(profile.semantics["undo.multiCandidateSingleBoundary"].status, "unknown");
 });
 
 test("confirmed semantics require evidence and a supported value", async () => {
