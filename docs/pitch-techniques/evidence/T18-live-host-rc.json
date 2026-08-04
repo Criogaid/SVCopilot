@@ -1,8 +1,8 @@
 {
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
-  "status": "in_progress",
-  "capturedAt": "2026-08-04T09:25:44.698-03:00",
+  "status": "passed",
+  "capturedAt": "2026-08-04T10:05:46.178-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -31,6 +31,7 @@
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
+    "mvp-11-stale-context-and-reconnect",
     "mvp-13-interpolation-failure-and-rollback",
     "mvp-14-null-gap-correction"
   ],
@@ -1620,11 +1621,114 @@
         "status": "pending_human",
         "perception": "human_only"
       }
+    },
+    {
+      "id": "mvp-11-stale-context-and-reconnect",
+      "status": "passed",
+      "capturedAt": "2026-08-04T10:05:46.178-03:00",
+      "scope": "same_connection_baseline_drift_and_cross_epoch_plan_rejection",
+      "workflow": {
+        "baseline": {
+          "status": "succeeded",
+          "sourceEpoch": 1,
+          "originalContentToken": "snap_455729a3a3ac9387f10baf9953b5dc0f",
+          "transitionNotes": [
+            74,
+            75
+          ],
+          "plannedCurveCount": 1,
+          "plannedPointCount": 40,
+          "plannedRangeBlick": [
+            77060340000,
+            77289660000
+          ]
+        },
+        "sameConnectionStaleBaseline": {
+          "initialDryRunStatus": "dry_run",
+          "initialDryRunEffects": "none",
+          "initialDryRunUndoBoundaryCalls": 0,
+          "sentinelValueCent": 5,
+          "failureStatus": "failed",
+          "failureCode": "CURVE_BASELINE_CHANGED",
+          "failurePhase": "preflight",
+          "failureEffects": "none",
+          "failureOutcome": "unchanged",
+          "failureRetryable": false,
+          "hostWriteMs": 0,
+          "undoBoundaryCalls": 0,
+          "undoRecords": 0,
+          "expectedFingerprintChanged": true,
+          "sentinelCleanupVerified": true
+        },
+        "crossReconnect": {
+          "preReconnectDryRunStatus": "dry_run",
+          "preReconnectDryRunEffects": "none",
+          "preReconnectUndoBoundaryCalls": 0,
+          "sourceEpoch": 1,
+          "observedEpoch": 2,
+          "action": "commit",
+          "failureStatus": "failed",
+          "failureCode": "STALE_CONTEXT",
+          "failurePhase": "preflight",
+          "failureEffects": "none",
+          "failureOutcome": "unchanged",
+          "failureRetryable": false,
+          "hostWriteMs": 0,
+          "undoBoundaryCalls": 0,
+          "undoRecords": 0,
+          "operationMs": 0
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "restorationStatus": "no_change",
+          "contentTokenMatchedBeforeReconnect": true,
+          "contentTokenMatchedAfterReconnect": true,
+          "temporaryFixtureTransactions": 5,
+          "expectedUserUndoStepsPerFixtureTransaction": 1
+        }
+      },
+      "regressionsValidated": {
+        "automationEndpointClamp": {
+          "commit": "e2e3552",
+          "capturedEndpointValue": 0.5,
+          "defaultValue": 1,
+          "envelopeScale": 0.5,
+          "plannedValue": 0.25,
+          "plannedPointCount": 117,
+          "dryRunStatus": "dry_run",
+          "baselineFingerprintPassed": true,
+          "hostWriteMs": 0,
+          "undoBoundaryCalls": 0
+        },
+        "reconnectHandleCleanup": {
+          "commit": "bd1539d",
+          "failureBeforeFix": {
+            "knownHandleCountAfterOnePostReconnectSnapshot": 101,
+            "cause": "scope_release_used_epochless_integer_handle_ids"
+          },
+          "verificationAfterRestart": {
+            "snapshotStatus": "no_change",
+            "knownHandleCountBeforeArtifactRelease": 0,
+            "knownHandleCountAfterArtifactRelease": 0,
+            "runtimeHostProfileStatus": "matched"
+          }
+        }
+      },
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedArtifactLeases": 11,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      },
+      "humanAudition": {
+        "status": "not_required",
+        "reason": "failure_path_only"
+      }
     }
   ],
-  "pendingMvpScenarioIds": [
-    "mvp-11-stale-context-and-reconnect"
-  ],
+  "pendingMvpScenarioIds": [],
   "p2b": {
     "status": "not_started",
     "reason": "H3a remains unknown and H3b remains partially observed; PitchControlCurve is not enabled."

@@ -1,6 +1,6 @@
 # T18 — 全链路真机 RC
 
-- 状态：`in_progress`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) §13、§16.5、§17 提交 18
 - 依赖：T13、T15、T17；T14 仅在启用 P2b 时加入
 - 解锁：T19、T20
@@ -29,10 +29,10 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 ## 当前进展
 
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
-- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、2、3、4、5、6、7、8、9、10、13、14
+- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、2、3、4、5、6、7、8、9、10、11、13、14
   已完成可恢复
   真机闭环：[T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。场景 12 条件不适用，
-  另有场景 11 尚未完成，P2b 也明确保持未启动。
+  pending 清单为空；P2b 明确保持未启动。
 - 场景 5 的内容 token 已恢复，全部残留 Artifact lease 已在 TTL 后 prune；doctor 最终为
   `0 entries / 0 bytes`，cleanup 门禁闭合。
 - 场景 12 因 P4 已选进程内后端而标为 `not_applicable`；T16 的 timeout recovery 证据保留为
@@ -51,8 +51,7 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
   恢复和零 Artifact 均通过。
 - 场景 8 以临时共享引用验证两 occurrence：未确认路径在 preflight 零写入拒绝，确认路径一个
   用户 Undo，两个 occurrence 均回读到相同 target mutation 并完成 computed-pitch compare。
-  Automation 与临时引用分层恢复后原项目 token 精确匹配，Artifact 与 raw handle 均归零。当前
-  还剩 3 个 MVP 场景未完成。
+  Automation 与临时引用分层恢复后原项目 token 精确匹配，Artifact 与 raw handle 均归零。
 - 场景 9 已在 singer-bound target 上完成 12 / 373 音符规模验证。两者 34 点 planner 主响应均为
   `1,817 bytes`，长组 dense 数据只进入可分页 Artifact；dry-run 零写入，正常 commit 各为一个
   用户 Undo 且宿主插值回读通过。12 音符路径完成 computed-pitch compare；373 音符路径连续两个
@@ -71,3 +70,19 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
   `90 → 170 BPM` 阶跃。500 原始帧重采样为 551 个等秒有效帧，目标 `5.5 Hz` 实测 `5.46 Hz`，
   `0.7273%` 偏差通过真机 1% 门禁。曲线、音符、tempo 与中断前残留均已恢复，原项目长范围 token
   精确 `no_change`，资源计数归零。
+- 场景 11 的同连接漂移在 preflight 返回 `CURVE_BASELINE_CHANGED`，跨 Lua bridge epoch 的旧
+  PlanRef commit 返回 `STALE_CONTEXT`；两条拒绝路径均为 effects none、零 host write、零 Undo。
+  sentinel 清除及重连后的内容 token 均为 `no_change`。同轮验证 `e2e3552` 的 Automation 端点
+  clamp，并用 `bd1539d` 修复重连后 scoped handle 释放；重启复测后 Artifact、handle 和 pending
+  execution 全部归零。
+
+## 完成记录
+
+- 证据：[T18-live-host-rc.json](../evidence/T18-live-host-rc.json) 与
+  [T18-live-host-rc.md](../evidence/T18-live-host-rc.md)。
+- 裁定：13 个 MVP 场景通过，外部 worker 场景因 P4 选择进程内后端而条件不适用；pending 为空。
+- 验证：场景 11 完成同连接 stale baseline、跨 epoch stale Context、精确 token 恢复与资源归零；
+  完整 `npm test` 849/849、`npm run smoke:mcp` 通过。
+- 条件能力：H3a 仍为 `unknown`、H3b 为 `partially_observed`，所以 T14/T19 保持 `conditional`，
+  不启用 `PitchControlCurve` 或闭环写入。
+- 提交：本任务的独立提交见 Git history。

@@ -18,7 +18,7 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
 
   assert.equal(evidence.kind, "svcopilot-live-host-rc");
-  assert.equal(evidence.status, "in_progress");
+  assert.equal(evidence.status, "passed");
   assert.equal(evidence.runtimeHostProfile.status, "matched");
   assert.equal(evidence.runtimeHostProfile.profileId, "synthv-2.2.1-win32-v2");
   assert.equal(evidence.fixture.rawProjectDataWithheld, true);
@@ -35,13 +35,14 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
+    "mvp-11-stale-context-and-reconnect",
     "mvp-13-interpolation-failure-and-rollback",
     "mvp-14-null-gap-correction",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.deepEqual(evidence.pendingMvpScenarioIds, ["mvp-11-stale-context-and-reconnect"]);
+  assert.deepEqual(evidence.pendingMvpScenarioIds, []);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 13);
+  assert.equal(evidence.scenarios.length, 14);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -255,6 +256,33 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(nullGapScenario.workflow.cleanup.contentTokenMatched, true);
   assert.equal(nullGapScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(nullGapScenario.id), false);
+  const reconnectScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-11-stale-context-and-reconnect",
+  );
+  assert.equal(reconnectScenario.status, "passed");
+  assert.equal(
+    reconnectScenario.workflow.sameConnectionStaleBaseline.failureCode,
+    "CURVE_BASELINE_CHANGED",
+  );
+  assert.equal(reconnectScenario.workflow.sameConnectionStaleBaseline.failureEffects, "none");
+  assert.equal(reconnectScenario.workflow.sameConnectionStaleBaseline.hostWriteMs, 0);
+  assert.equal(reconnectScenario.workflow.sameConnectionStaleBaseline.undoRecords, 0);
+  assert.equal(reconnectScenario.workflow.crossReconnect.sourceEpoch, 1);
+  assert.equal(reconnectScenario.workflow.crossReconnect.observedEpoch, 2);
+  assert.equal(reconnectScenario.workflow.crossReconnect.failureCode, "STALE_CONTEXT");
+  assert.equal(reconnectScenario.workflow.crossReconnect.failureEffects, "none");
+  assert.equal(reconnectScenario.workflow.crossReconnect.hostWriteMs, 0);
+  assert.equal(reconnectScenario.workflow.crossReconnect.undoRecords, 0);
+  assert.equal(reconnectScenario.workflow.cleanup.contentTokenMatchedAfterReconnect, true);
+  assert.equal(reconnectScenario.regressionsValidated.automationEndpointClamp.plannedValue, 0.25);
+  assert.equal(
+    reconnectScenario.regressionsValidated.reconnectHandleCleanup.verificationAfterRestart
+      .knownHandleCountAfterArtifactRelease,
+    0,
+  );
+  assert.equal(reconnectScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(reconnectScenario.resourceCleanup.knownHandleCountAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(reconnectScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );

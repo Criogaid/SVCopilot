@@ -1,6 +1,6 @@
-# T18 真机 RC 进度
+# T18 真机 RC 证据
 
-采集时间：`2026-08-04T05:25:18.4196724-03:00`
+最终复核时间：`2026-08-04T10:05:46.178-03:00`
 
 已在重启后的单一 MCP 服务和用户允许的临时工程中完成 MVP 场景 4：
 `host_envelope` 振音。运行时 profile 与 `Synthesizer V Studio 2 Pro 2.2.1 / win32`
@@ -13,8 +13,8 @@
 `24.22554 cent`。这证明该写入路径和量测链路可工作，不对自然度作自动化结论。
 
 清理事务移除了全部 117 个临时 `vibratoEnv` 点，最终内容 token 与实验前精确一致；本场景
-创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 12 个 MVP 场景通过、
-1 个条件场景不适用、1 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
+创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。最终有 13 个 MVP 场景通过、
+1 个条件场景不适用，T18 的机械门禁已闭合。P2b 明确为未启动：H3a 仍为
 `unknown`，H3b 仅
 `partially_observed`，所以不启用 `PitchControlCurve`。
 
@@ -97,7 +97,7 @@ warning；部分覆盖夹具原始为 `7 / 32` 个有限帧，其中 2 帧落在
 `POSTCONDITION_FAILED / rolled_back / effects:reverted`，在同一个用户 Undo 中按
 `vibratoEnv → pitchDelta` 逆序补偿且两条曲线均验证恢复。最终双参数内容 token 精确
 `no_change`；本场景两份 Artifact 已释放，当时保留的场景 11 跨重连 PlanRef 已在后续 MCP 重启时失效，
-场景 11 将重新采集。
+最终场景 11 已使用新 PlanRef 重新采集。
 
 场景 14 在 300 帧 computed-pitch 快照中固定了连续 21 帧 null gap，并在两侧分别提交正向
 overshoot 与负向 preparation。重启加载 `48c723e` 后，原先被 `1.907e-6 cent` float32 微差
@@ -113,5 +113,17 @@ overshoot 与负向 preparation。重启加载 `48c723e` 后，原先被 `1.907e
 相对偏差 `0.7273%`，通过 H1 后设定的真机 1% 门禁。曲线、音符、tempo 均恢复；长范围内容 token
 精确 `no_change`，旧场景 2 中断残留也恢复为原始 `pitchDelta 35 / vibratoEnv 0`，Artifact、
 handle 与 pending execution 全部归零。
+
+场景 11 先在同一 bridge epoch 内生成 40 点 Richards transition 并完成零写入 dry-run，再向计划
+范围注入 `5 cent` sentinel。旧 PlanRef 在 preflight 返回 `CURVE_BASELINE_CHANGED`，effects 为
+`none`，host write、Undo boundary 和 Undo record 全为 0；清除 sentinel 后内容 token 精确
+`no_change`。重新生成的 PlanRef 在 epoch 1 dry-run 成功，仅重启 Lua bridge 后以 commit 动作重放，
+在 epoch 2 的 `0 ms` preflight 返回 `STALE_CONTEXT / outcome:unchanged`，仍为零写入、零 Undo。
+
+同轮还验证了两个实机回归。`e2e3552` 让最后一个 `vibratoEnv` 端点值 `0.5` 在后续音符范围继续生效，
+0.5 倍 host-envelope 计划得到 117 个值为 `0.25` 的点并通过 baseline fingerprint dry-run。重连后
+首个快照暴露 scoped handle 释放使用裸整数的问题：旧进程留下 101 个已知 handle；`bd1539d` 改为
+释放带 epoch 的完整 handle。重启加载后重复同一快照，Artifact 释放前后 handle 均为 0，内容 token
+仍为 `no_change`，最终 Artifact `0 entries / 0 bytes`、pending execution 0、profile 精确匹配。
 
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。
