@@ -30,11 +30,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
     "mvp-06-overlap-composition-permutation",
+    "mvp-07-pitch-delta-surface",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 8);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 7);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 6);
+  assert.equal(evidence.scenarios.length, 7);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -98,6 +99,23 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(overlapScenario.workflow.cleanup.restorationTokenMatched, true);
   assert.equal(overlapScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(overlapScenario.id), false);
+  const pitchDeltaSurfaceScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-07-pitch-delta-surface",
+  );
+  assert.equal(pitchDeltaSurfaceScenario.status, "passed");
+  assert.deepEqual(pitchDeltaSurfaceScenario.workflow.plan.resolvedParameters, ["pitchDelta"]);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.plan.pitchControlMutationPlanned, false);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.readbackSurface.onlyPitchDeltaChanged, true);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.readbackSurface.pitchControlCurvesBefore, 0);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.readbackSurface.pitchControlCurvesAfter, 0);
+  assert.equal(pitchDeltaSurfaceScenario.workflow.cleanup.restorationTokenMatched, true);
+  assert.equal(
+    pitchDeltaSurfaceScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup,
+    0,
+  );
+  assert.equal(evidence.pendingMvpScenarioIds.includes(pitchDeltaSurfaceScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );

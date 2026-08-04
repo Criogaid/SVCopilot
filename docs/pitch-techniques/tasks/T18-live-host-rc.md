@@ -29,9 +29,9 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 ## 当前进展
 
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
-- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 4 已完成一次可恢复真机闭环：
-  [T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。场景 4、5 已通过，另有
-  11 个 MVP 场景尚未完成，P2b 也明确保持未启动。
+- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、3、4、5、6、7 已完成可恢复
+  真机闭环：[T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。场景 12 条件不适用，
+  另有 7 个 MVP 场景尚未完成，P2b 也明确保持未启动。
 - 场景 5 的内容 token 已恢复，全部残留 Artifact lease 已在 TTL 后 prune；doctor 最终为
   `0 entries / 0 bytes`，cleanup 门禁闭合。
 - 场景 12 因 P4 已选进程内后端而标为 `not_applicable`；T16 的 timeout recovery 证据保留为
@@ -44,5 +44,7 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
   宿主插值读回、computed-pitch 方向性观测、精确 token 恢复和零 Artifact 均通过。
 - 场景 6 已完成 Richards transition、overshoot transient、显式振音的重叠合成，并以完全反转
   的输入顺序获得相同 `planId`、曲线数和点数。单 Undo commit、166 个宿主插值样本、
-  computed-pitch compare、精确 token 恢复与 Artifact `0 entries / 0 bytes` 均通过。当前还剩
-  8 个 MVP 场景未完成。
+  computed-pitch compare、精确 token 恢复与 Artifact `0 entries / 0 bytes` 均通过。
+- 场景 7 已以写后宿主快照确认纯 transition 只改变 `pitchDelta` Automation：目标范围新增
+  34 点，`PitchControlCurve` 前后均为 0，`vibratoEnv` 未触及。单 Undo、插值读回、精确 token
+  恢复和零 Artifact 均通过。当前还剩 7 个 MVP 场景未完成。

@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T06:48:02.673-03:00",
+  "capturedAt": "2026-08-04T06:54:12.897-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -25,7 +25,8 @@
     "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
-    "mvp-06-overlap-composition-permutation"
+    "mvp-06-overlap-composition-permutation",
+    "mvp-07-pitch-delta-surface"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -605,6 +606,126 @@
       }
     },
     {
+      "id": "mvp-07-pitch-delta-surface",
+      "status": "passed",
+      "capturedAt": "2026-08-04T06:54:12.897-03:00",
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "constantTempoBpm": 130,
+          "baselinePitchDeltaPoints": 67,
+          "baselinePitchControlCurves": 0,
+          "computedPitch": {
+            "requestedFrames": 768,
+            "finiteFrames": 519,
+            "nullFrames": 249,
+            "coverage": 0.67578125
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 1,
+          "curveCount": 1,
+          "pointCount": 34,
+          "targetSurface": "pitchDelta",
+          "resolvedParameters": [
+            "pitchDelta"
+          ],
+          "vibratoEnvRequired": false,
+          "pitchControlMutationPlanned": false
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0,
+          "targetRangeBaselinePoints": 0
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 34,
+          "readbackPoints": 34,
+          "hostWriteMs": 75,
+          "hostVerificationMs": 80,
+          "operationMs": 331,
+          "maxPointValueDeltaCent": 0.0000018764648430646957,
+          "hostInterpolation": {
+            "sampleCount": 35,
+            "maxAbsErrorCent": 0.0000023764648489077445,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "stablePolls": 2,
+          "attempts": 2,
+          "elapsedMs": 108,
+          "coverage": 0.67578125
+        },
+        "readbackSurface": {
+          "status": "succeeded",
+          "pitchDeltaPointsBefore": 67,
+          "pitchDeltaPointsAfter": 101,
+          "targetRangePitchDeltaPoints": 34,
+          "pitchControlCurvesBefore": 0,
+          "pitchControlCurvesAfter": 0,
+          "onlyPitchDeltaChanged": true
+        },
+        "compare": {
+          "status": "succeeded",
+          "comparedFrames": 519,
+          "nullFramesBefore": 249,
+          "nullFramesAfter": 249,
+          "overall": {
+            "meanCent": -0.08153676527313644,
+            "medianCent": 0,
+            "maeCent": 1.1899598990791336,
+            "rmseCent": 6.2320620340805,
+            "p95AbsCent": 0.1354217529296875,
+            "maxAbsCent": 45.993804931640625
+          },
+          "focusNoteCenterDeltaCent": {
+            "transitionSource": -8.982446458605153,
+            "transitionTarget": 2.1108851713293575
+          },
+          "unmatchedNotes": 0
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "dryRunEffects": "none",
+          "dryRunUndoBoundaryCalls": 0,
+          "pitchDeltaPoints": {
+            "before": 34,
+            "after": 0
+          },
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "maxPointValueDelta": 0,
+          "restorationTokenMatched": true
+        }
+      },
+      "artifactLeaseCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedLeases": 4,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0
+      },
+      "transportMetrics": {
+        "status": "partial",
+        "reason": "Facade timings and Artifact bytes were observed; aggregate PIPE and MCP byte percentiles remain pending."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
+    {
       "id": "mvp-12-worker-timeout-or-crash",
       "status": "not_applicable",
       "gate": {
@@ -623,7 +744,6 @@
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
-    "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
