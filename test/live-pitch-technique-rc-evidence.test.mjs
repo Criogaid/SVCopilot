@@ -24,9 +24,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(evidence.fixture.rawProjectDataWithheld, true);
   assert.equal(evidence.fixture.originalContentTokenRestored, true);
   assert.equal(evidence.fixture.intermediateArtifactLeasesReleased, true);
-  assert.deepEqual(evidence.completedMvpScenarioIds, ["mvp-04-host-envelope-vibrato"]);
+  assert.deepEqual(evidence.completedMvpScenarioIds, [
+    "mvp-04-host-envelope-vibrato",
+    "mvp-05-explicit-pitch-delta-vibrato",
+  ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 12);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 11);
   assert.equal(evidence.p2b.status, "not_started");
   assert.equal(evidence.scenarios.length, 3);
 
@@ -39,13 +42,14 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(scenario.workflow.commit.undoBoundaryCalls, 2);
   assert.equal(scenario.workflow.cleanup.restorationTokenMatched, true);
   assert.equal(scenario.humanAudition.status, "pending_human");
-  const partialScenario = evidence.scenarios[1];
-  assert.equal(partialScenario.id, "mvp-05-explicit-pitch-delta-vibrato");
-  assert.equal(partialScenario.status, "in_progress");
-  assert.equal(partialScenario.workflow.dryRun.setterCalls, 0);
-  assert.equal(partialScenario.workflow.cleanup.restorationTokenMatched, true);
-  assert.equal(partialScenario.artifactLeaseCleanup.status, "partial");
-  assert.ok(evidence.pendingMvpScenarioIds.includes(partialScenario.id));
+  const explicitScenario = evidence.scenarios[1];
+  assert.equal(explicitScenario.id, "mvp-05-explicit-pitch-delta-vibrato");
+  assert.equal(explicitScenario.status, "passed");
+  assert.equal(explicitScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(explicitScenario.workflow.cleanup.restorationTokenMatched, true);
+  assert.equal(explicitScenario.artifactLeaseCleanup.status, "succeeded");
+  assert.equal(explicitScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(explicitScenario.id), false);
   const notApplicableScenario = evidence.scenarios[2];
   assert.equal(notApplicableScenario.id, "mvp-12-worker-timeout-or-crash");
   assert.equal(notApplicableScenario.status, "not_applicable");

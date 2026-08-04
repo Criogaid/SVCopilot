@@ -21,7 +21,8 @@
     "intermediateArtifactLeasesReleased": true
   },
   "completedMvpScenarioIds": [
-    "mvp-04-host-envelope-vibrato"
+    "mvp-04-host-envelope-vibrato",
+    "mvp-05-explicit-pitch-delta-vibrato"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -112,7 +113,7 @@
     },
     {
       "id": "mvp-05-explicit-pitch-delta-vibrato",
-      "status": "in_progress",
+      "status": "passed",
       "capturedAt": "2026-08-04T05:42:11.4351697-03:00",
       "workflow": {
         "snapshot": {
@@ -198,12 +199,15 @@
         }
       },
       "artifactLeaseCleanup": {
-        "status": "partial",
-        "explicitlyReleasedLeases": 3,
-        "sessionArtifactEntriesAfterRelease": 5,
-        "remainingDescriptorEnumeration": "unavailable",
+        "status": "succeeded",
+        "explicitlyReleasedLeases": 4,
+        "expiredResidualLeases": 5,
+        "cleanupConfirmedAt": "2026-08-04T06:13:08.2581101-03:00",
+        "pruneTrigger": "tracked_read_only_snapshot_released_immediately",
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
         "ttlMs": 1800000,
-        "completionGate": "Do not mark this scenario complete until all temporary artifact leases are explicitly released or their expiry is confirmed."
+        "completionGate": "passed"
       },
       "transportMetrics": {
         "status": "not_recorded_for_initial_scenario",
@@ -235,7 +239,6 @@
     "mvp-01-richards-constant-tempo",
     "mvp-02-tempo-change-transition-vibrato",
     "mvp-03-overshoot-preparation",
-    "mvp-05-explicit-pitch-delta-vibrato",
     "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
