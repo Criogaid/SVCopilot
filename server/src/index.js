@@ -97,7 +97,7 @@ import { loadRuntimeHostProfiles, selectRuntimeHostProfile } from "./runtime-hos
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处。
-const INTERFACE_VERSION = "0.10.0";
+export const INTERFACE_VERSION = "0.10.0";
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const bridge = new PipeRelay();

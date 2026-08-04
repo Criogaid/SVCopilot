@@ -1,4 +1,4 @@
-// MCP 效率基准的回归测试：验证 benchmark runner 输出、fixture 稳定性以及关键指标。
+// MCP 效率基准回归：验证 facade、内部 inventory、离线 trace 与 fixture 的边界。
 import assert from "node:assert";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -13,7 +13,6 @@ const outputDir = mkdtempSync(path.join(os.tmpdir(), "svcopilot-efficiency-"));
 const before = snapshotDirectory(fixturesDir);
 
 try {
-  // 测试只写临时目录；固定时间确保同一输入逐字节稳定。
   const report = await runBenchmark({
     writeBaseline: false,
     outputDir,
@@ -21,68 +20,71 @@ try {
     quiet: true,
   });
 
-// 报告结构。
-assert.strictEqual(typeof report.fixtureVersion, "string");
-assert.strictEqual(typeof report.generatedAt, "string");
-assert.ok(report.summary, "report.summary 必须存在");
-assert.ok(report.listTools, "report.listTools 必须存在");
-assert.ok(report.toolResult, "report.toolResult 必须存在");
-assert.ok(report.fixtures, "report.fixtures 必须存在");
+  const repeat = await runBenchmark({
+    writeBaseline: false,
+    generatedAt: "2026-01-01T00:00:00.000Z",
+    quiet: true,
+  });
+  assert.deepStrictEqual(repeat, report, "固定输入的 benchmark report 必须逐字段稳定");
 
-// ListTools 指标：minified 应小于 pretty，且与 PRD 基线接近。
-assert.ok(report.listTools.minifiedBytes > 0, "ListTools minified bytes 必须大于 0");
-assert.ok(report.listTools.prettyBytes > report.listTools.minifiedBytes, "pretty 必须大于 minified");
-// 工具总数不写死常量：它是 OperationCatalog 的派生值，任何增删都必须只改一处。
-const { TOOLS } = await import("../server/src/index.js");
-assert.strictEqual(report.listTools.toolCount, TOOLS.length);
-assert.ok(
-  report.listTools.descriptionBytes > 0,
-  "description bytes 必须大于 0"
-);
-assert.ok(report.listTools.schemaBytes > 0, "schema bytes 必须大于 0");
+  assert.strictEqual(report.fixtureVersion, "1");
+  assert.ok(report.servedMcp);
+  assert.ok(report.operationSchemas);
+  assert.ok(report.fixturePayloads);
+  assert.ok(report.workflowTrace);
+  assert.ok(report.host);
+  assert.strictEqual(report.listTools, undefined, "旧的含混 listTools 口径必须删除");
 
-// 典型工具响应的 pretty/minified 差异。
-assert.ok(report.toolResult.minifiedBytes > 0, "representative result minified bytes 必须大于 0");
-assert.ok(
-  report.toolResult.prettyBytes > report.toolResult.minifiedBytes,
-  "representative result pretty 必须大于 minified"
-);
-assert.ok(
-  report.toolResult.overheadPercent > 0,
-  "representative result pretty overhead 必须为正"
-);
+  const { TOOLS } = await import("../server/src/index.js");
+  assert.strictEqual(report.servedMcp.toolsList.toolCount, 8);
+  assert.strictEqual(report.operationSchemas.handlerCount, TOOLS.length);
+  assert.strictEqual(report.operationSchemas.operationCount, TOOLS.length);
+  assert.ok(report.servedMcp.toolsList.minifiedBytes < 12 * 1024);
+  assert.ok(report.operationSchemas.minifiedBytes > report.servedMcp.toolsList.minifiedBytes);
+  assert.ok(report.servedMcp.reductionVsInternalPercent > 90);
+  assert.strictEqual(report.servedMcp.soloOverBudget.length, 0);
+  assert.strictEqual(report.servedMcp.describeCases.length, 3);
 
-// Fixtures 已生成。
-const expectedFixtures = [
-  "notes-10",
-  "notes-100",
-  "notes-373",
-  "notes-1000",
-  "automation-10",
-  "automation-100",
-  "automation-1000",
-  "automation-2000",
-  "computed-pitch-null",
-  "computed-pitch-sparse",
-  "computed-pitch-160",
-  "computed-pitch-1000",
-];
-for (const name of expectedFixtures) {
-  const fixture = report.fixtures[name];
-  assert.ok(fixture, `fixture ${name} 必须存在`);
-  assert.strictEqual(typeof fixture.hash, "string");
-  assert.strictEqual(fixture.hash.length, 32);
-  assert.ok(existsSync(path.join(outputDir, fixture.fileName)), `fixture 文件 ${fixture.fileName} 必须存在`);
-}
+  assert.strictEqual(report.workflowTrace.scope, "offline_facade_discovery");
+  assert.strictEqual(report.workflowTrace.mcpToolCalls, 3);
+  assert.strictEqual(report.workflowTrace.resourceReads, 1);
+  assert.strictEqual(report.workflowTrace.describeCalls, 3);
+  assert.ok(report.workflowTrace.requestBytes > 0);
+  assert.ok(report.workflowTrace.responseBytes > 0);
+  assert.ok(report.workflowTrace.modelVisibleBytes > report.workflowTrace.responseBytes);
+  assert.strictEqual(report.workflowTrace.wallTimeMs, null);
+  assert.strictEqual(report.workflowTrace.hostCalls, 0);
+  assert.strictEqual(report.host.status, "not_collected");
 
-// notes fixture 的 itemCount 正确。
-assert.strictEqual(report.fixtures["notes-373"].itemCount, 373);
-assert.strictEqual(report.fixtures["automation-2000"].itemCount, 2000);
-assert.strictEqual(report.tokenizer.status, "unavailable");
-assert.strictEqual(report.execution.scope, "static_serialization_only");
-assert.deepStrictEqual(snapshotDirectory(fixturesDir), before, "benchmark test 不得修改仓库 fixture");
+  const result = report.fixturePayloads.representativeResult;
+  assert.ok(result.minifiedBytes > 0);
+  assert.ok(result.prettyBytes > result.minifiedBytes);
+  assert.ok(result.overheadPercent > 0);
 
-console.log("efficiency-benchmark.test.mjs passed");
+  const expectedFixtures = [
+    "notes-10",
+    "notes-100",
+    "notes-373",
+    "notes-1000",
+    "automation-10",
+    "automation-100",
+    "automation-1000",
+    "automation-2000",
+    "computed-pitch-null",
+    "computed-pitch-sparse",
+    "computed-pitch-160",
+    "computed-pitch-1000",
+  ];
+  for (const name of expectedFixtures) {
+    const fixture = report.fixturePayloads.fixtures[name];
+    assert.ok(fixture, `fixture ${name} 必须存在`);
+    assert.strictEqual(fixture.hash.length, 32);
+    assert.ok(existsSync(path.join(outputDir, fixture.fileName)));
+  }
+  assert.strictEqual(report.fixturePayloads.fixtures["notes-373"].itemCount, 373);
+  assert.strictEqual(report.fixturePayloads.fixtures["automation-2000"].itemCount, 2000);
+  assert.strictEqual(report.tokenizer.status, "unavailable");
+  assert.deepStrictEqual(snapshotDirectory(fixturesDir), before, "benchmark test 不得修改仓库 fixture");
 } finally {
   rmSync(outputDir, { recursive: true, force: true });
 }

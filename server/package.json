@@ -18,6 +18,7 @@
     "time-axis:capture": "node ../tools/capture-time-axis-evidence.mjs",
     "bench:fit-workers": "node ../tools/benchmark-fit-workers.mjs",
     "bench:live-bulk": "node ../tools/bench-live-bulk-reads.mjs",
+    "bench:mcp": "node ../tools/benchmark-mcp-efficiency.mjs",
     "acceptance:live": "node ../tools/live-acceptance-walkthrough.mjs"
   },
   "dependencies": {
