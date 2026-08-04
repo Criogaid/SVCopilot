@@ -88,6 +88,12 @@ test("sv_doctor returns a structurally valid report", async () => {
   assert.ok(d.bridge);
   assert.ok(d.transport);
   assert.equal("session" in d.transport, false);
+  assert.equal(d.transport.hostProduct, null);
+  assert.deepEqual(d.runtimeHostProfile, {
+    status: "not_evaluated",
+    profileId: null,
+    evidenceSha256: null,
+  });
   // 子进程继承测试命名空间，因此与同一解析器比对，而不是写死安装期名字。
   assert.deepEqual(d.transport.pipes, resolvePipePaths());
   assert.ok(Array.isArray(d.findings));
@@ -216,14 +222,29 @@ test("collectDoctorReport unit: attached host with no ops produces warning", () 
     moduleDir,
     protoVersion: 2,
     pipePaths: { toSv: "a", fromSv: "b" },
-    host: { state: "attached", epoch: 1, hostVersion: "2.2.1", hostOps: [], knownHandleCount: 0, pendingExecutions: 0 },
+    host: {
+      state: "attached",
+      epoch: 1,
+      hostVersion: "2.2.1",
+      hostProduct: "Synthesizer V Studio 2 Pro",
+      hostOps: [],
+      knownHandleCount: 0,
+      pendingExecutions: 0,
+    },
     manifest: { available: true, generatedAt: "2025-01-01", schemaVersion: "1.0" },
     surface: { facades: ["sv_status"], facadeCount: 8, operationCount: 42 },
     stores: { artifacts: { entries: 0, bytes: 0 }, snapshotContexts: { entries: 0, accountedBytes: 0, evictions: 0, ttlMs: 1800000, maxTotalBytes: 67108864 } },
+    runtimeHostProfile: {
+      status: "matched",
+      profileId: "synthv-2.2.1-win32-v2",
+      evidenceSha256: "sha256:test",
+    },
   });
   const noOps = report.findings.find((f) => f.code === "NO_NEGOTIATED_HOST_OPS");
   assert.ok(noOps, "NO_NEGOTIATED_HOST_OPS warning must be present when attached with empty ops");
   assert.equal(noOps.severity, "warning");
+  assert.equal(report.transport.hostProduct, "Synthesizer V Studio 2 Pro");
+  assert.equal(report.runtimeHostProfile.status, "matched");
 });
 
 test("summarizeHostProfiles returns correct shape for existing fixtures", () => {

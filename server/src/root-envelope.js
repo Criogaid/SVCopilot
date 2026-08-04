@@ -56,7 +56,7 @@ export const DETAIL_PATHS = Object.freeze(["data.detail", "error.detail"]);
 export const LEGACY_ROOT_FIELDS = Object.freeze({
   // sv_status(doctor)：安装诊断不是「对某个工程对象的操作」，它的字段是诊断报告本身。
   // 计划 §10.3 把 doctor 的结论放在 data 里，但报告结构（versions/bridge/transport/
-  // findings/stores/surface/hostProfiles）远超 data 的一层，迁移会牵动 doctor-cli
+  // findings/stores/surface/hostProfiles/runtimeHostProfile）远超 data 的一层，迁移会牵动 doctor-cli
   // 的人类可读输出。B2 一并处理。
   kind: "sv_status(doctor)：报告类型标签；移入 data 或由 operation 唯一决定",
   installationHealthy: "sv_status(doctor)：安装健康结论 -> data.installationHealthy",
@@ -69,6 +69,7 @@ export const LEGACY_ROOT_FIELDS = Object.freeze({
   stores: "sv_status(doctor) -> data",
   findings: "sv_status(doctor) -> data",
   hostProfiles: "sv_status(doctor) -> data",
+  runtimeHostProfile: "sv_status(doctor)：当前宿主的精确 profile 匹配结论 -> data",
 
   // sv_status(search_api / describe_api)：官方 API 文档查询，纯读取。
   query: "sv_status(search_api)：回显查询串 -> data",

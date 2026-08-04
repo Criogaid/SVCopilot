@@ -110,6 +110,7 @@ function compareBridges(loaded, staging) {
  * @param {object} deps.surface - { facades, facadeCount, operationCount }
  * @param {object} deps.stores - { artifacts, contexts }
  * @param {object[]} [deps.hostProfiles] - 已提交 host profile 的摘要
+ * @param {object} [deps.runtimeHostProfile] - 当前宿主的精确 profile 匹配摘要
  * @returns {object}
  */
 export function collectDoctorReport({
@@ -122,6 +123,7 @@ export function collectDoctorReport({
   surface,
   stores,
   hostProfiles = [],
+  runtimeHostProfile = null,
 }) {
   const loaded = firstExisting(moduleDir, LOADED_BRIDGE_CANDIDATES);
   const staging = inspectBridgeScript(path.resolve(moduleDir, STAGING_BRIDGE));
@@ -216,6 +218,7 @@ export function collectDoctorReport({
       epoch: host.epoch,
       // 宿主版本只有连上之后才可读；未连接时是 null，不是"未知版本"。
       hostVersion: host.hostVersion ?? null,
+      hostProduct: host.hostProduct ?? null,
       negotiatedOps: host.hostOps ?? [],
       knownHandleCount: host.knownHandleCount ?? 0,
       pendingExecutions: host.pendingExecutions ?? 0,
@@ -224,6 +227,7 @@ export function collectDoctorReport({
     surface,
     stores,
     hostProfiles,
+    runtimeHostProfile,
     findings,
   };
 }

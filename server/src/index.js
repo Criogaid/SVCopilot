@@ -188,10 +188,7 @@ const pitchGesturePlanService = new PitchGesturePlanService({
   store: snapshotService.store,
   artifactStore,
   sessionId: serverSessionId,
-  hostProfileProvider: () => selectRuntimeHostProfile(runtimeHostProfiles, {
-    ...hostSession.getStatus(),
-    platform: process.platform,
-  }),
+  hostProfileProvider: () => selectProfileForHostStatus(hostSession.getStatus()),
 });
 const selectionService = new SelectionService(hostSession, { snapshotService });
 
@@ -3737,12 +3734,14 @@ function capabilities() {
 
 // Doctor 只读采集：不连接宿主、不写盘，宿主未连接时如实报当前状态。
 function doctorReport() {
+  const host = hostSession.getStatus();
+  const profile = selectProfileForHostStatus(host);
   return collectDoctorReport({
     interfaceVersion: INTERFACE_VERSION,
     moduleDir,
     protoVersion: bridge.proto,
     pipePaths: resolvePipePaths(),
-    host: hostSession.getStatus(),
+    host,
     manifest: {
       available: apiManifestAvailable,
       generatedAt: apiManifest.generatedAt,
@@ -3766,7 +3765,30 @@ function doctorReport() {
     hostProfiles: summarizeHostProfiles(
       path.resolve(moduleDir, "../../test/fixtures/host-profiles")
     ),
+    runtimeHostProfile: summarizeRuntimeHostProfile(profile, host),
   });
+}
+
+function selectProfileForHostStatus(host) {
+  return selectRuntimeHostProfile(runtimeHostProfiles, {
+    ...host,
+    platform: process.platform,
+  });
+}
+
+function summarizeRuntimeHostProfile(profile, host) {
+  if (profile) {
+    return {
+      status: "matched",
+      profileId: profile.profileId,
+      evidenceSha256: profile.evidenceSha256,
+    };
+  }
+  return {
+    status: host.state === "attached" ? "unmatched" : "not_evaluated",
+    profileId: null,
+    evidenceSha256: null,
+  };
 }
 
 function musicWorkflowSchemaIndex() {
