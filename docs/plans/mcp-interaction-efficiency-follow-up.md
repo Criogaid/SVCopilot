@@ -4,8 +4,9 @@
 
 | 字段 | 内容 |
 | --- | --- |
-| 状态 | 实施中 |
+| 状态 | 已完成 |
 | 立项日期 | 2026-08-04 |
+| 完成日期 | 2026-08-04 |
 | 基线版本 | SVCopilot `0.10.0`，提交 `13b6a64` |
 | 实施范围 | 效率基准、operation schema 缓存、用户可读术语、Artifact 短翻页 |
 | 实施顺序 | E1 基准 -> E2 schema 缓存 -> E3 术语 -> E4 Artifact |
@@ -184,3 +185,44 @@ session、受 lease 和 quota 管理；offset 必须是安全整数、在范围�
 - 四项均有 schema、服务行为、失败路径、响应预算和 MCP 投影测试；
 - 完整测试、MCP smoke、效率基准和 diff check 通过；
 - 工作区不包含凭据、机器路径、真实歌词或本地元数据。
+
+## 8. 完成证据
+
+### 8.1 实施提交
+
+| 阶段 | 提交 |
+| --- | --- |
+| 立项 | `51213d0 Establish follow-up MCP efficiency plan` |
+| E1 效率基准 | `56ba7b3 Unify MCP efficiency benchmark measurements` |
+| E2 schema 缓存 | `6a40334 Add cache identities to operation schemas` |
+| E3 可读术语 | `cbb925e Explain host semantics with stable terminology` |
+| E4 Artifact 短翻页 | `e337dc2 Read artifacts through short offset pages` |
+
+### 8.2 最终实测
+
+由 `test/fixtures/efficiency/baseline.json` 记录：
+
+| 指标 | 最终值 |
+| --- | ---: |
+| 实际 facade `tools/list` | 8 tools / 5,015 bytes |
+| 内部 handler inventory | 44 handlers / 114,784 bytes |
+| facade 相对内部 inventory 缩减 | 95.6% |
+| operation catalog | 44 operations / 11,787 bytes |
+| 固定离线 discovery trace 模型可见总量 | 31,746 bytes |
+
+Artifact 以相同 8 KiB 页面边界比较旧 resource cursor 和新 offset tool call：
+
+| Artifact bytes | 页数 | 业务参数缩减 | 含 facade 参数缩减 | 完整 JSON-RPC 缩减 |
+| ---: | ---: | ---: | ---: | ---: |
+| 63,356 | 8 | 87.1% | 78.3% | 60.3% |
+| 109,975 | 14 | 87.4% | 78.8% | 61.3% |
+| 188,236 | 23 | 87.4% | 79.0% | 61.7% |
+
+### 8.3 验证结果
+
+- `npm test`：856/856 passed；
+- `npm run smoke:mcp`：passed，8-tool facade、schema discovery、新 Artifact 短读和兼容 resource
+  均通过真实 stdio MCP client；
+- `npm run bench:mcp -- --quiet`：passed；
+- `git diff --check`：passed；
+- 未修改 Lua bridge，不需要 SynthV bridge 重启或 live-host 写入验收。
