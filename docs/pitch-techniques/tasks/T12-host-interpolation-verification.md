@@ -1,6 +1,6 @@
 # T12 — 宿主插值后置验证
 
-- 状态：`blocked`
+- 状态：`ready`
 - 权威：[实施计划](../implementation-plan.md) §9.4、F5c、§17 提交 12
 - 依赖：T04 的 H4 证据、T11
 - 解锁：T13、T18

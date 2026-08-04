@@ -284,6 +284,11 @@ gap、时间映射偏差、等音高、短音符、大音程、BLICK 分辨率�
 oracle 的 BLICK 投影消费的是
 H1 映射结果，不自行猜测秒↔BLICK；实际换算仍受 H1 门禁约束。
 
+T11 已在 `server/src/pitch-techniques/pitch-delta-compiler.js` 落地该映射的纯编译层：它只接受
+冻结的 canonical IR、composition 与 snapshot evidence，将绝对秒先回投到 occurrence-relative BLICK，
+保留 transition 的双侧边界锚点，并预合成 baseline + contribution 为 `pitchDelta` replace requests。
+输出明确标记 `pending_t12_host_interpolation`；它尚未把宿主插值或写入后误差宣称为通过。
+
 ### 4.2 F2 — 二阶瞬态拆分（**取代 Opus A2**）
 
 内部通用模型（**单位：角频率，不是 Hz**，见 F2b）：
