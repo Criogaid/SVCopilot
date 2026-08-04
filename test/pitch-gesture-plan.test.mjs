@@ -5,6 +5,7 @@ import { ArtifactStore } from "../server/src/artifact-store.js";
 import { decodeDense } from "../server/src/dense-codec.js";
 import { ParameterCurveService, normalizeCurveInput } from "../server/src/parameter-curve.js";
 import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
+import { evaluateAutomationPoints } from "../server/src/pitch-techniques/automation-baseline.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 import { createPitchHostModel } from "./helpers/pitch-host.mjs";
 
@@ -44,6 +45,20 @@ function automation(parameter, points = []) {
     points: points.map(([localBlick, value]) => ({ localBlick, value })),
   };
 }
+
+test("Automation baseline clamps outside its captured endpoint points", () => {
+  const input = {
+    method: "linear",
+    defaultValue: 1,
+    points: [
+      { blick: 100, value: 0.25 },
+      { blick: 200, value: 0.75 },
+    ],
+  };
+  assert.equal(evaluateAutomationPoints({ ...input, blick: 50 }), 0.25);
+  assert.equal(evaluateAutomationPoints({ ...input, blick: 250 }), 0.75);
+  assert.equal(evaluateAutomationPoints({ ...input, points: [], blick: 250 }), 1);
+});
 
 function noteFingerprint(note, index) {
   return {

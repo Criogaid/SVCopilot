@@ -76,8 +76,8 @@ export function evaluateAutomationPoints({ method, defaultValue, points, blick }
   const exact = normalizedPoints.find((point) => point.blick === blick);
   if (exact) return exact.value;
   const rightIndex = normalizedPoints.findIndex((point) => point.blick > blick);
-  if (rightIndex <= 0) return defaultValue;
-  if (rightIndex === -1) return defaultValue;
+  if (rightIndex === 0) return normalizedPoints[0].value;
+  if (rightIndex === -1) return normalizedPoints.at(-1).value;
   const left = normalizedPoints[rightIndex - 1];
   const right = normalizedPoints[rightIndex];
   const ratio = (blick - left.blick) / (right.blick - left.blick);
