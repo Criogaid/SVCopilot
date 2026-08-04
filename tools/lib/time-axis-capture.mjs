@@ -60,7 +60,7 @@ export async function captureTimeAxisEvidence({
 function normalizeTempoMarks(value) {
   if (!Array.isArray(value)) throw captureError("TimeAxis.getAllTempoMarks returned a non-array value");
   return value.map((mark) => ({
-    positionBlick: mark?.positionBlick,
+    positionBlick: mark?.position,
     positionSeconds: mark?.positionSeconds,
     bpm: mark?.bpm,
   }));

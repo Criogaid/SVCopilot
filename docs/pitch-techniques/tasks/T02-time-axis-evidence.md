@@ -1,6 +1,6 @@
 # T02 — H1 TimeAxis 证据与 Profile v2
 
-- 状态：`blocked`
+- 状态：`in_progress`
 - 权威：[实施计划](../implementation-plan.md) §7.1、§7.2、§17 提交 2
 - 依赖：T01 基线记录
 - 解锁：T03 裁定、T04、T08
@@ -28,10 +28,14 @@ H1 从 `partially_observed` 变成有证据的终态，T08 可据此使用确定
 
 ## 当前阻塞
 
-2026-08-03 的只读 `npm run doctor -- --json` 报告 bridge `hostState: "not_started"`。
-因此不能采集恒速、阶跃和密集变速的实机 Artifact，也不能将 H1 升级为终态；当前
-fixture 保持既有 45 点恒速结论 `partially_observed`，T03 裁定为 `not_determined`。
+活动 MCP 会话已附着到 SynthV 2.2.1。2026-08-03 已采集 200 点恒速实机 Artifact
+[`T02-time-axis-constant-live.json`](../evidence/T02-time-axis-constant-live.json)：Node 秒值
+误差最大为 0，宿主整数 BLICK 往返误差最大为 1，全部工作流均为只读且零 Undo。
+执行细节和回放结果见 [T02-live-progress.md](../evidence/T02-live-progress.md)。
 
-离线实现、回放验证和无 setter/Undo 的捕获序列已经完成，记录见
-[T02-preflight.md](../evidence/T02-preflight.md)。在 SynthV 已启动且三个预置 tempo
-工程可读时恢复本任务。
+仍缺少含恰好一个 tempo step 的工程和含多个 tempo mark 的密集变速工程；在二者各完成
+至少 200 点、包含 mark `-1/0/+1` 的实机 Artifact 前，H1 保持 `partially_observed`，
+T03 裁定保持 `not_determined`。
+
+离线实现、回放验证和无 setter/Undo 的捕获序列记录见
+[T02-preflight.md](../evidence/T02-preflight.md)。

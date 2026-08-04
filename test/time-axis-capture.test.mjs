@@ -18,7 +18,7 @@ test("TimeAxis capture uses only read calls and opens no Undo boundary", async (
       calls.push(request);
       if (request.handle === project && request.method === "getDuration") return 240000;
       if (request.handle === timeAxis && request.method === "getAllTempoMarks") {
-        return [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }];
+        return [{ position: 0, positionSeconds: 0, bpm: 120 }];
       }
       if (request.handle === timeAxis && request.method === "getSecondsFromBlick") {
         return (request.args[0] / quarterBlick) * 0.5;
