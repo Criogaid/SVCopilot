@@ -51,12 +51,18 @@ import { PITCH_CONTROL_LIMITS } from "./pitch-control.js";
 import { PitchControlPatchService } from "./pitch-control-patch.js";
 import { PitchCorrectionPlanService } from "./pitch-correction-plan.js";
 import { PitchGesturePlanService } from "./pitch-gesture-plan.js";
+import { FIT_WORKER_NODE_ENGINE } from "./pitch-techniques/fit-worker.js";
 import {
   HOST_INTERPOLATION_MAX_ADAPTIVE_MIDPOINTS,
   HOST_INTERPOLATION_MAX_BASELINE_SAMPLES,
   HOST_INTERPOLATION_MAX_MANDATORY_SAMPLES,
   HOST_INTERPOLATION_POSTCONDITION_VERSION,
 } from "./pitch-techniques/host-interpolation.js";
+import {
+  TECHNIQUE_IR_MODEL_VERSION,
+  TECHNIQUE_IR_SCHEMA_VERSION,
+  TECHNIQUE_IR_TIME_DOMAIN,
+} from "./pitch-techniques/ir.js";
 import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
 import {
   musicWorkflowGuideIndex,
@@ -91,7 +97,7 @@ import { loadRuntimeHostProfiles, selectRuntimeHostProfile } from "./runtime-hos
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处。
-const INTERFACE_VERSION = "0.9.0";
+const INTERFACE_VERSION = "0.10.0";
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const bridge = new PipeRelay();
@@ -3581,6 +3587,60 @@ function capabilities() {
     manifest: {
       available: apiManifestAvailable,
       generatedAt: apiManifest.generatedAt,
+    },
+    pitchTechniques: {
+      releaseStatus: "mvp",
+      model: {
+        schemaVersion: TECHNIQUE_IR_SCHEMA_VERSION,
+        modelVersion: TECHNIQUE_IR_MODEL_VERSION,
+        timeDomain: TECHNIQUE_IR_TIME_DOMAIN,
+      },
+      solver: FIT_WORKER_NODE_ENGINE,
+      compiler: {
+        name: "pitch-delta",
+        version: "1",
+      },
+      operations: {
+        plan: "sv_plan_pitch_gesture",
+        analyze: "sv_analyze_pitch_techniques",
+        correctOnce: "sv_plan_pitch_correction",
+        apply: "sv_patch_parameter_curves",
+      },
+      supportedTechniques: [
+        "richards_transition",
+        "linear_transition",
+        "overshoot",
+        "preparation",
+        "explicit_pitch_delta_vibrato",
+        "host_envelope_vibrato",
+      ],
+      units: {
+        techniqueTime: "seconds",
+        vibratoRate: "hertz",
+        gesturePitch: "semitone",
+        automationPitch: "cent",
+        hostTime: "blick",
+      },
+      writeSurfaces: {
+        pitchDelta: "enabled_primary",
+        vibratoEnv: "enabled_auxiliary",
+        PitchControlCurve: "capability_gated",
+      },
+      capabilityGates: {
+        PitchControlCurve: {
+          status: "disabled",
+          reason: "H3a_unknown_and_H3b_partially_observed",
+        },
+        boundedClosedLoop: {
+          status: "disabled",
+          reason: "safety_gates_not_enabled",
+        },
+      },
+      acceptedHostProfiles: runtimeHostProfiles.map((profile) => ({
+        profileId: profile.profileId,
+        hostSelector: profile.hostSelector,
+      })),
+      perception: "human_only",
     },
     limits: {
       maxFrameBytes: 64 * 1024,

@@ -184,7 +184,7 @@ try {
   transport.stderr?.on("data", (chunk) => process.stderr.write(`[server] ${chunk}`));
   await client.connect(transport);
   console.log("[client] connected", client.getServerVersion());
-  assert.equal(client.getServerVersion()?.version, "0.9.0");
+  assert.equal(client.getServerVersion()?.version, "0.10.0");
 
   bridge = spawn(luaBin, [bridgeHarness, bridgeScript], {
     env: process.env,
@@ -476,7 +476,7 @@ try {
     capabilities.interfaces.guide.recipeTemplate,
     "svcopilot://guide/music-workflows/{recipe}"
   );
-  assert.equal(capabilities.interfaceVersion, "0.9.0");
+  assert.equal(capabilities.interfaceVersion, "0.10.0");
   assert.equal(capabilities.limits.projectPageUnit, "traversalItems");
   assert.deepEqual(capabilities.limits.rangeCapture, {
     notes: 2000,
@@ -857,7 +857,7 @@ try {
   const guide = parseResource(guideResource);
   console.log("[client] workflow guide index chars", guideResource.contents[0].text.length);
   assert.ok(guideResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
-  assert.equal(guide.interfaceVersion, "0.9.0");
+  assert.equal(guide.interfaceVersion, "0.10.0");
   assert.ok(guide.recipes.length >= 8);
   const facadeNames = new Set(listed.tools.map((tool) => tool.name));
   for (const summary of guide.recipes) {

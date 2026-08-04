@@ -410,6 +410,10 @@ test("svcopilot://operations catalog matches the served facade tools", async () 
 test("capabilities reports one facade surface with a derived operation count", async () => {
   const capabilities = await withClient(async (client) => {
     const resource = await client.readResource({ uri: "svcopilot://capabilities" });
+    assert.ok(
+      Buffer.byteLength(resource.contents[0].text, "utf8") < 16 * 1024,
+      "capabilities must stay below the compact response hard limit",
+    );
     return JSON.parse(resource.contents[0].text);
   });
   const surface = capabilities.interfaces.surface;
@@ -420,4 +424,23 @@ test("capabilities reports one facade surface with a derived operation count", a
   // profile 选择层已删除，不得再出现在自描述里。
   assert.equal("toolProfile" in capabilities.interfaces, false);
   assert.equal("compact" in capabilities.interfaces, false);
+  assert.equal(capabilities.interfaceVersion, "0.10.0");
+  assert.deepEqual(capabilities.pitchTechniques.model, {
+    schemaVersion: 1,
+    modelVersion: "pitch-techniques-v1",
+    timeDomain: "seconds",
+  });
+  assert.deepEqual(capabilities.pitchTechniques.solver, {
+    name: "node-bounded-richards",
+    version: "1",
+  });
+  assert.equal(capabilities.pitchTechniques.writeSurfaces.pitchDelta, "enabled_primary");
+  assert.equal(capabilities.pitchTechniques.writeSurfaces.vibratoEnv, "enabled_auxiliary");
+  assert.equal(capabilities.pitchTechniques.writeSurfaces.PitchControlCurve, "capability_gated");
+  assert.equal(capabilities.pitchTechniques.capabilityGates.PitchControlCurve.status, "disabled");
+  assert.equal(capabilities.pitchTechniques.capabilityGates.boundedClosedLoop.status, "disabled");
+  assert.deepEqual(
+    capabilities.pitchTechniques.acceptedHostProfiles.map((profile) => profile.profileId),
+    ["synthv-2.2.1-win32-v2"],
+  );
 });

@@ -263,6 +263,9 @@ test("recipes that consume range data declare what the capture must include", ()
     ["pitchDelta", "vibratoEnv"],
     "the pitch recipe must capture both Automation parameters needed by vibrato",
   );
+  const pitchBlocked = pitch.capabilityBlockedBranches.join(" ");
+  assert.match(pitchBlocked, /PitchControlCurve compilation is disabled/);
+  assert.match(pitchBlocked, /Bounded closed-loop calibration is disabled/);
 });
 
 test("the diagnosis recipe leads with the composite analyzer, not four separate calls", () => {

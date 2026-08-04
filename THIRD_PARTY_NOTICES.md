@@ -1,7 +1,19 @@
 # THIRD_PARTY_NOTICES
 
-本文件记录 SV Copilot 参考过的外部代码来源、许可证与采用方式。当前发布**不包含任何第三方
-运行时依赖、包、子模块或被复制的源代码**。
+本文件记录 SV Copilot 的第三方运行时依赖、外部代码参考、许可证与采用方式。
+
+## Node.js 运行时依赖
+
+直接依赖由 `server/package.json` 声明，当前安装和验证的版本如下：
+
+| 包 | 版本 | 许可证 | 用途 |
+|---|---:|---|---|
+| `@modelcontextprotocol/sdk` | `1.29.0` | MIT | MCP server、stdio transport 与协议类型 |
+| `ajv` | `8.20.0` | MIT | 公开 operation 输入 schema 校验 |
+
+`server/package-lock.json` 记录完整传递依赖闭包、精确版本、来源和完整性散列；各 npm 包随附的
+许可证元数据和许可证文件是分发时的权威文本。本项目没有为音高拟合新增第三方运行时依赖：
+`node-bounded-richards/1` 使用现有 Node.js 运行时和本仓库实现。
 
 ## Hrauroras/SV2-Script（MIT）
 

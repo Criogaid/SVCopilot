@@ -1,0 +1,210 @@
+{
+  "kind": "svcopilot-pitch-technique-release",
+  "schemaVersion": "1.0.0",
+  "status": "passed",
+  "interfaceVersion": "0.10.0",
+  "releaseScope": {
+    "status": "mvp",
+    "completedTasks": [
+      "T01",
+      "T02",
+      "T04",
+      "T05",
+      "T06",
+      "T07",
+      "T08",
+      "T09",
+      "T10",
+      "T11",
+      "T12",
+      "T13",
+      "T15",
+      "T16",
+      "T17",
+      "T18",
+      "T20"
+    ],
+    "conditionalTasks": {
+      "T03": "not_required_h1_parity_passed",
+      "T14": "not_enabled_h3a_unknown_h3b_partially_observed",
+      "T19": "not_enabled_safety_gates_not_enabled"
+    }
+  },
+  "versions": {
+    "model": {
+      "schemaVersion": 1,
+      "modelVersion": "pitch-techniques-v1",
+      "timeDomain": "seconds"
+    },
+    "solver": {
+      "name": "node-bounded-richards",
+      "version": "1",
+      "protocolVersion": 1
+    },
+    "compiler": {
+      "name": "pitch-delta",
+      "version": "1"
+    },
+    "hostProfile": {
+      "profileId": "synthv-2.2.1-win32-v2",
+      "schemaVersion": "2.0.0",
+      "evidenceSha256": "sha256:f831cfdf1bff8eb963ab228b13380d1f85da0c6e2a982eeb8bd3620186f561ff"
+    }
+  },
+  "canonicalHashes": {
+    "specimen": "synthetic_two_note_richards_transition",
+    "requestHash": "sha256_5b5fd08bdd5a85ff36351aabcd55a05660371fc2927349acedd90a70ac6a2126",
+    "irHash": "sha256_0f37cc00b8262d2004bd5b7c0110b56a3bf3a867686d936eb86fdb4cec7e6a47",
+    "planHash": "sha256_3942e0a409c5e96edb7be5f7b81026708202f158b4d2af4a792145fda2185fc6"
+  },
+  "reproducibleArtifacts": {
+    "syntheticCorpus": {
+      "path": "test/fixtures/pitch-techniques/synthetic-corpus.v1.json",
+      "caseCount": 20,
+      "canonicalHash": "sha256_8a214e57d33bac9ed6e94235880ca857258a2944b92990160387efdeb70bc484"
+    },
+    "fitWorkerBenchmark": {
+      "path": "docs/pitch-techniques/evidence/T16-fit-worker-benchmark.json",
+      "fileSha256": "sha256:14f318553b50d51708eb1a9fc66a34787a948831a4743df7d1f60224e3d3bd99",
+      "artifactContentHash": "sha256_166734bfbcbcfd4c219b0bd4baba5dce41cbd3dbb09b878a329b704457aea0a1",
+      "artifactBytes": 6937,
+      "contains": [
+        "uniform_seconds_samples",
+        "initial_parameters",
+        "parameter_bounds",
+        "seed",
+        "fitted_parameters",
+        "dense_predictions",
+        "rejected_candidates",
+        "performance"
+      ]
+    },
+    "liveHostAcceptance": {
+      "path": "docs/pitch-techniques/evidence/T18-live-host-rc.json",
+      "fileSha256": "sha256:4ccb8fa76f35362b62e312b924aa9710426cd236093e479aa388e7efc74893a6",
+      "scenarioCount": 14,
+      "pendingMvpScenarioCount": 0,
+      "contains": [
+        "raw_capture_metadata",
+        "uniform_seconds_metadata",
+        "compiled_curve_summary",
+        "host_readback",
+        "residual_metrics",
+        "transport_timings",
+        "undo_evidence",
+        "rollback_evidence"
+      ]
+    },
+    "hostProfile": {
+      "path": "test/fixtures/host-profiles/synthv-2.2.1-win32-v2.json",
+      "fileSha256": "sha256:bd6e4692bd701c951905e7fb16e45f84c89eaa40ac9f165c00573a380a2a2fe5"
+    }
+  },
+  "hostAcceptanceMatrix": [
+    {
+      "product": "Synthesizer V Studio 2 Pro",
+      "version": "2.2.1",
+      "platform": "win32",
+      "protoVersion": 2,
+      "status": "accepted",
+      "evidence": "T18-live-host-rc.json"
+    },
+    {
+      "product": "other_host_or_version",
+      "status": "unknown_fail_closed",
+      "evidence": "none"
+    }
+  ],
+  "performance": {
+    "plannerBaseline": {
+      "twelveNotes": {
+        "responseBytes": 7090,
+        "medianMs": 1.504,
+        "p95Ms": 2.486
+      },
+      "threeHundredSeventyThreeNotes": {
+        "responseBytes": 7149,
+        "medianMs": 1.881,
+        "p95Ms": 2.588
+      }
+    },
+    "fitWorker": {
+      "selectedCandidate": "node-bounded-richards",
+      "singleFitMedianMs": 22.065,
+      "singleFitP95Ms": 22.842,
+      "twelveFitMedianMs": 245.993,
+      "twelveFitP95Ms": 261.893
+    },
+    "transportEvidence": {
+      "status": "partial",
+      "known": "per_operation_host_and_serialization_timings_plus_artifact_bytes",
+      "limit": "aggregate_live_pipe_and_mcp_byte_percentiles_not_captured"
+    }
+  },
+  "transactionEvidence": {
+    "dryRun": "zero_setters_zero_undo",
+    "commit": "one_user_undo_with_independent_readback",
+    "rollback": "reverse_order_verified",
+    "unknownOutcomeRule": "stop_writes_resnapshot_compare_before_replanning"
+  },
+  "capabilityGates": {
+    "PitchControlCurve": {
+      "status": "disabled",
+      "reason": "H3a_unknown_and_H3b_partially_observed"
+    },
+    "boundedClosedLoop": {
+      "status": "disabled",
+      "reason": "safety_gates_not_enabled"
+    }
+  },
+  "humanAudition": {
+    "perception": "human_only",
+    "automatedQualityClaim": false
+  },
+  "dependencyProvenance": {
+    "notice": "THIRD_PARTY_NOTICES.md",
+    "packageLock": "server/package-lock.json",
+    "packageLockSha256": "sha256:204d45f454130b8b6f2aafcdda3ee0eb7a77450eff1c6de481a1d86a4df3638c",
+    "directRuntimeDependencies": [
+      {
+        "name": "@modelcontextprotocol/sdk",
+        "version": "1.29.0",
+        "license": "MIT"
+      },
+      {
+        "name": "ajv",
+        "version": "8.20.0",
+        "license": "MIT"
+      }
+    ],
+    "fitWorkerAddedRuntimeDependencies": 0
+  },
+  "validation": {
+    "fullTestSuite": {
+      "status": "passed",
+      "tests": 850
+    },
+    "referenceModels": {
+      "status": "passed",
+      "tests": 83
+    },
+    "mcpSmoke": "passed",
+    "luaDispatcher": {
+      "loadedBridge": "42_passed",
+      "stagingBridge": "42_passed"
+    },
+    "liveHost": {
+      "status": "passed",
+      "scenarioCount": 14,
+      "pendingMvpScenarioCount": 0,
+      "artifactEntriesAfterCleanup": 0,
+      "knownHandleCountAfterCleanup": 0,
+      "pendingExecutionsAfterCleanup": 0
+    },
+    "liveCapabilityDiscovery": {
+      "status": "passed",
+      "interfaceVersion": "0.10.0"
+    },
+    "apiDocsDiff": "clean"
+  }
+}

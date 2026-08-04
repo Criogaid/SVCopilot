@@ -647,6 +647,8 @@ const RECIPES = [
     ],
     capabilityBlockedBranches: [
       "Asked to hear the result → MCP has no audio input; use audition_for_human so a person listens.",
+      "PitchControlCurve compilation is disabled because H3a is unknown and H3b is only partially observed; use the verified pitchDelta primary surface and vibratoEnv auxiliary envelope.",
+      "Bounded closed-loop calibration is disabled because its safety gates are not enabled; use one independently verified open-loop correction.",
     ],
   },
   {

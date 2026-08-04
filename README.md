@@ -16,6 +16,24 @@ SV Copilot 让支持 MCP 的 AI 助手直接读取和编辑 Synthesizer V Studio
 
 高层写入工具支持 dry-run、陈旧上下文检测、目标身份校验、单次 Undo、回读验证和失败补偿。
 
+### 音高技法 MVP
+
+`sv_plan_pitch_gesture` 可规划线性或 Richards transition、overshoot、preparation、
+显式 `pitchDelta` 颤音和宿主 `vibratoEnv` 包络。规划操作只生成封存计划，不写工程；
+用 `sv_patch_parameter_curves` 先执行 `dry_run`，确认后再以 `commit` 提交。同一计划中的
+全部曲线占一个用户 Undo。
+
+当前模型为 `pitch-techniques-v1`，非线性拟合器为 `node-bounded-richards/1`。技法时间用秒、
+颤音速率用 Hz、公开音高幅度用 semitone，`pitchDelta` Automation 用 cent，宿主位置用 BLICK。
+MVP 只把 `pitchDelta` 作为主音高写面，并按需联动 `vibratoEnv`；`PitchControlCurve` 因宿主坐标
+证据不足而保持 capability-gated。有界闭环校准也未启用，请使用一次可独立验证的开环修正。
+
+已验收宿主为 Windows 上的 Synthesizer V Studio 2 Pro `2.2.1`、Lua PIPE protocol `2`。
+其他版本和平台的宿主语义视为 unknown，涉及宿主语义的技法会关闭失败。基准、真机矩阵和
+可恢复性证据见 [专项证据](docs/pitch-techniques/evidence/)；依赖与参考来源见
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。计算音高、曲线回读和误差指标是客观证据，
+不等于听感结论；自然度、音色和情绪始终需要人耳试听。
+
 ## 使用条件
 
 - Windows
@@ -78,6 +96,7 @@ npm install
 - 正式编辑前请保存工程或建立副本。
 - 优先使用高层事务工具；底层调用不会自动提供通用回滚。
 - 不要自动重试 `outcome_unknown`、`partial` 或恢复失败的写入。
+- 遇到 `outcome_unknown` 时先停止写入，重新快照并比较宿主状态；只有确认实际状态后才能重新规划。
 - 同一 NoteGroup 被多个引用共享时，修改可能同时影响多个位置；工具会要求显式确认。
 - AI 无法从试听控制本身听见声音，最终音色、咬字和情绪判断仍需要人耳确认。
 
