@@ -86,6 +86,10 @@ export const CONTEXT_INVALIDATION_BY_OPERATION = Object.freeze({
   get_parameter_curve: { scope: "none", reason: "只读 Automation 控制点，零 setter。" },
   get_voice_profile: { scope: "none", reason: "只读可观测 voice parameters，零 setter。" },
   compare_computed_pitch: { scope: "none", reason: "纯内存分析：只读 SnapshotStore，绝不碰宿主。" },
+  analyze_pitch_techniques: {
+    scope: "none",
+    reason: "纯内存技法分解：只读 SnapshotStore 与 ArtifactStore，绝不碰宿主。",
+  },
   analyze_phrase: { scope: "none", reason: "纯内存分析：只读 SnapshotStore，绝不碰宿主。" },
   analyze_vocal_context: { scope: "none", reason: "纯内存分析：复用四个分析器，零宿主调用。" },
   style_profile: { scope: "none", reason: "纯内存分析：只读 SnapshotStore，绝不碰宿主。" },

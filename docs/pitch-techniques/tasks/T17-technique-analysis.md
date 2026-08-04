@@ -1,6 +1,6 @@
 # T17 — 只读技法分析
 
-- 状态：`ready`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) §12、§17 提交 17
 - 依赖：T08、T16 达标选型
 - 解锁：T18
@@ -25,3 +25,15 @@
 ## 完成条件
 
 分析结果可供诊断与比较使用，并对证据边界保持诚实。
+
+## 完成记录
+
+- 证据：[T17-technique-analysis.md](../evidence/T17-technique-analysis.md)。
+- 交付：新增只读 `sv_read/analyze_pitch_techniques`，以已捕获的 computed pitch 和 note
+  fingerprints 生成有界 transition、transient、vibrato 候选；dense 重建、拒绝详情和 FitWorker
+  trace 均封存为 `pitch-technique-analysis` Artifact。
+- 验证：集中 reference 2/2、T17 服务级 7/7、完整 `npm test` 827/827、`npm run smoke:mcp`
+  均通过；373-note 结构化响应为 4,013 UTF-8 bytes，未内联 dense 数据。
+- 宿主：T17 路径未接触真实宿主；零 host call、零 setter、零 Undo。T18 的真实宿主 RC 仍按其
+  自身依赖与单实例重连门禁执行。
+- 提交：本任务的独立提交见 Git history。

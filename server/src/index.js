@@ -27,6 +27,7 @@ import { AuditionCompareService } from "./audition-compare.js";
 import { AuditionService } from "./audition.js";
 import { BakeComputedPitchService } from "./bake-computed-pitch.js";
 import { ComputedPitchCompareService } from "./computed-pitch-compare.js";
+import { PitchTechniqueAnalysisService } from "./pitch-technique-analysis.js";
 import { ExpressionPlanService } from "./expression-plan.js";
 import { HarmonyPlanService } from "./harmony-plan.js";
 import { LyricAlignService } from "./lyric-align.js";
@@ -137,6 +138,11 @@ const phraseEditService = new PhraseEditService(hostSession, snapshotService);
 // 纯内存分析服务：与 range snapshot 共享同一 SnapshotStore，不访问宿主。
 const computedPitchCompareService = new ComputedPitchCompareService({
   store: snapshotService.store,
+});
+const pitchTechniqueAnalysisService = new PitchTechniqueAnalysisService({
+  store: snapshotService.store,
+  artifactStore,
+  sessionId: serverSessionId,
 });
 const expressionPlanService = new ExpressionPlanService({
   store: snapshotService.store,
@@ -1316,6 +1322,39 @@ export const TOOLS = [
         },
       },
       required: ["mode"],
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_analyze_pitch_techniques",
+    description:
+      'Read-only decomposition of transition, transient, and vibrato candidates from computed pitch already captured by sv_snapshot_range with include ["notes","computedPitch"]. It never opens a host session, setter, Undo record, or control surface: all inputs come from the stored context, are mapped to a uniform-seconds grid without bridging null gaps, and the complete dense reconstruction plus bounded solver traces are sealed in an Artifact. The compact response reports only explainable candidates, confidence as an uncalibrated heuristic, rejected-reason counts, and the Artifact reference. All-null/pending data, low coverage, incomplete sampling provenance, and insufficient sample rate fail with actionable evidence rather than returning invented parameters. A successful empty result has analysisStatus:"no_technique_candidate"; it does not judge musical quality. If a client collapses nested types to unknown, read svcopilot://schemas/sv_analyze_pitch_techniques for the exact validated input schema.',
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contextId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Range context from sv_snapshot_range captured with include [\"notes\",\"computedPitch\"].",
+        },
+        occurrence: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "Optional 0-based occurrence ordinal; required when the context has multiple usable occurrences.",
+        },
+        maxCandidates: {
+          type: "integer",
+          minimum: 1,
+          maximum: 32,
+          default: 12,
+          description:
+            "Maximum compact candidate items. Dense candidates, rejected fits, and solver traces remain in the Artifact.",
+        },
+      },
+      required: ["contextId"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
@@ -2931,6 +2970,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       mimeType: "application/json",
     },
     {
+      uri: "svcopilot://schemas/sv_analyze_pitch_techniques",
+      name: "sv_analyze_pitch_techniques input schema",
+      description: "Exact JSON input schema used to validate sv_analyze_pitch_techniques.",
+      mimeType: "application/json",
+    },
+    {
       uri: "svcopilot://schemas/sv_plan_expression",
       name: "sv_plan_expression input schema",
       description: "Exact JSON input schema used to validate sv_plan_expression.",
@@ -3176,6 +3221,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_compare_computed_pitch":
         result = await computedPitchCompareService.compare(args);
+        break;
+      case "sv_analyze_pitch_techniques":
+        result = await pitchTechniqueAnalysisService.analyze(args);
         break;
       case "sv_plan_expression":
         result = await expressionPlanService.plan(args);
@@ -3503,6 +3551,7 @@ function capabilities() {
         "sv_bake_computed_pitch",
         "sv_edit_phrase",
         "sv_compare_computed_pitch",
+        "sv_analyze_pitch_techniques",
         "sv_plan_expression",
         "sv_align_lyrics",
         "sv_analyze_phrase",
@@ -3570,6 +3619,7 @@ function capabilities() {
         sv_patch_pitch_controls: ["range"],
         sv_edit_phrase: ["range"],
         sv_compare_computed_pitch: ["range"],
+        sv_analyze_pitch_techniques: ["range"],
         sv_plan_expression: ["range"],
         sv_plan_pitch_gesture: ["range"],
         sv_bake_computed_pitch: ["range"],
@@ -3658,6 +3708,7 @@ function musicWorkflowSchemaIndex() {
     "sv_bake_computed_pitch",
     "sv_edit_phrase",
     "sv_compare_computed_pitch",
+    "sv_analyze_pitch_techniques",
     "sv_plan_expression",
     "sv_align_lyrics",
     "sv_analyze_phrase",
@@ -3689,6 +3740,7 @@ function toolInputSchema(name) {
         "sv_bake_computed_pitch",
         "sv_edit_phrase",
         "sv_compare_computed_pitch",
+        "sv_analyze_pitch_techniques",
         "sv_plan_expression",
         "sv_align_lyrics",
         "sv_analyze_phrase",

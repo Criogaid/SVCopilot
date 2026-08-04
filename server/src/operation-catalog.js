@@ -37,6 +37,7 @@ const FACADE_BY_TOOL = new Map([
   ["sv_get_parameter_curve", "read"],
   ["sv_get_voice_profile", "read"],
   ["sv_compare_computed_pitch", "read"],
+  ["sv_analyze_pitch_techniques", "read"],
   ["sv_analyze_phrase", "read"],
   ["sv_analyze_vocal_context", "read"],
   ["sv_style_profile", "read"],

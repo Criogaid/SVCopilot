@@ -275,6 +275,7 @@ test("the diagnosis recipe leads with the composite analyzer, not four separate 
     ["snapshot_range", "analyze_vocal_context"]
   );
   assert.equal(recipe.expectedCalls.min, 2);
+  assert.equal(recipe.expectedCalls.max, 6);
 
   const composite = required[1];
   const rules = composite.readingRules.join(" ");
@@ -284,11 +285,23 @@ test("the diagnosis recipe leads with the composite analyzer, not four separate 
   assert.match(rules, /never report the last one as 'no problems found'/i);
   assert.match(rules, /details\.tool/);
 
+  const techniqueDrill = recipe.steps.find(
+    (step) => step.operation === "analyze_pitch_techniques"
+  );
+  assert.ok(techniqueDrill, "the guide must offer the bounded technique analyzer as a drill-down");
+  assert.equal(techniqueDrill.optional, true);
+  assert.equal(techniqueDrill.arguments.arguments.maxCandidates, 12);
+  assert.match(techniqueDrill.readingRules.join(" "), /uncalibrated heuristic/i);
+
   // 目录页的选工具表也要把它列为诊断入口。
   const index = musicWorkflowGuideIndex("0.8.0");
   assert.ok(
     index.toolSelection.byNeed.some((entry) => entry.tool === "sv_read(analyze_vocal_context)"),
     "the tool-selection table must offer the composite analyzer"
+  );
+  assert.ok(
+    index.toolSelection.byNeed.some((entry) => entry.tool === "sv_read(analyze_pitch_techniques)"),
+    "the tool-selection table must offer the technique analyzer"
   );
 
   // P1-A：和声语境是 opt-in，且指南必须写明单旋律无法确定真实和弦。

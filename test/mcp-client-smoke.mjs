@@ -222,6 +222,7 @@ try {
     "sv_search_api",
     "sv_describe",
     "sv_compare_computed_pitch",
+    "sv_analyze_pitch_techniques",
     "sv_plan_expression",
     "sv_align_lyrics",
     "sv_analyze_phrase",
@@ -396,6 +397,11 @@ try {
   );
   assert.ok(
     resources.resources.some(
+      (resource) => resource.uri === "svcopilot://schemas/sv_analyze_pitch_techniques"
+    )
+  );
+  assert.ok(
+    resources.resources.some(
       (resource) => resource.uri === "svcopilot://schemas/sv_plan_expression"
     )
   );
@@ -425,6 +431,7 @@ try {
   assert.equal(capabilities.knownLimits.audioRendering.status, "capability_blocked");
   assert.ok(capabilities.interfaces.music.includes("sv_edit_phrase"));
   assert.ok(capabilities.interfaces.music.includes("sv_compare_computed_pitch"));
+  assert.ok(capabilities.interfaces.music.includes("sv_analyze_pitch_techniques"));
   assert.ok(capabilities.interfaces.music.includes("sv_plan_expression"));
   assert.ok(capabilities.interfaces.music.includes("sv_align_lyrics"));
   assert.ok(capabilities.interfaces.music.includes("sv_analyze_phrase"));
@@ -489,6 +496,7 @@ try {
       "sv_bake_computed_pitch",
       "sv_edit_phrase",
       "sv_compare_computed_pitch",
+      "sv_analyze_pitch_techniques",
       "sv_plan_expression",
       "sv_align_lyrics",
       "sv_analyze_phrase",
@@ -552,6 +560,28 @@ try {
     })
   );
   assert.equal(compareInvalidArguments.error.code, "INVALID_ARGUMENTS");
+  const techniqueResource = await client.readResource({
+    uri: "svcopilot://schemas/sv_analyze_pitch_techniques",
+  });
+  assert.ok(techniqueResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
+  const techniqueSchema = parseResource(techniqueResource).inputSchema;
+  assert.equal(techniqueSchema.additionalProperties, false);
+  assert.deepEqual(techniqueSchema.required, ["contextId"]);
+  assert.equal(techniqueSchema.properties.maxCandidates.maximum, 32);
+  const techniqueUnknownContext = parseToolError(
+    await facadeCall({
+      name: "sv_analyze_pitch_techniques",
+      arguments: { contextId: "ctx_smoke_missing" },
+    })
+  );
+  assert.equal(techniqueUnknownContext.error.code, "UNKNOWN_CONTEXT");
+  const techniqueInvalidArguments = parseToolError(
+    await facadeCall({
+      name: "sv_analyze_pitch_techniques",
+      arguments: { contextId: "ctx_smoke", unexpected: true },
+    })
+  );
+  assert.equal(techniqueInvalidArguments.error.code, "INVALID_ARGUMENTS");
   const pitchGestureResource = await client.readResource({
     uri: "svcopilot://schemas/sv_plan_pitch_gesture",
   });

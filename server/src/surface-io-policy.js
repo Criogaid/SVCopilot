@@ -89,6 +89,11 @@ const OPERATION_POLICIES = {
     response: "artifact-summary",
     hostTraffic: "none",
   },
+  analyze_pitch_techniques: {
+    request: "range-scoped",
+    response: "artifact-summary",
+    hostTraffic: "none",
+  },
   analyze_phrase: { request: "range-scoped", response: "artifact-summary", hostTraffic: "none" },
   analyze_vocal_context: {
     request: "range-scoped",

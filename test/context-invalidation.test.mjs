@@ -81,6 +81,7 @@ test("read-only and planner operations never invalidate", () => {
     "style_profile",
     "check_prosody",
     "compare_computed_pitch",
+    "analyze_pitch_techniques",
     "plan_expression",
     "plan_pitch_gesture",
     "align_lyrics",

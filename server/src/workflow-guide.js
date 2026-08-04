@@ -240,7 +240,7 @@ const RECIPES = [
     goal:
       "Establish key, phrasing, prosody problems, and objective pitch evidence for a phrase before proposing any edit.",
     requiredCapabilities: ["computedPitch"],
-    expectedCalls: { min: 2, max: 4 },
+    expectedCalls: { min: 2, max: 6 },
     humanGates: [],
     captureTemplate: captureTemplate(
       ["notes", "tempoMap", "meterMap", "computedPitch", "processing", "automation"],
@@ -343,6 +343,25 @@ const RECIPES = [
           "LOW_COMPUTED_PITCH_COVERAGE means the sample is too small to conclude from. Say so.",
           "All-null frames mean not enough data to analyze — never report zero error or perfect intonation.",
           "If processing is still running, call sv_wait_for_processing (kind computedPitch) and RE-SNAPSHOT before comparing again; the comparer cannot read the host.",
+        ],
+      },
+      {
+        n: 6,
+        tool: "sv_analyze_pitch_techniques",
+        purpose:
+          "Optional pitch-technique drill-down: identify bounded transition, transient, and vibrato candidates from the same captured computed-pitch evidence.",
+        arguments: {
+          contextId: EXAMPLE.contextId,
+          occurrence: EXAMPLE.occurrence,
+          maxCandidates: 12,
+        },
+        optional: true,
+        acceptable: ["succeeded with candidates_found or no_technique_candidate"],
+        readingRules: [
+          "This is a read-only decomposition, not a tuning decision. confidence is an uncalibrated heuristic and never a probability or listening verdict.",
+          "INSUFFICIENT_COMPUTED_PITCH, SAMPLING_RATE_TOO_LOW, and COMPUTED_PITCH_NOT_CAPTURED mean do not infer parameters. Follow the returned recapture or processing remedy.",
+          "The compact response is intentionally bounded. Read artifactRef only when dense residual curves, rejected candidates, or solver evidence are needed.",
+          "Overlapping structural candidates are rejected rather than silently assigned to one technique. Narrow the snapshot range or use human review when the evidence cannot distinguish them.",
         ],
       },
     ],
@@ -1030,6 +1049,11 @@ const TOOL_SELECTION = {
     },
     { need: "Lyric and prosody problems", tool: "sv_validate_lyrics_prosody" },
     { need: "Objective intonation evidence", tool: "sv_compare_computed_pitch" },
+    {
+      need: "Explain transition / transient / vibrato evidence",
+      tool: "sv_analyze_pitch_techniques",
+      note: "Read-only decomposition over captured computed pitch; confidence is heuristic and dense evidence is in an Artifact.",
+    },
     { need: "Cross-section style statistics", tool: "sv_style_profile" },
     { need: "Expression / dynamics / color plan", tool: "sv_plan_expression" },
     { need: "Fill lyrics onto notes", tool: "sv_align_lyrics" },
