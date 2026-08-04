@@ -28,12 +28,15 @@ H2–H8 各有结论或明确未测原因，条件任务能仅凭 profile 判断
 
 ## 完成记录
 
-- 证据：[T04-host-pitch-live.md](../evidence/T04-host-pitch-live.md) 与机器可读
+- 证据：[T04-host-pitch-live.md](../evidence/T04-host-pitch-live.md)、有限帧 H2
+  [补充记录](../evidence/T04-h2-vibrato-finite-live.md) 与机器可读
   [Artifact](../evidence/T04-host-pitch-live.json)。
 - H4 的 13 个 `getValueAt()` 密集读点确认为 `piecewise_linear`；H3b 只得到两 occurrence
   的 direct coordinate readback，仍为 `partially_observed`。
-- H2、H3a、H5、H6、H8 的隔离夹具 computed pitch 均为全 null，保持 `unknown`；H7 未作人工
-  Ctrl+Z 观察，保持 `unknown`。因此 T14、显式颤音和闭环任务仍不会被误解锁。
+- 初始 H2 夹具为全 null；补充的 8 组有限帧矩阵确认
+  `vibrato.hostEnvelopeWithExplicitPitchDelta` 为可加关系，并确认显式颤音可用的
+  `vibratoEnv` 抑制值为 `replace:0`。`dF0VbrMod`、H3a、H5、H6、H8 仍保持 `unknown`；H7
+  未作人工 Ctrl+Z 观察，也保持 `unknown`。因此 T14 与闭环任务仍不会被误解锁。
 - 临时 track/library group 删除后，track/library 数量和全范围内容 token 都恢复；13 个导出 handle
   与 83 个 raw cleanup warning 句柄均已显式释放。0.2/1.8 `vibratoEnv` 的 float32 严格相等断言
   返回 `partial` 后未重试写入，而是直接删除夹具并验证恢复。

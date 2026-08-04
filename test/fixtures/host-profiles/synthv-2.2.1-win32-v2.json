@@ -17,8 +17,8 @@
     "sanitizerVersion": 2,
     "readOnly": true
   },
-  "capturedAt": "2026-08-04T02:33:04.428Z",
-  "evidenceSha256": "sha256:7d436a6f6a19c46fd24dfe0f9dbf2a0a6db5acea0210bf005ab1f6bd1e5ba182",
+  "capturedAt": "2026-08-04T04:32:10.4487041-03:00",
+  "evidenceSha256": "sha256:f831cfdf1bff8eb963ab228b13380d1f85da0c6e2a982eeb8bd3620186f561ff",
   "constants": {
     "quarterBlick": 705600000
   },
@@ -158,10 +158,18 @@
       ]
     },
     "vibrato.hostEnvelopeWithExplicitPitchDelta": {
-      "status": "unknown",
-      "reason": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
+      "status": "confirmed",
+      "value": {
+        "hostEnvelope": "baseline_scale",
+        "explicitPitchDelta": {
+          "vibratoEnv": {
+            "mode": "replace",
+            "value": 0
+          }
+        }
+      },
       "evidenceIds": [
-        "EV-T04-H2-1"
+        "EV-T04-H2-2"
       ]
     },
     "vibrato.hostEnvelopeWithExplicitPitchControl": {
@@ -314,6 +322,17 @@
       "oracleVersion": 1,
       "resultCode": "ISOLATED_FIXTURE_COMPUTED_PITCH_ALL_NULL",
       "sampleCount": 7
+    },
+    {
+      "id": "EV-T04-H2-2",
+      "source": "live_reversible_write",
+      "scope": "fixture_observation",
+      "supports": [
+        "vibrato.hostEnvelopeWithExplicitPitchDelta"
+      ],
+      "oracleVersion": 1,
+      "resultCode": "HOST_ENVELOPE_ADDITIVE_WITH_EXPLICIT_PITCH_DELTA",
+      "sampleCount": 8
     },
     {
       "id": "EV-T04-H3A-1",

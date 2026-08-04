@@ -95,6 +95,7 @@ export class PitchGesturePlanService {
     artifactStore = null,
     sessionId = null,
     hostProfile = null,
+    hostProfileProvider = null,
     hostProfileHash = null,
   } = {}) {
     if (!store) throw new Error("PitchGesturePlanService requires the shared SnapshotStore");
@@ -103,6 +104,7 @@ export class PitchGesturePlanService {
     this.artifactStore = artifactStore;
     this.sessionId = sessionId;
     this.hostProfile = hostProfile;
+    this.hostProfileProvider = typeof hostProfileProvider === "function" ? hostProfileProvider : null;
     this.hostProfileHash = hostProfileHash ?? profileHash(hostProfile);
   }
 
@@ -110,6 +112,11 @@ export class PitchGesturePlanService {
     const input = normalizePlanRequest(request);
     const warnings = [];
     const loaded = resolvePlanSource(this.store, input);
+    // 重连后同一版本号也可能不再代表同一宿主产品，故在每次规划时重新选择 profile。
+    const hostProfile = this.hostProfileProvider ? this.hostProfileProvider() : this.hostProfile;
+    const hostProfileHash = this.hostProfileProvider
+      ? profileHash(hostProfile)
+      : this.hostProfileHash;
     const selected = resolveAndSelectGestures(input.gestures, loaded, warnings);
     if (selected.length === 0) {
       return noChangeResponse(input, warnings);
@@ -123,10 +130,10 @@ export class PitchGesturePlanService {
       loaded,
       techniques,
       baselines,
-      hostProfileHash: this.hostProfileHash,
+      hostProfileHash,
     });
     const vibratoGate = requiresVibratoEnvelope
-      ? requireVibratoGate(this.hostProfile, selected)
+      ? requireVibratoGate(hostProfile, selected)
       : null;
 
     const compiled = compileAutomationPlan({

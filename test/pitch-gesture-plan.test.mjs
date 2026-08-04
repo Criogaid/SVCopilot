@@ -62,6 +62,7 @@ function createFixture({
   notes = DEFAULT_NOTES,
   includeVibratoEnv = true,
   hostProfile = null,
+  hostProfileProvider = null,
   pitchDeltaPoints = [],
   computedPitchValues = null,
   computedPitchStartBlick = 0,
@@ -126,6 +127,7 @@ function createFixture({
     sessionId,
     now: () => 1000,
     hostProfile,
+    hostProfileProvider,
   });
   const patch = new ParameterCurveService(
     { withExclusive: (task) => task(model.host) },
@@ -287,6 +289,23 @@ test("both vibrato discriminators compile only after confirmed H2 evidence", asy
     fixture.sealed(hostPlan).mutationRequest.curves.map((curve) => curve.parameter),
     ["vibratoEnv"],
   );
+});
+
+test("vibrato resolves the host profile at planning time", async () => {
+  let calls = 0;
+  const fixture = createFixture({
+    hostProfileProvider: () => {
+      calls += 1;
+      return confirmedVibratoProfile();
+    },
+  });
+  const plan = await fixture.planner.plan({
+    contextId: fixture.stored.contextId,
+    occurrence: 0,
+    gestures: [{ type: "vibrato", source: "host_envelope", note: 2, envelopeScale: 0.5 }],
+  });
+  assert.equal(plan.status, "planned");
+  assert.equal(calls, 1);
 });
 
 test("vibrato relationships and missing vibratoEnv capture fail before any plan exists", async () => {

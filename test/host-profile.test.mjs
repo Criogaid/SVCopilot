@@ -24,6 +24,10 @@ const T04_EVIDENCE_URL = new URL(
   "../docs/pitch-techniques/evidence/T04-host-pitch-live.json",
   import.meta.url
 );
+const T04_H2_EVIDENCE_URL = new URL(
+  "../docs/pitch-techniques/evidence/T04-h2-vibrato-finite-live.json",
+  import.meta.url
+);
 
 function timeAxisReport(scenario, tempoMarks, shiftSeconds = 0) {
   const plan = createTimeAxisProbePlan({
@@ -164,6 +168,10 @@ async function loadT04Evidence() {
   return JSON.parse(await readFile(T04_EVIDENCE_URL, "utf8"));
 }
 
+async function loadT04H2Evidence() {
+  return JSON.parse(await readFile(T04_H2_EVIDENCE_URL, "utf8"));
+}
+
 test("read-only probe evidence compiles into a strict de-identified profile", () => {
   const profile = compileHostBehaviorProfile({
     ...syntheticProbeEvidence(),
@@ -287,8 +295,12 @@ test("profile evidence digest helper matches a validated fixture", async () => {
   assert.equal(hostBehaviorProfileEvidenceSha256(profile), profile.evidenceSha256);
 });
 
-test("T04 preserves conservative host gates after isolated-fixture recovery", async () => {
-  const [profile, evidence] = await Promise.all([loadFixture(), loadT04Evidence()]);
+test("T04 confirms only the finite-frame H2 host gate", async () => {
+  const [profile, evidence, h2Evidence] = await Promise.all([
+    loadFixture(),
+    loadT04Evidence(),
+    loadT04H2Evidence(),
+  ]);
   assert.equal(evidence.kind, "svcopilot-host-pitch-evidence");
   assert.equal(evidence.fixture.sourceGroupMutated, false);
   assert.equal(evidence.fixture.recovery.fullRangeContentTokenMatched, true);
@@ -307,8 +319,16 @@ test("T04 preserves conservative host gates after isolated-fixture recovery", as
   );
   assert.equal(
     profile.semantics["vibrato.hostEnvelopeWithExplicitPitchDelta"].status,
-    "unknown"
+    "confirmed"
   );
+  assert.deepEqual(
+    profile.semantics["vibrato.hostEnvelopeWithExplicitPitchDelta"].value,
+    h2Evidence.conclusion.value
+  );
+  assert.equal(h2Evidence.matrix.caseCount, 8);
+  assert.equal(h2Evidence.conclusion.semantic, "vibrato.hostEnvelopeWithExplicitPitchDelta");
+  assert.equal(profile.semantics["vibrato.hostEnvelopeWithExplicitPitchControl"].status, "unknown");
+  assert.equal(profile.semantics["vibrato.noteModulationInteraction"].status, "unknown");
   assert.equal(profile.semantics["computedPitch.recomputeLatency"].status, "unknown");
   assert.equal(profile.semantics["undo.multiCandidateSingleBoundary"].status, "unknown");
 });

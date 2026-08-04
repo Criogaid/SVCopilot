@@ -1133,10 +1133,14 @@ timeOffset reference 和三条临时 note 完成隔离探针。临时 track/libr
 `confirmed`。H3b 已读回三个 local anchor 与两个 occurrence offset 的加法坐标映射，但所有
 computed-pitch 请求均为全 null，故仍为 `partially_observed`；这不能解锁 PitchControl 编译。
 
-H2 的 6 组请求、H3a 的三写面组合，以及 H5/H6/H8 的 69.33 Hz 采样均未得到有限 computed
-pitch，相关 facts 保持 `unknown`。H2 只有 default level 的两组完整写入；0.2/1.8
-`vibratoEnv` 读回 float32 值触发 strict equality 的 `partial` 后，按恢复规则没有重试写入，
-而是删除整套夹具并读回恢复状态。H7 没有人工 Ctrl+Z 观察，也保持 `unknown`。
+初始 H2 的 6 组请求、H3a 的三写面组合，以及 H5/H6/H8 的 69.33 Hz 采样均未得到有限
+computed pitch。随后在用户批准的临时工程中，以 8 组可恢复 Automation 写入取得每组
+`363 / 384` 个有限 frame；`vibratoEnv` 的 0、0.2、1、1.8 缩放差分在有/无显式
+`pitchDelta` 时一致，且 `vibratoEnv:0` 已直接测得。因此
+`vibrato.hostEnvelopeWithExplicitPitchDelta` 现为 `confirmed`，取值为
+`hostEnvelope:"baseline_scale"` 与显式颤音同批 `vibratoEnv replace:0`；完整脱敏记录见
+[T04-h2-vibrato-finite-live.json](evidence/T04-h2-vibrato-finite-live.json)。`dF0VbrMod`、H3a、
+H5/H6/H8 仍保持 `unknown`，H3b 仍为 `partially_observed`，H7 仍没有人工 Ctrl+Z 观察。
 
 ## 8. P1：数学模型与秒域测量核心
 

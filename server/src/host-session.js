@@ -26,6 +26,7 @@ export class HostSession {
     this.coordinator = coordinator;
     this.handleTypes = new Map();
     this.hostVersion = null;
+    this.hostProduct = null;
     this.epoch = bridge.getStatus?.().epoch ?? 0;
     // 桥一旦重连过，同一整数 id 可能已被新桥重新分配给另一个对象；
     // 之后不带 __epoch__ 的 handle 无法证明自己来自当前 epoch，必须整体拒绝。
@@ -73,6 +74,7 @@ export class HostSession {
       ...bridgeStatus,
       epoch: this.epoch,
       hostVersion: this.hostVersion,
+      hostProduct: this.hostProduct,
       knownHandleCount: this.handleTypes.size,
       pendingExecutions: this.coordinator.pending,
     };
@@ -243,8 +245,12 @@ export class HostSession {
 
   async _refreshHostVersion() {
     this.hostVersion = null;
+    this.hostProduct = null;
     try {
       const hostInfo = await this._call({ method: "getHostInfo", args: [] });
+      if (typeof hostInfo?.hostName === "string" && hostInfo.hostName.length > 0) {
+        this.hostProduct = hostInfo.hostName;
+      }
       if (typeof hostInfo?.hostVersion === "string") {
         this.hostVersion = hostInfo.hostVersion;
       } else if (Number.isSafeInteger(hostInfo?.hostVersionNumber)) {
@@ -253,6 +259,7 @@ export class HostSession {
       }
     } catch {
       this.hostVersion = null;
+      this.hostProduct = null;
     }
   }
 
@@ -265,6 +272,7 @@ export class HostSession {
   _clearHostState() {
     this.handleTypes.clear();
     this.hostVersion = null;
+    this.hostProduct = null;
   }
 }
 

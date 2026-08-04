@@ -3,6 +3,7 @@
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -86,13 +87,18 @@ import { PlanExecutionLedger } from "./plan-ledger.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 import { dedupeSchema } from "./schema-defs.js";
 import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
+import { loadRuntimeHostProfiles, selectRuntimeHostProfile } from "./runtime-host-profile.js";
 
 // 单一接口版本来源：server info、capabilities、schema 资源和指南资源都引用它，
 // 避免升级时漏改其中一处。
 const INTERFACE_VERSION = "0.9.0";
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const bridge = new PipeRelay();
 const hostSession = new HostSession(bridge);
+const runtimeHostProfiles = loadRuntimeHostProfiles(
+  path.resolve(moduleDir, "../../test/fixtures/host-profiles")
+);
 // ArtifactStore 与 SnapshotStore 分离：artifact 是只读数据，可跨 context 过期后继续读取。
 // 使用进程级 session id 让同一 server 实例内的 tool/resource 共享 artifact。
 const serverSessionId = `sess_${randomUUID()}`;
@@ -182,6 +188,10 @@ const pitchGesturePlanService = new PitchGesturePlanService({
   store: snapshotService.store,
   artifactStore,
   sessionId: serverSessionId,
+  hostProfileProvider: () => selectRuntimeHostProfile(runtimeHostProfiles, {
+    ...hostSession.getStatus(),
+    platform: process.platform,
+  }),
 });
 const selectionService = new SelectionService(hostSession, { snapshotService });
 
@@ -3727,7 +3737,6 @@ function capabilities() {
 
 // Doctor 只读采集：不连接宿主、不写盘，宿主未连接时如实报当前状态。
 function doctorReport() {
-  const moduleDir = path.dirname(import.meta.filename);
   return collectDoctorReport({
     interfaceVersion: INTERFACE_VERSION,
     moduleDir,
@@ -3739,8 +3748,7 @@ function doctorReport() {
       generatedAt: apiManifest.generatedAt,
       schemaVersion: apiManifest.schemaVersion ?? null,
     },
-    // 没有 profile 选择层可报告；surface 是固定的 facade 集合，operation 总数
-    // 从 OperationCatalog 派生而不是写死常量。
+    // profile 列表与运行时选择共享目录；不精确匹配时 planner 仍保持 fail-closed。
     surface: {
       facades: compactFacade.toolNames,
       facadeCount: enabledTools.length,

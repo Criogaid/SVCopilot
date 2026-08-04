@@ -7,7 +7,7 @@
 
 | 项目 | 结论 | 证据强度 |
 |---|---|---|
-| H2 | 6 组请求均没有有限 computed pitch；仅 default level 两组完整写入 | `unknown` |
+| H2 | 初始夹具全 null；后续有限帧矩阵确认包络缩放与显式 `pitchDelta` 可加 | `confirmed`（仅 `hostEnvelopeWithExplicitPitchDelta`） |
 | H3a | 仅 `pitchDelta`、仅 PitchControl、二者共存均没有有限 computed pitch | `unknown` |
 | H3b | 3 个 local anchor、2 个 occurrence offset 的 direct mapping 已读回 | `partially_observed` |
 | H4 | 13 个 `getValueAt()` 点为分段线性 | `confirmed` |
@@ -28,6 +28,10 @@
 每个写 workflow 都使用 `before-and-after` boundary，返回 2 次 boundary call 与 1 个预期用户 Undo
 步。0.2/1.8 `vibratoEnv` 被宿主以 float32 回读，严格 double equality 断言因此得到 `partial`；没有
 重试该写入，直接删除整套临时夹具，并以项目读回确认恢复。
+
+后续有限 computed-pitch H2 矩阵见 [T04-h2-vibrato-finite-live.md](T04-h2-vibrato-finite-live.md)。
+它只更新 `vibrato.hostEnvelopeWithExplicitPitchDelta`；`dF0VbrMod`、PitchControl 组合和 H5--H8
+仍没有被本次补充实验解锁。
 
 ## 验证
 

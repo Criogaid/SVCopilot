@@ -88,7 +88,7 @@ test("HostSession rejects epoch-bound handles after the bridge reconnects", asyn
     async call(command) {
       if (command.op === "root") return { project: { __handle__: 1, __type__: "Project" } };
       if (command.op === "call" && command.method === "getHostInfo") {
-        return { hostVersion: "2.2.1" };
+        return { hostName: "Synthesizer V Studio 2 Pro", hostVersion: "2.2.1" };
       }
       if (command.op === "call" && command.method === "getFileName") return "test.svp";
       throw new Error(`unsupported command: ${command.op}.${command.method ?? ""}`);
@@ -100,7 +100,9 @@ test("HostSession rejects epoch-bound handles after the bridge reconnects", asyn
   bridge.emit("attach", { epoch: 1 });
   const roots = await session.roots();
   assert.equal(roots.project.__epoch__, 1);
+  assert.equal(session.getStatus().hostProduct, "Synthesizer V Studio 2 Pro");
   bridge.emit("attach", { epoch: 2 });
+  assert.equal(session.getStatus().hostProduct, null);
   await assert.rejects(
     session.call({ handle: roots.project, method: "getFileName", args: [] }),
     (error) => error.code === "STALE_HANDLE"

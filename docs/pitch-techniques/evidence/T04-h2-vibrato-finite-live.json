@@ -1,0 +1,75 @@
+{
+  "kind": "svcopilot-h2-vibrato-evidence",
+  "schemaVersion": "1.0.0",
+  "capturedAt": "2026-08-04T04:32:10.4487041-03:00",
+  "host": {
+    "product": "Synthesizer V Studio 2 Pro",
+    "version": "2.2.1",
+    "platform": "win32",
+    "bridgeProtocolVersion": 2
+  },
+  "fixture": {
+    "strategy": "isolated_automation_range_on_user_approved_temporary_project",
+    "sourceContentTokenRestored": true,
+    "allWritesVerifiedByReadback": true,
+    "allWritesUsedOneHostUndoBoundary": true
+  },
+  "sampling": {
+    "requestedFrames": 384,
+    "finiteFramesPerCase": 363,
+    "nullFramesPerCase": 21,
+    "stablePolls": 2
+  },
+  "matrix": {
+    "caseCount": 8,
+    "envelopeScales": [0, 0.2, 1, 1.8],
+    "explicitPitchDeltaCases": [false, true],
+    "explicitPitchDelta": {
+      "shape": "two_cycles_over_note_span",
+      "peakCents": 50,
+      "pointCount": 33
+    }
+  },
+  "comparisons": {
+    "explicitPitchDeltaAtEnvelopeOne": {
+      "maeCent": 8.29041431101229,
+      "p95AbsCent": 47.46246337890625,
+      "maxAbsCent": 49.65629577636719
+    },
+    "envelopeScaleDeltaInvariantToExplicitPitchDelta": [
+      {
+        "envelopeScale": 0,
+        "maxMetricDifferenceCent": 0.000010306967531635695,
+        "maxAbsCent": 182.110595703125
+      },
+      {
+        "envelopeScale": 0.2,
+        "maxMetricDifferenceCent": 0.00000840704541288292,
+        "maxAbsCent": 175.80528259277344
+      },
+      {
+        "envelopeScale": 1.8,
+        "maxMetricDifferenceCent": 0.000005254403951502267,
+        "maxAbsCent": 281.8168640136719
+      }
+    ]
+  },
+  "conclusion": {
+    "semantic": "vibrato.hostEnvelopeWithExplicitPitchDelta",
+    "status": "confirmed",
+    "value": {
+      "hostEnvelope": "baseline_scale",
+      "explicitPitchDelta": {
+        "vibratoEnv": {
+          "mode": "replace",
+          "value": 0
+        }
+      }
+    },
+    "reason": "Envelope-scale deltas were materially observable and unchanged by the explicit pitchDelta contribution; zero envelope was directly measured."
+  },
+  "unresolved": [
+    "vibrato.noteModulationInteraction",
+    "vibrato.hostEnvelopeWithExplicitPitchControl"
+  ]
+}
