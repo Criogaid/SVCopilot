@@ -34,11 +34,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
+    "mvp-13-interpolation-failure-and-rollback",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 4);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 3);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 10);
+  assert.equal(evidence.scenarios.length, 11);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -195,6 +196,30 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(allNullCoverage.compare.reportedAsZeroError, false);
   assert.equal(coverageScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(coverageScenario.id), false);
+  const rollbackScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-13-interpolation-failure-and-rollback",
+  );
+  assert.equal(rollbackScenario.status, "passed");
+  assert.deepEqual(rollbackScenario.fixture.parameters, ["pitchDelta", "vibratoEnv"]);
+  assert.ok(
+    rollbackScenario.fixture.injectedDrift.absoluteError
+      > rollbackScenario.fixture.injectedDrift.maxAllowedError,
+  );
+  assert.equal(rollbackScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(rollbackScenario.workflow.dryRun.undoBoundaryCalls, 0);
+  assert.equal(rollbackScenario.workflow.commit.status, "rolled_back");
+  assert.equal(rollbackScenario.workflow.commit.effects, "reverted");
+  assert.equal(rollbackScenario.workflow.commit.errorCode, "POSTCONDITION_FAILED");
+  assert.equal(rollbackScenario.workflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(rollbackScenario.workflow.commit.automaticRollback, true);
+  assert.deepEqual(rollbackScenario.workflow.rollback.reverseParameterOrder, [
+    "vibratoEnv",
+    "pitchDelta",
+  ]);
+  assert.equal(rollbackScenario.workflow.rollback.verified, true);
+  assert.equal(rollbackScenario.workflow.cleanup.contentTokenMatched, true);
+  assert.equal(rollbackScenario.resourceCleanup.scenarioArtifactLeasesRemaining, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(rollbackScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );

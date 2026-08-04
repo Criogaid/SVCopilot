@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T08:37:09.530-03:00",
+  "capturedAt": "2026-08-04T08:46:13.470-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -29,7 +29,8 @@
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
-    "mvp-10-computed-pitch-coverage-matrix"
+    "mvp-10-computed-pitch-coverage-matrix",
+    "mvp-13-interpolation-failure-and-rollback"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -1290,12 +1291,125 @@
         "timeoutRecovery": "converged_after_timeout"
       },
       "hostMutation": false
+    },
+    {
+      "id": "mvp-13-interpolation-failure-and-rollback",
+      "status": "passed",
+      "capturedAt": "2026-08-04T08:46:13.470-03:00",
+      "scope": "live_multi_parameter_postcondition_failure_and_verified_rollback",
+      "fixture": {
+        "parameters": [
+          "pitchDelta",
+          "vibratoEnv"
+        ],
+        "baselinePointsInTargetRange": {
+          "pitchDelta": 0,
+          "vibratoEnv": 0
+        },
+        "interpolationMethodByParameter": {
+          "pitchDelta": "linear",
+          "vibratoEnv": "linear"
+        },
+        "injectedDrift": {
+          "parameter": "vibratoEnv",
+          "sampleKind": "adaptive_midpoint",
+          "expected": 1.25,
+          "observed": 1,
+          "signedError": -0.25,
+          "absoluteError": 0.25,
+          "maxAllowedError": 0.01
+        }
+      },
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "capturedParameters": [
+            "pitchDelta",
+            "vibratoEnv"
+          ],
+          "artifactBytes": 11611,
+          "pagingRequired": false,
+          "hostReadMs": 481,
+          "operationMs": 482
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "preflightPassedCurves": 2,
+          "hostWriteMs": 0,
+          "operationMs": 71
+        },
+        "commit": {
+          "status": "rolled_back",
+          "effects": "reverted",
+          "errorCode": "POSTCONDITION_FAILED",
+          "failurePhase": "verify",
+          "failedCurveIndex": 1,
+          "failedParameter": "vibratoEnv",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "automaticRollback": true,
+          "verifiedCurvesBeforeFailure": 1,
+          "totalCurves": 2,
+          "preflightReadMs": 151,
+          "hostWriteMs": 220,
+          "hostVerificationMs": 28,
+          "rollbackMs": 20,
+          "operationMs": 421,
+          "perParameterVerification": [
+            {
+              "parameter": "pitchDelta",
+              "exactPointVerificationPassed": true,
+              "hostInterpolationPassed": true,
+              "hostInterpolationMaxAbsError": 0,
+              "rolledBack": true
+            },
+            {
+              "parameter": "vibratoEnv",
+              "exactPointVerificationPassed": true,
+              "hostInterpolationPassed": false,
+              "hostInterpolationMaxAbsError": 0.25,
+              "firstMismatchSource": "adaptive_midpoint",
+              "rolledBack": true
+            }
+          ]
+        },
+        "rollback": {
+          "status": "succeeded",
+          "verified": true,
+          "reverseParameterOrder": [
+            "vibratoEnv",
+            "pitchDelta"
+          ],
+          "verifiedCurves": 2,
+          "outcome": "unchanged"
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "restorationStatus": "no_change",
+          "contentTokenMatched": true,
+          "restoredPointsInTargetRange": {
+            "pitchDelta": 0,
+            "vibratoEnv": 0
+          }
+        }
+      },
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedScenarioArtifactLeases": 2,
+        "scenarioArtifactLeasesRemaining": 0,
+        "unrelatedReconnectProbeLeasesRetained": 1,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      }
     }
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
     "mvp-11-stale-context-and-reconnect",
-    "mvp-13-interpolation-failure-and-rollback",
     "mvp-14-null-gap-correction"
   ],
   "p2b": {

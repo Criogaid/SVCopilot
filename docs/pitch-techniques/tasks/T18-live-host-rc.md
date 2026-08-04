@@ -29,9 +29,10 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 ## 当前进展
 
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
-- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、3、4、5、6、7、8、9、10 已完成可恢复
+- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、3、4、5、6、7、8、9、10、13
+  已完成可恢复
   真机闭环：[T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。场景 12 条件不适用，
-  另有 4 个 MVP 场景尚未完成，P2b 也明确保持未启动。
+  另有 3 个 MVP 场景尚未完成，P2b 也明确保持未启动。
 - 场景 5 的内容 token 已恢复，全部残留 Artifact lease 已在 TTL 后 prune；doctor 最终为
   `0 entries / 0 bytes`，cleanup 门禁闭合。
 - 场景 12 因 P4 已选进程内后端而标为 `not_applicable`；T16 的 timeout recovery 证据保留为
@@ -51,7 +52,7 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 - 场景 8 以临时共享引用验证两 occurrence：未确认路径在 preflight 零写入拒绝，确认路径一个
   用户 Undo，两个 occurrence 均回读到相同 target mutation 并完成 computed-pitch compare。
   Automation 与临时引用分层恢复后原项目 token 精确匹配，Artifact 与 raw handle 均归零。当前
-  还剩 4 个 MVP 场景未完成。
+  还剩 3 个 MVP 场景未完成。
 - 场景 9 已在 singer-bound target 上完成 12 / 373 音符规模验证。两者 34 点 planner 主响应均为
   `1,817 bytes`，长组 dense 数据只进入可分页 Artifact；dry-run 零写入，正常 commit 各为一个
   用户 Undo 且宿主插值回读通过。12 音符路径完成 computed-pitch compare；373 音符路径连续两个
@@ -60,3 +61,6 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 - 场景 10 以只读快照固定 full / partial / all-null computed pitch 语义：全覆盖 `32 / 32` 正常
   分析；低覆盖有效 `5 / 32` 且返回 `LOW_COMPUTED_PITCH_COVERAGE`；全空 `0 / 2000` 返回
   `INSUFFICIENT_COMPUTED_PITCH`，不伪报零误差。该场景零 setter、零 Undo，Artifact 全部释放。
+- 场景 13 在一个双参数事务中让 `vibratoEnv` adaptive midpoint 产生 `0.25` 的受控误差，验证
+  `POSTCONDITION_FAILED` 会触发 `vibratoEnv → pitchDelta` 逆序补偿。两条曲线均读回恢复，一个
+  用户 Undo，最终双参数 token 精确 `no_change`；场景自身 Artifact 全部释放。
