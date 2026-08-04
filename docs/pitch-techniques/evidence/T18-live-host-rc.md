@@ -13,8 +13,8 @@
 `24.22554 cent`。这证明该写入路径和量测链路可工作，不对自然度作自动化结论。
 
 清理事务移除了全部 117 个临时 `vibratoEnv` 点，最终内容 token 与实验前精确一致；本场景
-创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 8 个 MVP 场景通过、
-1 个条件场景不适用、5 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
+创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 9 个 MVP 场景通过、
+1 个条件场景不适用、4 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
 `unknown`，H3b 仅
 `partially_observed`，所以不启用 `PitchControlCurve`。
 
@@ -83,5 +83,11 @@ planner 均返回 34 点的 compact envelope，结构化主响应为 `1,817 byte
 全空 computed-pitch frame，compare 如实返回 `INSUFFICIENT_COMPUTED_PITCH`，该观测转交场景 10。
 清理分两批把组恢复为 198 音符，原始音符、节拍/拍号和 `pitchDelta` 内容 token 精确返回
 `no_change`；全部 Artifact、raw handle 和 pending execution 再次归零。
+
+场景 10 以纯只读快照覆盖 computed pitch 三态。全覆盖夹具的 `32 / 32` 帧全部进入统计且无 coverage
+warning；部分覆盖夹具原始为 `7 / 32` 个有限帧，其中 2 帧落在音符外，最终有效覆盖 `5 / 32`
+（`15.625%`），分析成功但明确返回 `LOW_COMPUTED_PITCH_COVERAGE`。场景 9 的 373 音符全空夹具
+则为 `0 / 2000`，在处理等待超时后 compare 结构化返回 `INSUFFICIENT_COMPUTED_PITCH`，没有伪造
+零误差。该场景没有 setter 或 Undo；两份新 Artifact 已显式释放，doctor 保持零残留。
 
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。

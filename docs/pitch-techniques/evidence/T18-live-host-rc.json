@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T08:31:46.477-03:00",
+  "capturedAt": "2026-08-04T08:37:09.530-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -28,7 +28,8 @@
     "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
-    "mvp-09-short-and-long-groups"
+    "mvp-09-short-and-long-groups",
+    "mvp-10-computed-pitch-coverage-matrix"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -1177,6 +1178,104 @@
       }
     },
     {
+      "id": "mvp-10-computed-pitch-coverage-matrix",
+      "status": "passed",
+      "capturedAt": "2026-08-04T08:37:09.530-03:00",
+      "scope": "read_only_computed_pitch_coverage_semantics",
+      "hostMutation": false,
+      "setterCalls": 0,
+      "undoBoundaryCalls": 0,
+      "cases": [
+        {
+          "coverageClass": "full",
+          "snapshot": {
+            "status": "succeeded",
+            "requestedFrames": 32,
+            "rawFiniteFrames": 32,
+            "nullFrames": 0,
+            "artifactBytes": 5898,
+            "pagingRequired": false,
+            "hostReadMs": 198,
+            "operationMs": 200
+          },
+          "compare": {
+            "status": "succeeded",
+            "eligibleFrames": 32,
+            "finiteFrames": 32,
+            "validFrames": 32,
+            "framesOutsideNotes": 0,
+            "coverage": 1,
+            "warningCodes": [],
+            "maeCent": 12.303340435028076,
+            "p95AbsCent": 42.41447448730469,
+            "maxAbsCent": 44.75898742675781
+          }
+        },
+        {
+          "coverageClass": "partial",
+          "snapshot": {
+            "status": "succeeded",
+            "requestedFrames": 32,
+            "rawFiniteFrames": 7,
+            "nullFrames": 25,
+            "artifactBytes": 5638,
+            "pagingRequired": false,
+            "hostReadMs": 197,
+            "operationMs": 198
+          },
+          "compare": {
+            "status": "succeeded",
+            "eligibleFrames": 32,
+            "finiteFrames": 7,
+            "validFrames": 5,
+            "framesOutsideNotes": 2,
+            "coverage": 0.15625,
+            "warningCodes": [
+              "SAMPLING_BORDERLINE_FOR_VIBRATO",
+              "LOW_COMPUTED_PITCH_COVERAGE"
+            ],
+            "lowCoverageThreshold": 0.5,
+            "maeCent": 106.1248779296875,
+            "p95AbsCent": 260.9046936035156,
+            "maxAbsCent": 260.9046936035156
+          }
+        },
+        {
+          "coverageClass": "all_null",
+          "snapshot": {
+            "status": "succeeded",
+            "requestedFrames": 2000,
+            "rawFiniteFrames": 0,
+            "nullFrames": 2000,
+            "pagingRequired": true
+          },
+          "processingWait": {
+            "status": "processing_timeout",
+            "effects": "none",
+            "waitWindows": 2,
+            "elapsedMs": 60015,
+            "state": "pending"
+          },
+          "compare": {
+            "status": "failed",
+            "errorCode": "INSUFFICIENT_COMPUTED_PITCH",
+            "frameCount": 2000,
+            "finiteFrames": 0,
+            "framesOutsideNotes": 0,
+            "reportedAsZeroError": false
+          }
+        }
+      ],
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedArtifactLeases": 2,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      }
+    },
+    {
       "id": "mvp-12-worker-timeout-or-crash",
       "status": "not_applicable",
       "gate": {
@@ -1195,7 +1294,6 @@
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
-    "mvp-10-computed-pitch-coverage-matrix",
     "mvp-11-stale-context-and-reconnect",
     "mvp-13-interpolation-failure-and-rollback",
     "mvp-14-null-gap-correction"

@@ -33,11 +33,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
+    "mvp-10-computed-pitch-coverage-matrix",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 5);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 4);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 9);
+  assert.equal(evidence.scenarios.length, 10);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -171,6 +172,29 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(groupSizeScenario.resourceCleanup.knownHandleCountAfterCleanup, 0);
   assert.equal(groupSizeScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(groupSizeScenario.id), false);
+  const coverageScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-10-computed-pitch-coverage-matrix",
+  );
+  assert.equal(coverageScenario.status, "passed");
+  assert.equal(coverageScenario.hostMutation, false);
+  assert.equal(coverageScenario.setterCalls, 0);
+  assert.equal(coverageScenario.undoBoundaryCalls, 0);
+  assert.deepEqual(
+    coverageScenario.cases.map((coverageCase) => coverageCase.coverageClass),
+    ["full", "partial", "all_null"],
+  );
+  const [fullCoverage, partialCoverage, allNullCoverage] = coverageScenario.cases;
+  assert.equal(fullCoverage.compare.status, "succeeded");
+  assert.equal(fullCoverage.compare.coverage, 1);
+  assert.deepEqual(fullCoverage.compare.warningCodes, []);
+  assert.equal(partialCoverage.compare.status, "succeeded");
+  assert.ok(partialCoverage.compare.coverage < partialCoverage.compare.lowCoverageThreshold);
+  assert.ok(partialCoverage.compare.warningCodes.includes("LOW_COMPUTED_PITCH_COVERAGE"));
+  assert.equal(allNullCoverage.compare.status, "failed");
+  assert.equal(allNullCoverage.compare.errorCode, "INSUFFICIENT_COMPUTED_PITCH");
+  assert.equal(allNullCoverage.compare.reportedAsZeroError, false);
+  assert.equal(coverageScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(coverageScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );
