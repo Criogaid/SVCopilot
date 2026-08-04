@@ -32,11 +32,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",
+    "mvp-09-short-and-long-groups",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 6);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 5);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 8);
+  assert.equal(evidence.scenarios.length, 9);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -140,6 +141,36 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(sharedTargetScenario.resourceCleanup.knownHandleCountAfterCleanup, 0);
   assert.equal(sharedTargetScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(sharedTargetScenario.id), false);
+  const groupSizeScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-09-short-and-long-groups",
+  );
+  assert.equal(groupSizeScenario.status, "passed");
+  assert.equal(groupSizeScenario.fixtureSetup.shortGroup.testNoteCount, 12);
+  assert.equal(groupSizeScenario.fixtureSetup.longGroup.testNoteCount, 373);
+  assert.equal(groupSizeScenario.compactSurface.withinTarget, true);
+  assert.ok(groupSizeScenario.compactSurface.shortGroupStructuredResponseBytes <= 8192);
+  assert.ok(groupSizeScenario.compactSurface.longGroupStructuredResponseBytes <= 8192);
+  assert.equal(groupSizeScenario.compactSurface.denseDetailPagingRequired, true);
+  assert.equal(groupSizeScenario.shortGroupWorkflow.dryRun.setterCalls, 0);
+  assert.equal(groupSizeScenario.shortGroupWorkflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(groupSizeScenario.shortGroupWorkflow.cleanup.editableFieldsRestored, true);
+  assert.equal(
+    groupSizeScenario.shortGroupWorkflow.cleanup.differenceLimitedToDerivedComputedPitch,
+    true,
+  );
+  assert.equal(groupSizeScenario.longGroupWorkflow.snapshot.groupNoteCount, 373);
+  assert.equal(groupSizeScenario.longGroupWorkflow.dryRun.setterCalls, 0);
+  assert.equal(groupSizeScenario.longGroupWorkflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(groupSizeScenario.longGroupWorkflow.wait.status, "processing_timeout");
+  assert.equal(
+    groupSizeScenario.longGroupWorkflow.wait.forwardedToScenario,
+    "mvp-10-computed-pitch-coverage-matrix",
+  );
+  assert.equal(groupSizeScenario.longGroupWorkflow.cleanup.editableContentTokenMatched, true);
+  assert.equal(groupSizeScenario.longGroupWorkflow.cleanup.restoredNoteCount, 198);
+  assert.equal(groupSizeScenario.resourceCleanup.knownHandleCountAfterCleanup, 0);
+  assert.equal(groupSizeScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(groupSizeScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );

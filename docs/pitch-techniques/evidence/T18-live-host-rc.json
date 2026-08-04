@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T07:02:14.573-03:00",
+  "capturedAt": "2026-08-04T08:31:46.477-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -27,7 +27,8 @@
     "mvp-05-explicit-pitch-delta-vibrato",
     "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
-    "mvp-08-shared-target-two-occurrences"
+    "mvp-08-shared-target-two-occurrences",
+    "mvp-09-short-and-long-groups"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -910,6 +911,272 @@
       }
     },
     {
+      "id": "mvp-09-short-and-long-groups",
+      "status": "passed",
+      "capturedAt": "2026-08-04T08:31:46.477-03:00",
+      "scope": "compact_response_and_live_transaction_performance",
+      "fixtureSetup": {
+        "status": "succeeded",
+        "dedicatedProjectApproved": true,
+        "shortGroup": {
+          "strategy": "temporarily_remove_last_two_notes_from_singer_bound_14_note_target",
+          "baselineNoteCount": 14,
+          "testNoteCount": 12
+        },
+        "longGroup": {
+          "strategy": "append_175_clones_to_singer_bound_198_note_target",
+          "baselineNoteCount": 198,
+          "testNoteCount": 373,
+          "appendBatches": [
+            {
+              "resultingNoteCount": 240,
+              "elapsedMs": 561,
+              "hostCalls": 178,
+              "expectedUserUndoSteps": 1
+            },
+            {
+              "resultingNoteCount": 282,
+              "elapsedMs": 373,
+              "hostCalls": 178,
+              "expectedUserUndoSteps": 1
+            },
+            {
+              "resultingNoteCount": 324,
+              "elapsedMs": 442,
+              "hostCalls": 178,
+              "expectedUserUndoSteps": 1
+            },
+            {
+              "resultingNoteCount": 366,
+              "elapsedMs": 526,
+              "hostCalls": 178,
+              "expectedUserUndoSteps": 1
+            },
+            {
+              "resultingNoteCount": 373,
+              "elapsedMs": 137,
+              "hostCalls": 38,
+              "expectedUserUndoSteps": 1
+            }
+          ]
+        }
+      },
+      "compactSurface": {
+        "targetBytes": 8192,
+        "hardLimitBytes": 16384,
+        "shortGroupStructuredResponseBytes": 1817,
+        "longGroupStructuredResponseBytes": 1817,
+        "withinTarget": true,
+        "denseDetailPagingRequired": true,
+        "artifactBytes": {
+          "shortGroup": null,
+          "longGroupContentBaseline": 63356,
+          "longGroupFullBaseline": 96124,
+          "longGroupBeforeCommit": 108363,
+          "longGroupAfterCommit": 109975,
+          "longGroupRestored": 96137
+        },
+        "shortGroupByteMethod": "The short and long planners returned the same one-technique, one-curve, 34-point compact envelope shape; the retained long-context replay measured 1817 UTF-8 bytes.",
+        "longGroupByteMethod": "JSON UTF-8 bytes of structuredContent measured during immutable-context planner replay."
+      },
+      "shortGroupWorkflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "groupNoteCount": 12,
+          "capturedNotes": 12,
+          "baselinePitchDeltaPoints": 74,
+          "computedPitch": {
+            "requestedFrames": 768,
+            "finiteFrames": 196,
+            "nullFrames": 572,
+            "coverage": 0.2552083333333333
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 1,
+          "curveCount": 1,
+          "pointCount": 34
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 34,
+          "readbackPoints": 34,
+          "hostWriteMs": 73,
+          "hostVerificationMs": 76,
+          "operationMs": 310,
+          "maxPointValueDeltaCent": 0.000003679687501368045,
+          "hostInterpolation": {
+            "sampleCount": 36,
+            "maxAbsErrorCent": 0.000005914687500663707,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "elapsedMs": 107,
+          "finiteFrames": 196,
+          "coverage": 0.2552083333333333
+        },
+        "compare": {
+          "status": "succeeded",
+          "comparedFrames": 196,
+          "maeCent": 1.669475,
+          "rmseCent": 9.7359,
+          "p95AbsCent": 0,
+          "maxAbsCent": 75.9613,
+          "focusCenterDeltaCent": [
+            -2.2876,
+            6.9711
+          ],
+          "unmatchedNotes": 0
+        },
+        "cleanup": {
+          "status": "succeeded_with_derived_pitch_drift",
+          "targetRangePitchDeltaPointsBefore": 34,
+          "targetRangePitchDeltaPointsAfter": 0,
+          "noteCountAfter": 14,
+          "editableFieldsRestored": true,
+          "automationRestored": true,
+          "fullSnapshotTokenMatched": false,
+          "differenceLimitedToDerivedComputedPitch": true,
+          "derivedPitchComparedFrames": 244,
+          "derivedPitchMaxAbsDriftCent": 0.000762939453125,
+          "derivedPitchMaeCent": 0.000025,
+          "unmatchedNotes": 0
+        }
+      },
+      "longGroupWorkflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "groupNoteCount": 373,
+          "capturedNotes": 373,
+          "baselinePitchDeltaPoints": 156,
+          "hostReadMs": 7643,
+          "operationMs": 7687,
+          "pagingRequired": true,
+          "computedPitch": {
+            "requestedFrames": 2000,
+            "finiteFrames": 0,
+            "nullFrames": 2000,
+            "coverage": 0
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 1,
+          "curveCount": 1,
+          "pointCount": 34,
+          "structuredResponseBytes": 1817
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0,
+          "operationMs": 108
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 34,
+          "readbackPoints": 34,
+          "hostWriteMs": 76,
+          "hostVerificationMs": 83,
+          "operationMs": 327,
+          "maxPointValueDeltaCent": 0.0000018764648430646957,
+          "hostInterpolation": {
+            "sampleCount": 35,
+            "maxAbsErrorCent": 0.0000023764648489077445,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": {
+          "status": "processing_timeout",
+          "effects": "none",
+          "attempts": 101,
+          "waitWindows": 2,
+          "elapsedMs": 60015,
+          "state": "pending",
+          "finiteFrames": 0,
+          "coverage": 0,
+          "forwardedToScenario": "mvp-10-computed-pitch-coverage-matrix"
+        },
+        "compare": {
+          "status": "failed",
+          "effects": "none",
+          "errorCode": "INSUFFICIENT_COMPUTED_PITCH",
+          "finiteFrames": 0
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "targetRangePitchDeltaPointsBefore": 34,
+          "targetRangePitchDeltaPointsAfter": 0,
+          "removeBatches": [
+            {
+              "fromNoteCount": 373,
+              "toNoteCount": 273,
+              "elapsedMs": 551,
+              "hostCalls": 110,
+              "expectedUserUndoSteps": 1
+            },
+            {
+              "fromNoteCount": 273,
+              "toNoteCount": 198,
+              "elapsedMs": 412,
+              "hostCalls": 85,
+              "expectedUserUndoSteps": 1
+            }
+          ],
+          "editableContentTokenMatched": true,
+          "restorationStatus": "no_change",
+          "restoredNoteCount": 198,
+          "restoredPitchDeltaPoints": 156,
+          "restoredComputedPitchFrames": 1530,
+          "derivedPitchAfterMinusBefore": {
+            "validFrames": 1530,
+            "coverage": 0.765,
+            "maeCent": 0.12567383011961294,
+            "p95AbsCent": 0.0091552734375,
+            "maxAbsCent": 55.21240234375
+          }
+        }
+      },
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedArtifactLeases": 8,
+        "explicitlyReleasedRawHandles": 5,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      },
+      "transportMetrics": {
+        "status": "partial",
+        "reason": "Facade, raw host-call, serialized response, and Artifact byte measurements were recorded; aggregate PIPE and MCP median/p95 require repeated trials."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
+    {
       "id": "mvp-12-worker-timeout-or-crash",
       "status": "not_applicable",
       "gate": {
@@ -928,7 +1195,6 @@
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
-    "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
     "mvp-11-stale-context-and-reconnect",
     "mvp-13-interpolation-failure-and-rollback",

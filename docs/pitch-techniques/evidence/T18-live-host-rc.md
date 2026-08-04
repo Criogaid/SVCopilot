@@ -13,8 +13,8 @@
 `24.22554 cent`。这证明该写入路径和量测链路可工作，不对自然度作自动化结论。
 
 清理事务移除了全部 117 个临时 `vibratoEnv` 点，最终内容 token 与实验前精确一致；本场景
-创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 7 个 MVP 场景通过、
-1 个条件场景不适用、6 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
+创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 8 个 MVP 场景通过、
+1 个条件场景不适用、5 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
 `unknown`，H3b 仅
 `partially_observed`，所以不启用 `PitchControlCurve`。
 
@@ -73,5 +73,15 @@ occurrence。快照明确报告共享 occurrence `[0,1]`。未确认 commit 在 
 近乎一致。恢复先清空共享 target 的范围并匹配共享夹具 token，再删除临时引用并匹配原项目 token。
 6 个 Artifact lease 与 9 个 raw handle 全部显式释放；doctor 为 Artifact `0 entries / 0 bytes`、
 handle 0、pending execution 0。
+
+场景 9 分别在真实 singer-bound target 上构造 12 音符和 373 音符规模。两者的单 transition
+planner 均返回 34 点的 compact envelope，结构化主响应为 `1,817 bytes`，低于 8 KiB 目标；
+长组 dense 快照为 `63,356` 至 `109,975 bytes`，只通过可分页 Artifact 承载。12 音符路径完成
+零写入 dry-run、单 Undo commit、`196 / 768` 有限帧比较和曲线恢复；音符与 Automation 均恢复，
+完整 token 的差异仅来自派生 computed pitch，244 个比较帧最大漂移 `0.000763 cent`。373 音符路径
+同样以单 Undo 提交并通过 34 点和 35 个插值样本回读，但宿主在两个 30 秒窗口后仍返回 2,000 个
+全空 computed-pitch frame，compare 如实返回 `INSUFFICIENT_COMPUTED_PITCH`，该观测转交场景 10。
+清理分两批把组恢复为 198 音符，原始音符、节拍/拍号和 `pitchDelta` 内容 token 精确返回
+`no_change`；全部 Artifact、raw handle 和 pending execution 再次归零。
 
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。
