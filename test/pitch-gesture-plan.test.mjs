@@ -60,6 +60,7 @@ function noteFingerprint(note, index) {
 
 function createFixture({
   notes = DEFAULT_NOTES,
+  bpm = 120,
   includeVibratoEnv = true,
   hostProfile = null,
   hostProfileProvider = null,
@@ -79,7 +80,7 @@ function createFixture({
     context: {
       kind: "range",
       quarterBlick: Q,
-      tempoMarks: [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }],
+      tempoMarks: [{ positionBlick: 0, positionSeconds: 0, bpm }],
       automationCaptured: true,
       automationByOccurrence: {
         0: [
@@ -186,6 +187,51 @@ test("transition seals a compact ParameterCurve PlanRef and commits through the 
   assert.equal(committed.effects, "verified");
   assert.equal(committed.undo.expectedUserUndoSteps, 1);
   assert.ok(model.automationPoints.length >= 2);
+});
+
+test("Richards transitions tolerate canonical second quantization at non-terminating tempos", async () => {
+  const notes = [
+    { onset: 0, duration: Q, pitch: 60, lyrics: "a" },
+    { onset: Q, duration: Q, pitch: 59, lyrics: "i" },
+    { onset: 2 * Q, duration: Q, pitch: 61, lyrics: "u" },
+    { onset: 3 * Q, duration: Q, pitch: 62, lyrics: "e" },
+  ];
+  const { stored, planner, sealed } = createFixture({ notes, bpm: 130 });
+  const plan = await planner.plan({
+    contextId: stored.contextId,
+    occurrence: 0,
+    gestures: [
+      {
+        type: "transition",
+        from: 0,
+        to: 1,
+        width: { seconds: 0.2 },
+        curve: {
+          family: "richards",
+          inflectionRatio: 0.45,
+          sharpness: 6,
+          asymmetryLogB: 0.4,
+        },
+      },
+      {
+        type: "transition",
+        from: 2,
+        to: 3,
+        width: { seconds: 0.2 },
+        curve: {
+          family: "richards",
+          inflectionRatio: 0.55,
+          sharpness: 6,
+          asymmetryLogB: -0.4,
+        },
+      },
+    ],
+  });
+
+  assert.equal(plan.status, "planned");
+  const payload = sealed(plan);
+  assert.equal(payload.pitchTechniques.ir.techniques.length, 2);
+  assert.equal(payload.mutationRequest.curves.length, 2);
 });
 
 test("transition rejects the old surface and invalid same-note selection", async () => {

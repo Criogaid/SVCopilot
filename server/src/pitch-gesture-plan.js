@@ -803,6 +803,7 @@ function compilePitchDeltaCurves({ input, loaded, ir, baseline }) {
     mandatoryAnchors: mandatory,
     maxFitErrorCent: input.constraints.maxFitErrorCent,
     loaded,
+    descriptors,
   });
   return {
     curves,
@@ -906,7 +907,12 @@ function buildPitchDescriptors(ir, loaded, input) {
       descriptors.set(technique.canonicalKey, {
         technique,
         compiled,
-        evaluate: (seconds, side = "auto") => compiled.contributionCentAt(seconds, side),
+        evaluate: (seconds, side = "auto") => evaluateTransitionContribution({
+          technique,
+          compiled,
+          seconds,
+          side,
+        }),
       });
       continue;
     }
@@ -949,6 +955,20 @@ function buildPitchDescriptors(ir, loaded, input) {
   return descriptors;
 }
 
+function evaluateTransitionContribution({ technique, compiled, seconds, side }) {
+  if (
+    seconds < technique.span.fromSeconds - SECOND_QUANTUM
+    || seconds > technique.span.toSeconds + SECOND_QUANTUM
+  ) {
+    return 0;
+  }
+  const boundedSeconds = Math.max(
+    compiled.fromSeconds,
+    Math.min(compiled.toSeconds, seconds),
+  );
+  return compiled.contributionCentAt(boundedSeconds, side);
+}
+
 function buildPitchMandatoryAnchors({ descriptors, ir, baseline, loaded, input }) {
   const anchors = [];
   const totalAt = (seconds, current = null, side = "auto") => quantize(
@@ -980,10 +1000,22 @@ function buildPitchMandatoryAnchors({ descriptors, ir, baseline, loaded, input }
     const { technique } = descriptor;
     if (technique.kind === "portamento") {
       const boundaryLocalBlick = requireLoadedNote(loaded, technique.anchors.toNote).onsetBlick;
-      push(descriptor, "start", technique.span.fromSeconds);
+      push(
+        descriptor,
+        "start",
+        technique.span.fromSeconds,
+        "auto",
+        localBlickAtSeconds(descriptor.compiled.fromSeconds, loaded),
+      );
       push(descriptor, "boundary_before", descriptor.compiled.boundarySeconds, "before", boundaryLocalBlick - 1);
       push(descriptor, "boundary_at", descriptor.compiled.boundarySeconds, "at", boundaryLocalBlick);
-      push(descriptor, "end", technique.span.toSeconds);
+      push(
+        descriptor,
+        "end",
+        technique.span.toSeconds,
+        "auto",
+        localBlickAtSeconds(descriptor.compiled.toSeconds, loaded),
+      );
       if (technique.model.family === "richards_segment_normalized") {
         push(
           descriptor,
@@ -1112,15 +1144,22 @@ function splitGridRuns(grid) {
   return runs;
 }
 
-function attachHostInterpolation({ curves, baseline, mandatoryAnchors, maxFitErrorCent, loaded }) {
+function attachHostInterpolation({
+  curves,
+  baseline,
+  mandatoryAnchors,
+  maxFitErrorCent,
+  loaded,
+  descriptors,
+}) {
   return curves.map((curve) => {
     const points = decodeDense(curve.points);
     const mandatoryPoints = mandatoryAnchors
-      .map((anchor) => ({
-        blick: anchorLocalBlick(anchor, loaded),
-        value: pointValueAt(points, anchorLocalBlick(anchor, loaded)),
-      }))
-      .filter((point) => point.blick >= curve.range.fromBlick && point.blick <= curve.range.toBlick);
+      .flatMap((anchor) => {
+        const blick = anchorLocalBlick(anchor, loaded, descriptors);
+        if (blick < curve.range.fromBlick || blick > curve.range.toBlick) return [];
+        return [{ blick, value: pointValueAt(points, blick) }];
+      });
     return attachOneHostInterpolation({ curve, baseline, mandatoryPoints, maxFitErrorCent });
   });
 }
@@ -1592,11 +1631,22 @@ function localBlickAtSeconds(seconds, loaded) {
   return local;
 }
 
-function anchorLocalBlick(anchor, loaded) {
-  if (anchor.role === "boundary_before" || anchor.role === "boundary_at") {
-    // compiler 已用 transition projector 固定边界侧；这里按同一秒映射时只用于读取封存点。
-    const canonical = anchor.role === "boundary_before" ? -1 : 0;
-    return localBlickAtSeconds(anchor.timeSeconds, loaded) + canonical;
+function anchorLocalBlick(anchor, loaded, descriptors) {
+  const descriptor = descriptors.get(anchor.canonicalKey);
+  if (descriptor?.technique.kind === "portamento") {
+    if (anchor.role === "start") {
+      return localBlickAtSeconds(descriptor.compiled.fromSeconds, loaded);
+    }
+    if (anchor.role === "end") {
+      return localBlickAtSeconds(descriptor.compiled.toSeconds, loaded);
+    }
+    if (anchor.role === "boundary_before" || anchor.role === "boundary_at") {
+      const boundary = requireLoadedNote(
+        loaded,
+        descriptor.technique.anchors.toNote,
+      ).onsetBlick;
+      return boundary + (anchor.role === "boundary_before" ? -1 : 0);
+    }
   }
   return localBlickAtSeconds(anchor.timeSeconds, loaded);
 }
