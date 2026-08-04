@@ -1,0 +1,130 @@
+{
+  "kind": "svcopilot-live-host-rc",
+  "schemaVersion": "1.0.0",
+  "status": "in_progress",
+  "capturedAt": "2026-08-04T05:25:18.4196724-03:00",
+  "host": {
+    "product": "Synthesizer V Studio 2 Pro",
+    "version": "2.2.1",
+    "platform": "win32",
+    "bridgeProtocolVersion": 2
+  },
+  "runtimeHostProfile": {
+    "status": "matched",
+    "profileId": "synthv-2.2.1-win32-v2",
+    "evidenceSha256": "sha256:f831cfdf1bff8eb963ab228b13380d1f85da0c6e2a982eeb8bd3620186f561ff"
+  },
+  "fixture": {
+    "strategy": "user_approved_temporary_project_isolated_automation_range",
+    "rawProjectDataWithheld": true,
+    "originalContentTokenRestored": true,
+    "intermediateArtifactLeasesReleased": true
+  },
+  "completedMvpScenarioIds": [
+    "mvp-04-host-envelope-vibrato"
+  ],
+  "scenarios": [
+    {
+      "id": "mvp-04-host-envelope-vibrato",
+      "status": "passed",
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "computedPitch": {
+            "requestedFrames": 384,
+            "finiteFrames": 363,
+            "nullFrames": 21
+          }
+        },
+        "plan": {
+          "status": "succeeded",
+          "curveCount": 1,
+          "parameter": "vibratoEnv",
+          "pointCount": 117
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "effects": "none"
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "plannedPoints": 117,
+          "readbackPoints": 117,
+          "hostWriteMs": 447,
+          "hostVerificationMs": 269,
+          "hostInterpolation": {
+            "sampleCount": 118,
+            "maxAbsErrorCent": 4.1099770697883287e-8,
+            "callerEpsilonCent": 1
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "stablePolls": 2,
+          "attempts": 2,
+          "elapsedMs": 106,
+          "coverage": 0.9453125
+        },
+        "compare": {
+          "status": "succeeded",
+          "comparedFrames": 363,
+          "nullFramesBefore": 21,
+          "nullFramesAfter": 21,
+          "overall": {
+            "maeCent": 16.2965,
+            "rmseCent": 30.6868,
+            "maxAbsCent": 130.5687
+          },
+          "focusNoteVibrato": {
+            "rateHzBefore": 6.709677,
+            "depthCentBefore": 74.23115,
+            "rateHzAfter": 6.5,
+            "depthCentAfter": 24.22554,
+            "centerDeltaCent": 6.2918
+          }
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "parameter": "vibratoEnv",
+          "beforePoints": 117,
+          "afterPoints": 0,
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "restorationTokenMatched": true
+        }
+      },
+      "transportMetrics": {
+        "status": "not_recorded_for_initial_scenario",
+        "reason": "This first scenario predates the T18 aggregate timing and byte capture pass."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    }
+  ],
+  "pendingMvpScenarioIds": [
+    "mvp-01-richards-constant-tempo",
+    "mvp-02-tempo-change-transition-vibrato",
+    "mvp-03-overshoot-preparation",
+    "mvp-05-explicit-pitch-delta-vibrato",
+    "mvp-06-overlap-composition-permutation",
+    "mvp-07-pitch-delta-surface",
+    "mvp-08-shared-target-two-occurrences",
+    "mvp-09-short-and-long-groups",
+    "mvp-10-computed-pitch-coverage-matrix",
+    "mvp-11-stale-context-and-reconnect",
+    "mvp-12-worker-timeout-or-crash",
+    "mvp-13-interpolation-failure-and-rollback",
+    "mvp-14-null-gap-correction"
+  ],
+  "p2b": {
+    "status": "not_started",
+    "reason": "H3a remains unknown and H3b remains partially observed; PitchControlCurve is not enabled."
+  }
+}

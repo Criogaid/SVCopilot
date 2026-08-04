@@ -29,5 +29,6 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 ## 当前进展
 
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
-- 旧 MCP 进程在这两次提交前启动；一次纯 `plan_pitch_gesture` 返回
-  `HOST_SEMANTIC_UNCONFIRMED`，没有 setter 或 Undo。必须重启该单一进程后继续真机场景。
+- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 4 已完成一次可恢复真机闭环：
+  [T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。该记录只通过场景 4，另有
+  13 个 MVP 场景待执行，P2b 也明确保持未启动。
