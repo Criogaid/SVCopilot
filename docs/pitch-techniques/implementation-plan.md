@@ -1565,8 +1565,12 @@ PitchControl commit（P2 第二增量，需 H3a/H3b/H4）：写入后用
 **不得**用 `getLinear()` 代替实际插值验证（只能作诊断对照）。
 **不得**把超限降级为"低置信度成功 + warning"——那会让模型以为写入达标。
 
-现有骨架已就绪：`parameter-curve.js:1326` 捕获 `getInterpolationMethod()`，
-`:1440` 用 `Automation.get()` 采样，失败触发 postcondition 与补偿。
+T12 已在 `server/src/pitch-techniques/host-interpolation.js` 与 `parameter-curve.js` 落地这一低层
+transaction verifier：它封存 method、baseline fingerprint、mandatory anchors、adaptive midpoints 和
+误差门禁，在所有首个 setter 前重读 method/baseline，并在写后以 `Automation.get()` 验证最终值。
+`Automation.remove()` 的宿主右开上界已适配为公共闭区间的 `to + 1`。公开 planner、PlanRef 生成与
+sealed postcondition 注入仍属于 T13；在此之前 T11 编译输出保持 `pending_t12_host_interpolation`，
+不把底层 verifier 的完成误写为公开 MVP 已完成。
 本阶段是扩展该路径，不是新建旁路检查工具。
 
 ### 9.5 颤音 source gate（依赖 H2）

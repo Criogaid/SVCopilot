@@ -1,6 +1,6 @@
 # T13 — `plan_pitch_gesture` 公开迁移
 
-- 状态：`blocked`
+- 状态：`ready`
 - 权威：[实施计划](../implementation-plan.md) §9.0–§9.6、§17 提交 13
 - 依赖：T12
 - 解锁：T15、T18

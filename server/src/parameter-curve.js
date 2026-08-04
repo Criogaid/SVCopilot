@@ -10,6 +10,13 @@ import {
 } from "./musical-time.js";
 import { runChunkedMutation } from "./chunked-mutation.js";
 import { decodeDense } from "./dense-codec.js";
+import {
+  assertHostInterpolationPostconditionFitsCurve,
+  assertHostInterpolationPostconditionMatchesPlanned,
+  normalizeHostInterpolationPostcondition,
+  preflightHostInterpolationPostcondition,
+  verifyHostInterpolationPostcondition,
+} from "./pitch-techniques/host-interpolation.js";
 import { resolveMutationScope } from "./scope-source.js";
 import { dryRunFromAction } from "./mutation-action.js";
 
@@ -346,6 +353,9 @@ async function executeCurveTransaction(capture, input, clock) {
           "preflight"
         );
       }
+      if (input.dryRun) {
+        await verifyHostInterpolationPreconditions(capture, transaction.plans);
+      }
       failedCurveIndex = null;
     });
 
@@ -379,6 +389,9 @@ async function executeCurveTransaction(capture, input, clock) {
     // 数学空操作（计划点与现有点完全一致且无 simplify）不开启 Undo 边界、不触碰宿主：
     // 反复预览/归一化曲线的调用方不应制造一串空 Undo 记录（黑盒审计 F-06）。
     if (transaction.plans.every((plan) => curvePlanIsNoOp(plan))) {
+      await timed(timings, "preflightReadMs", clock.now, () =>
+        verifyHostInterpolationPreconditions(capture, transaction.plans)
+      );
       transaction.ok = true;
       transaction.status = "no_change";
       transaction.effects = "none";
@@ -401,6 +414,10 @@ async function executeCurveTransaction(capture, input, clock) {
 
     await timed(timings, "preflightReadMs", clock.now, () =>
       assertSharedTargetMutationConfirmed(capture, transaction.target, input.target)
+    );
+    // 封存基线与插值证据必须在首个 setter 前重新读取，不能拿较早的 journal 读回冒充。
+    await timed(timings, "preflightReadMs", clock.now, () =>
+      verifyHostInterpolationPreconditions(capture, transaction.plans)
     );
     phase = "execute";
     await timed(timings, "hostWriteMs", clock.now, async () => {
@@ -450,7 +467,9 @@ async function executeCurveTransaction(capture, input, clock) {
                 plan.observed,
                 plan.definition,
                 plan.simplifyThreshold,
-                observedRead.truncated
+                observedRead.truncated,
+                plan.hostInterpolation,
+                plan.hostInterpolationPreflight
               );
             });
             plan.timings.verificationMs = elapsed(curveStartedAt, clock.now());
@@ -699,6 +718,14 @@ export async function prepareCurvePlan(capture, target, input, index) {
       message: `${clampedCount} computed value(s) were clamped to the official range [${minValue}, ${maxValue}].`,
     });
   }
+  const hostInterpolation = input.hostInterpolation ?? null;
+  const removalRange = automationRemovalRange(range);
+  assertHostInterpolationPostconditionFitsCurve(hostInterpolation, {
+    parameter: resolved.typeName,
+    range,
+    removalRange,
+  });
+  assertHostInterpolationPostconditionMatchesPlanned(hostInterpolation, planned);
   return {
     index,
     status: "prepared",
@@ -711,17 +738,36 @@ export async function prepareCurvePlan(capture, target, input, index) {
     mode: input.mode,
     inputRange: input.range,
     range,
+    removalRange,
     journal,
     planned,
     resolvedInputPoints,
     observed: null,
     simplifyThreshold: input.simplifyThreshold,
     clampedCount,
+    hostInterpolation,
+    hostInterpolationPreflight: null,
     verification: null,
     rollback: null,
     warnings,
     timings: { preflightReadMs: 0, hostWriteMs: 0, verificationMs: 0, rollbackMs: 0 },
   };
+}
+
+async function verifyHostInterpolationPreconditions(capture, plans) {
+  for (const plan of plans) {
+    if (plan.hostInterpolation === null) continue;
+    try {
+      plan.hostInterpolationPreflight = await preflightHostInterpolationPostcondition({
+        postcondition: plan.hostInterpolation,
+        readInterpolationMethod: () => capture.call(plan.automation, "getInterpolationMethod"),
+        readValue: (blick) => capture.call(plan.automation, "get", [blick]),
+      });
+      plan.interpolationMethod = plan.hostInterpolationPreflight.interpolationMethod;
+    } catch (error) {
+      throw withCurveFailure(error, plan.index, plan.typeName, "preflight");
+    }
+  }
 }
 
 function findOverlappingCurveRanges(plans) {
@@ -1048,7 +1094,10 @@ async function assertSharedTargetMutationConfirmed(capture, resolved, requested)
 }
 
 export async function applyCurvePlan(capture, plan) {
-  await capture.call(plan.automation, "remove", [plan.range.fromLocal, plan.range.toLocal]);
+  await capture.call(plan.automation, "remove", [
+    plan.removalRange.fromLocal,
+    plan.removalRange.toExclusive,
+  ]);
   for (const point of plan.planned) {
     await capture.call(plan.automation, "add", [point.blick, point.value]);
   }
@@ -1401,7 +1450,9 @@ export async function verifyCurve(
   observed,
   definition,
   simplifyThreshold,
-  observedTruncated
+  observedTruncated,
+  hostInterpolation = null,
+  hostInterpolationPreflight = null
 ) {
   const valueTolerance = curveValueTolerance(definition);
   // 读回被截断说明范围内点数远超计划，本身就是后置条件失败。
@@ -1419,7 +1470,7 @@ export async function verifyCurve(
   }
   if (simplifyThreshold === undefined) {
     const comparison = compareExactPoints(planned, observed, valueTolerance);
-    return {
+    const verification = {
       attempted: true,
       passed: comparison.firstMismatch === null,
       mode: "exact",
@@ -1431,6 +1482,13 @@ export async function verifyCurve(
         ...(comparison.firstMismatch ? { firstMismatch: comparison.firstMismatch } : {}),
       },
     };
+    return verifyHostInterpolationAfterWrite(
+      verification,
+      hostInterpolation,
+      hostInterpolationPreflight,
+      capture,
+      automation
+    );
   }
   // simplify 合法地移除控制点；验证退化为按计划点位置采样，偏差以 threshold 为界。
   // 官方契约保证 simplify 只删除点，因此读回点必须是计划点的子集；这也避免自行模拟
@@ -1455,7 +1513,7 @@ export async function verifyCurve(
     );
   }
   const effectiveTolerance = simplifyThreshold + valueTolerance;
-  return {
+  const verification = {
     attempted: true,
     passed:
       maxDeviation <= effectiveTolerance &&
@@ -1471,6 +1529,38 @@ export async function verifyCurve(
       tolerance: simplifyThreshold,
       valueTolerance,
       effectiveTolerance,
+    },
+  };
+  return verifyHostInterpolationAfterWrite(
+    verification,
+    hostInterpolation,
+    hostInterpolationPreflight,
+    capture,
+    automation
+  );
+}
+
+async function verifyHostInterpolationAfterWrite(
+  verification,
+  hostInterpolation,
+  hostInterpolationPreflight,
+  capture,
+  automation
+) {
+  if (!verification.passed || hostInterpolation === null) return verification;
+  const hostEvidence = await verifyHostInterpolationPostcondition({
+    postcondition: hostInterpolation,
+    readValue: (blick) => capture.call(automation, "get", [blick]),
+  });
+  return {
+    ...verification,
+    passed: hostEvidence.passed,
+    evidence: {
+      ...verification.evidence,
+      hostInterpolation: {
+        ...hostEvidence,
+        ...(hostInterpolationPreflight ? { preflight: hostInterpolationPreflight } : {}),
+      },
     },
   };
 }
@@ -1527,7 +1617,8 @@ function curveValueTolerance(definition) {
 export async function rollbackCurve(capture, automation, range, journal, definition) {
   const errors = [];
   try {
-    await capture.call(automation, "remove", [range.fromLocal, range.toLocal]);
+    const removalRange = automationRemovalRange(range);
+    await capture.call(automation, "remove", [removalRange.fromLocal, removalRange.toExclusive]);
   } catch (error) {
     if (isUnknownOutcomeError(error)) {
       return { verified: false, outcomeUnknown: true, error: rollbackError(error) };
@@ -1912,6 +2003,12 @@ function formatBatchCurve(plan, input, index, transaction) {
     ? { pointCount: plan.observed.length, stats: pointStats(plan.observed) }
     : null;
   output.verification = plan.verification ?? { attempted: false, passed: null };
+  if (plan.hostInterpolation !== null) {
+    output.hostInterpolation = {
+      required: true,
+      preflight: plan.hostInterpolationPreflight ?? { attempted: false, passed: null },
+    };
+  }
   Object.assign(output, formatResolvedInputPositions(plan));
   if (plan.rollback) output.rollback = plan.rollback;
   return output;
@@ -1983,6 +2080,7 @@ function failureEvidence(error, fallbackPhase, fallbackCurveIndex) {
     ...(typeof error?.resolvedParameter === "string"
       ? { resolvedParameter: error.resolvedParameter }
       : {}),
+    ...(isRecord(error?.details) ? { details: error.details } : {}),
     outcome: isUnknownOutcomeError(error) ? "unknown" : "unchanged",
     retryable: isUnknownOutcomeError(error),
   };
@@ -2043,6 +2141,22 @@ function normalizeBatchPatchRequest(request) {
 
 export function normalizeCurveInput(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "curve must be an object");
+  const allowedFields = new Set([
+    "parameter",
+    "mode",
+    "range",
+    "points",
+    "amount",
+    "simplifyThreshold",
+    "hostInterpolation",
+  ]);
+  const unknownFields = Object.keys(request).filter((field) => !allowedFields.has(field));
+  if (unknownFields.length > 0) {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      `curve contains unknown field: ${unknownFields.join(", ")}`
+    );
+  }
   const parameter = normalizeParameter(request.parameter);
   if (!["replace", "add", "scale"].includes(request.mode)) {
     throw codedError("INVALID_ARGUMENTS", "mode must be replace, add, or scale");
@@ -2077,6 +2191,16 @@ export function normalizeCurveInput(request) {
   ) {
     throw codedError("INVALID_ARGUMENTS", "simplifyThreshold must be a non-negative number");
   }
+  const hostInterpolation =
+    request.hostInterpolation === undefined
+      ? null
+      : normalizeHostInterpolationPostcondition(request.hostInterpolation);
+  if (hostInterpolation !== null && request.mode !== "replace") {
+    throw codedError(
+      "INVALID_ARGUMENTS",
+      "hostInterpolation is only valid for a sealed pitchDelta replace curve"
+    );
+  }
   return {
     parameter,
     mode: request.mode,
@@ -2084,7 +2208,22 @@ export function normalizeCurveInput(request) {
     points,
     amount,
     simplifyThreshold: request.simplifyThreshold,
+    ...(hostInterpolation === null ? {} : { hostInterpolation }),
   };
+}
+
+function automationRemovalRange(range) {
+  // Automation.remove 的上界是宿主右开区间；公共曲线范围保持闭区间。
+  if (!Number.isSafeInteger(range.fromLocal) || !Number.isSafeInteger(range.toLocal)) {
+    throw codedError("INVALID_ARGUMENTS", "Automation removal bounds must be safe integers");
+  }
+  if (range.toLocal >= Number.MAX_SAFE_INTEGER) {
+    throw codedError(
+      "AUTOMATION_REMOVE_RANGE_OVERFLOW",
+      "the inclusive Automation range end cannot be converted to the host-exclusive endpoint"
+    );
+  }
+  return { fromLocal: range.fromLocal, toExclusive: range.toLocal + 1 };
 }
 
 function normalizeCurvePoint(point, index) {

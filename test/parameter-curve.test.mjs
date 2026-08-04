@@ -5,6 +5,11 @@ import { ArtifactStore, planReference } from "../server/src/artifact-store.js";
 import { ExecutionCoordinator } from "../server/src/execution-coordinator.js";
 import { ParameterCurveService } from "../server/src/parameter-curve.js";
 import { buildPlanArtifact } from "../server/src/plan-reference.js";
+import {
+  buildHostInterpolationPostcondition,
+  createHostInterpolationBaselineFingerprint,
+  normalizeHostInterpolationPostcondition,
+} from "../server/src/pitch-techniques/host-interpolation.js";
 
 const Q = 705600000;
 
@@ -96,7 +101,9 @@ function createCurveModel() {
       }
       if (id === h.group.__handle__) {
         if (method === "getParameter") {
-          return String(args[0]).toLowerCase() === "loudness" ? h.automation : null;
+          return String(args[0]).toLowerCase() === model.definition.typeName.toLowerCase()
+            ? h.automation
+            : null;
         }
         if (method === "getUUID") return "curve-group";
       }
@@ -127,8 +134,17 @@ function createCurveModel() {
           }
           return slice.map((point) => [...point]);
         }
-        if (method === "get") return interpolate(args[0]);
+        if (method === "get") {
+          const offset = model.wroteCurve
+            ? typeof model.getValueOffsetAfterWrite === "function"
+              ? model.getValueOffsetAfterWrite(args[0])
+              : (model.getValueOffsetAfterWrite ?? 0)
+            : 0;
+          return interpolate(args[0]) + offset;
+        }
         if (method === "add") {
+          model.wroteCurve = true;
+          if (model.ignoreAdd) return false;
           const value = model.coerceValuesToFloat32 ? Math.fround(args[1]) : args[1];
           const storedValue = value + (model.writeValueOffset ?? 0);
           const existing = model.points.find(([b]) => b === args[0]);
@@ -139,8 +155,10 @@ function createCurveModel() {
         }
         if (method === "remove") {
           if (model.ignoreRemove) return false;
+          model.wroteCurve = true;
+          (model.removeCalls ??= []).push([...args]);
           const before = model.points.length;
-          model.points = model.points.filter(([b]) => b < args[0] || b > args[1]);
+          model.points = model.points.filter(([b]) => b < args[0] || b >= args[1]);
           return model.points.length !== before;
         }
         if (method === "simplify") {
@@ -328,7 +346,7 @@ function addBatchCurves(model) {
     if (request.method === "getAllPoints") return points.map((point) => [...point]);
     if (request.method === "remove") {
       const [from, to] = request.args;
-      model.batchPoints[parameter] = points.filter(([blick]) => blick < from || blick > to);
+      model.batchPoints[parameter] = points.filter(([blick]) => blick < from || blick >= to);
       return true;
     }
     if (request.method === "add") {
@@ -406,6 +424,61 @@ function fourCurveRequest(overrides = {}) {
 }
 
 const TARGET = { trackIndex: 0, groupIndex: 0 };
+
+function configurePitchDelta(model) {
+  model.definition = {
+    displayName: "Pitch Deviation",
+    typeName: "pitchDelta",
+    range: [-1200, 1200],
+    defaultValue: 0,
+  };
+  return model;
+}
+
+function hostInterpolationConfig({
+  method = "Linear",
+  baselineSamples = [
+    { blick: 0, value: 0 },
+    { blick: Q, value: 0.5 },
+    { blick: 2 * Q, value: 1 },
+  ],
+  mandatorySamples = [
+    { blick: 0, value: 1 },
+    { blick: 2 * Q, value: 3 },
+  ],
+  adaptiveMidpoints = [
+    { blick: Q, value: 2, leftBlick: 0, rightBlick: 2 * Q },
+  ],
+  maxFitErrorCent = 0.01,
+} = {}) {
+  return buildHostInterpolationPostcondition({
+    interpolationEvidence: {
+      method,
+      source: "host_getInterpolationMethod",
+      capturedAtContextId: "ctx_host_interpolation",
+      resolvedParameter: "pitchDelta",
+    },
+    baselineSamples,
+    mandatorySamples,
+    adaptiveMidpoints,
+    maxFitErrorCent,
+  });
+}
+
+function pitchDeltaCurveRequest(overrides = {}) {
+  return oneCurve({
+    target: TARGET,
+    parameter: "pitchDelta",
+    mode: "replace",
+    range: { fromBlick: 0, toBlick: 2 * Q },
+    points: [
+      { blick: 0, value: 1 },
+      { blick: 2 * Q, value: 3 },
+    ],
+    hostInterpolation: hostInterpolationConfig(),
+    ...overrides,
+  });
+}
 
 // 单数 sv_patch_parameter_curve 已删除：它是复数的严格子集（curves 长度为 1 即等价），
 // 却占全部 schema 的 10%，还让模型每次都要判断"该调哪个"。这些用例仍然描述"一条
@@ -494,6 +567,142 @@ test("sv_patch_parameter_curves replace: dryRun has no side effects, real write 
   assert.equal(model.undoCount, 2);
   assert.equal(result.curves[0].after.pointCount, 2);
   assert.equal(result.curves[0].after.stats.max, 2);
+});
+
+test("sealed pitchDelta interpolation preflights baseline evidence and verifies host samples", async () => {
+  const model = configurePitchDelta(createCurveModel());
+  const service = createService(model);
+  const dryRun = await service.patchCurves(pitchDeltaCurveRequest({ action: "dry_run" }));
+  assert.equal(dryRun.ok, true);
+  assert.equal(dryRun.status, "dry_run");
+  assert.equal(dryRun.curves[0].hostInterpolation.preflight.passed, true);
+  assert.equal(model.undoCount, 0);
+  assert.deepEqual(model.points, [
+    [0, 0],
+    [Q, 0.5],
+    [2 * Q, 1],
+  ]);
+
+  const committed = await service.patchCurves(pitchDeltaCurveRequest());
+  const hostEvidence = committed.curves[0].verification.evidence.hostInterpolation;
+  assert.equal(committed.ok, true);
+  assert.equal(hostEvidence.passed, true);
+  assert.equal(hostEvidence.mandatorySampleCount, 2);
+  assert.equal(hostEvidence.adaptiveMidpointCount, 1);
+  assert.equal(hostEvidence.maxAbsErrorCent, 0);
+  assert.equal(hostEvidence.preflight.baselineSampleCount, 3);
+  assert.deepEqual(model.removeCalls, [[0, 2 * Q + 1]]);
+  assert.equal(model.undoCount, 2);
+
+  const changedBaseline = configurePitchDelta(createCurveModel());
+  changedBaseline.points[1][1] = 0.75;
+  const baselineFailure = await createService(changedBaseline).patchCurves(pitchDeltaCurveRequest());
+  assert.equal(baselineFailure.ok, false);
+  assert.equal(baselineFailure.error.code, "CURVE_BASELINE_CHANGED");
+  assert.equal(baselineFailure.effects, "none");
+  assert.equal(changedBaseline.undoCount, 0);
+
+  const changedInterpolation = configurePitchDelta(createCurveModel());
+  changedInterpolation.interpolationMethod = "Cosine";
+  const methodFailure = await createService(changedInterpolation).patchCurves(pitchDeltaCurveRequest());
+  assert.equal(methodFailure.ok, false);
+  assert.equal(methodFailure.error.code, "INTERPOLATION_CHANGED");
+  assert.deepEqual(methodFailure.error.details, {
+    expectedMethod: "linear",
+    observedMethod: "cosine",
+    parameter: "pitchDelta",
+  });
+  assert.equal(methodFailure.effects, "none");
+  assert.equal(changedInterpolation.undoCount, 0);
+
+  assert.throws(
+    () => hostInterpolationConfig({ baselineSamples: [] }),
+    { code: "INVALID_ARGUMENTS" }
+  );
+  const sealedPostcondition = hostInterpolationConfig();
+  assert.throws(
+    () =>
+      createHostInterpolationBaselineFingerprint({
+        interpolationEvidence: sealedPostcondition.interpolationEvidence,
+        samples: [],
+      }),
+    { code: "INVALID_ARGUMENTS" }
+  );
+  assert.throws(
+    () =>
+      normalizeHostInterpolationPostcondition({
+        ...sealedPostcondition,
+        baseline: { ...sealedPostcondition.baseline, samples: [] },
+      }),
+    { code: "INVALID_ARGUMENTS" }
+  );
+  assert.throws(
+    () => hostInterpolationConfig({ adaptiveMidpoints: [] }),
+    { code: "INVALID_ARGUMENTS" }
+  );
+
+  const cubic = configurePitchDelta(createCurveModel());
+  cubic.interpolationMethod = "Cubic";
+  cubic.getValueOffsetAfterWrite = (blick) => (blick === Q ? 0.25 : 0);
+  const cubicResult = await createService(cubic).patchCurves(
+    pitchDeltaCurveRequest({
+      hostInterpolation: hostInterpolationConfig({
+        method: "Cubic",
+        adaptiveMidpoints: [
+          { blick: Q, value: 2.25, leftBlick: 0, rightBlick: 2 * Q },
+        ],
+      }),
+    })
+  );
+  assert.equal(cubicResult.ok, true);
+  assert.equal(
+    cubicResult.curves[0].verification.evidence.hostInterpolation.maxAbsErrorCent,
+    0
+  );
+});
+
+test("sealed pitchDelta interpolation failure rolls back or reports rollback failure", async () => {
+  const ignoredSetter = configurePitchDelta(createCurveModel());
+  ignoredSetter.ignoreRemove = true;
+  ignoredSetter.ignoreAdd = true;
+  const ignoredResult = await createService(ignoredSetter).patchCurves(pitchDeltaCurveRequest());
+  assert.equal(ignoredResult.ok, false);
+  assert.equal(ignoredResult.error.code, "POSTCONDITION_FAILED");
+  assert.equal(ignoredResult.status, "rolled_back");
+  assert.equal(ignoredResult.rollback.verified, true);
+
+  const interpolationOverrun = configurePitchDelta(createCurveModel());
+  interpolationOverrun.getValueOffsetAfterWrite = (blick) => (blick === Q ? 0.1 : 0);
+  const overrunResult = await createService(interpolationOverrun).patchCurves(pitchDeltaCurveRequest());
+  const overrunEvidence = overrunResult.curves[0].verification.evidence.hostInterpolation;
+  assert.equal(overrunResult.ok, false);
+  assert.equal(overrunResult.error.code, "POSTCONDITION_FAILED");
+  assert.equal(overrunResult.status, "rolled_back");
+  assert.equal(overrunEvidence.passed, false);
+  assert.equal(overrunEvidence.firstMismatch.source, "adaptive_midpoint");
+  assert.ok(overrunEvidence.maxAbsErrorCent > overrunEvidence.maxFitErrorCent);
+  assert.equal(overrunResult.rollback.verified, true);
+
+  const rollbackFailure = configurePitchDelta(createCurveModel());
+  rollbackFailure.getValueOffsetAfterWrite = (blick) => (blick === Q ? 0.1 : 0);
+  rollbackFailure.failures.push({ method: "add", remainingSkips: 2, code: "ARGUMENT_MISMATCH" });
+  const rollbackFailureResult = await createService(rollbackFailure).patchCurves(pitchDeltaCurveRequest());
+  assert.equal(rollbackFailureResult.ok, false);
+  assert.equal(rollbackFailureResult.error.code, "POSTCONDITION_FAILED");
+  assert.equal(rollbackFailureResult.status, "rollback_failed");
+  assert.equal(rollbackFailureResult.rollback.verified, false);
+});
+
+test("sealed pitchDelta interpolation disconnect remains outcome_unknown without retry", async () => {
+  const model = configurePitchDelta(createCurveModel());
+  // 前置基线恰好读取三次；第四次 get 是写后必保锚点采样，模拟此时连接断开。
+  model.failures.push({ method: "get", remainingSkips: 3, code: "HOST_TIMEOUT" });
+  const result = await createService(model).patchCurves(pitchDeltaCurveRequest());
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "outcome_unknown");
+  assert.equal(result.error.code, "HOST_TIMEOUT");
+  assert.equal(result.rollback.attempted, false);
+  assert.equal(result.effects, "unknown");
 });
 
 test("sv_patch_parameter_curves accepts host float32 value quantization", async () => {
