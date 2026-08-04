@@ -31,11 +31,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-05-explicit-pitch-delta-vibrato",
     "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
+    "mvp-08-shared-target-two-occurrences",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 7);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 6);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 7);
+  assert.equal(evidence.scenarios.length, 8);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -116,6 +117,29 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     0,
   );
   assert.equal(evidence.pendingMvpScenarioIds.includes(pitchDeltaSurfaceScenario.id), false);
+  const sharedTargetScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-08-shared-target-two-occurrences",
+  );
+  assert.equal(sharedTargetScenario.status, "passed");
+  assert.equal(sharedTargetScenario.fixtureSetup.sharedOccurrenceCount, 2);
+  assert.deepEqual(sharedTargetScenario.workflow.snapshot.sharedTargetOccurrences, [0, 1]);
+  assert.equal(sharedTargetScenario.workflow.plan.requiresSharedTargetConfirmation, true);
+  assert.equal(sharedTargetScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(sharedTargetScenario.workflow.unconfirmedCommit.effects, "none");
+  assert.equal(
+    sharedTargetScenario.workflow.unconfirmedCommit.errorCode,
+    "SHARED_TARGET_REQUIRES_CONFIRMATION",
+  );
+  assert.equal(sharedTargetScenario.workflow.confirmedCommit.expectedUserUndoSteps, 1);
+  assert.deepEqual(sharedTargetScenario.workflow.sharedReadback.targetRangePointsByOccurrence, [
+    34,
+    34,
+  ]);
+  assert.equal(sharedTargetScenario.workflow.cleanup.sharedFixtureTokenRestored, true);
+  assert.equal(sharedTargetScenario.workflow.cleanup.originalProjectTokenRestored, true);
+  assert.equal(sharedTargetScenario.resourceCleanup.knownHandleCountAfterCleanup, 0);
+  assert.equal(sharedTargetScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(sharedTargetScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );

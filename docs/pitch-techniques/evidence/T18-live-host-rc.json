@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T06:54:12.897-03:00",
+  "capturedAt": "2026-08-04T07:02:14.573-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -26,7 +26,8 @@
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
     "mvp-06-overlap-composition-permutation",
-    "mvp-07-pitch-delta-surface"
+    "mvp-07-pitch-delta-surface",
+    "mvp-08-shared-target-two-occurrences"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -726,6 +727,189 @@
       }
     },
     {
+      "id": "mvp-08-shared-target-two-occurrences",
+      "status": "passed",
+      "capturedAt": "2026-08-04T07:02:14.573-03:00",
+      "fixtureSetup": {
+        "status": "succeeded",
+        "strategy": "clone_reference_without_copying_target",
+        "offsetBlick": 705600000,
+        "offsetQuarterNotes": 1,
+        "trackGroupCountBefore": 2,
+        "trackGroupCountDuring": 3,
+        "sharedOccurrenceCount": 2,
+        "rawProjectIdentityWithheld": true
+      },
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "sharedTargetOccurrences": [
+            0,
+            1
+          ],
+          "capturedNotesByOccurrence": [
+            17,
+            13
+          ],
+          "baselinePitchDeltaPointsByOccurrence": [
+            67,
+            57
+          ],
+          "computedPitch": [
+            {
+              "occurrence": 0,
+              "requestedFrames": 768,
+              "finiteFrames": 519,
+              "nullFrames": 249,
+              "coverage": 0.67578125
+            },
+            {
+              "occurrence": 1,
+              "requestedFrames": 768,
+              "finiteFrames": 424,
+              "nullFrames": 344,
+              "coverage": 0.5520833333333334
+            }
+          ]
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 1,
+          "curveCount": 1,
+          "pointCount": 34,
+          "requiresSharedTargetConfirmation": true
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0,
+          "sharedTargetOccurrences": [
+            0,
+            1
+          ]
+        },
+        "unconfirmedCommit": {
+          "status": "failed",
+          "effects": "none",
+          "errorCode": "SHARED_TARGET_REQUIRES_CONFIRMATION",
+          "phase": "preflight",
+          "outcome": "unchanged",
+          "retryable": false,
+          "undoBoundaryCalls": 0,
+          "undoRecords": 0,
+          "hostWriteMs": 0
+        },
+        "confirmedCommit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "confirmation": "allowSharedTargetMutation",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 34,
+          "readbackPoints": 34,
+          "hostWriteMs": 78,
+          "hostVerificationMs": 79,
+          "operationMs": 329,
+          "maxPointValueDeltaCent": 0.0000018764648430646957,
+          "hostInterpolation": {
+            "sampleCount": 35,
+            "maxAbsErrorCent": 0.0000023764648489077445,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": [
+          {
+            "occurrence": 0,
+            "status": "succeeded",
+            "state": "ready",
+            "attempts": 2,
+            "elapsedMs": 106,
+            "coverage": 0.67578125
+          },
+          {
+            "occurrence": 1,
+            "status": "succeeded",
+            "state": "ready",
+            "attempts": 2,
+            "elapsedMs": 123,
+            "coverage": 0.5520833333333334
+          }
+        ],
+        "sharedReadback": {
+          "status": "succeeded",
+          "targetRangePointsByOccurrence": [
+            34,
+            34
+          ],
+          "totalPitchDeltaPointsByOccurrence": [
+            101,
+            91
+          ],
+          "bothOccurrencesObservedSameTargetMutation": true
+        },
+        "compare": [
+          {
+            "occurrence": 0,
+            "status": "succeeded",
+            "comparedFrames": 519,
+            "coverage": 0.67578125,
+            "maeCent": 1.1899598990791336,
+            "p95AbsCent": 0.1354217529296875,
+            "maxAbsCent": 45.993804931640625,
+            "focusCenterDeltaCent": [
+              -8.982446458605153,
+              2.1108851713293575
+            ]
+          },
+          {
+            "occurrence": 1,
+            "status": "succeeded",
+            "comparedFrames": 424,
+            "coverage": 0.5520833333333334,
+            "maeCent": 1.3843626346228257,
+            "p95AbsCent": 5.9299468994140625,
+            "maxAbsCent": 45.993804931640625,
+            "focusCenterDeltaCent": [
+              -8.988041347927123,
+              2.112332512351145
+            ]
+          }
+        ],
+        "cleanup": {
+          "status": "succeeded",
+          "sharedTargetRangePointsBefore": 34,
+          "sharedTargetRangePointsAfter": 0,
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "maxPointValueDelta": 0,
+          "sharedFixtureTokenRestored": true,
+          "temporaryReferenceRemoved": true,
+          "trackGroupCountAfter": 2,
+          "originalProjectTokenRestored": true
+        }
+      },
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedArtifactLeases": 6,
+        "explicitlyReleasedRawHandles": 9,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      },
+      "transportMetrics": {
+        "status": "partial",
+        "reason": "Facade timings and Artifact bytes were observed; aggregate PIPE and MCP byte percentiles remain pending."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
+    {
       "id": "mvp-12-worker-timeout-or-crash",
       "status": "not_applicable",
       "gate": {
@@ -744,7 +928,6 @@
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
-    "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
     "mvp-11-stale-context-and-reconnect",

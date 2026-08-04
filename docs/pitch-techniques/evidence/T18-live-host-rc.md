@@ -13,8 +13,8 @@
 `24.22554 cent`。这证明该写入路径和量测链路可工作，不对自然度作自动化结论。
 
 清理事务移除了全部 117 个临时 `vibratoEnv` 点，最终内容 token 与实验前精确一致；本场景
-创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 6 个 MVP 场景通过、
-1 个条件场景不适用、7 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
+创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 7 个 MVP 场景通过、
+1 个条件场景不适用、6 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
 `unknown`，H3b 仅
 `partially_observed`，所以不启用 `PitchControlCurve`。
 
@@ -64,5 +64,14 @@ Undo，宿主插值 `140` 个样本的最大误差为 `4.03e-6 cent`。`519 / 76
 `2.38e-6 cent`。写后宿主快照中 `pitchDelta` 总点数从 67 增至 101，目标范围恰有 34 点，
 而 `PitchControlCurve` 前后均为 0，直接证明只有 MVP Automation 写面发生变化。恢复将目标范围
 从 34 点清空，最终 token 精确匹配；4 个 lease 全部显式释放，doctor 保持零残留。
+
+场景 8 通过克隆 `NoteGroupReference` 但不复制 target，临时构造了偏移一个四分音符的第二
+occurrence。快照明确报告共享 occurrence `[0,1]`。未确认 commit 在 preflight 返回
+`SHARED_TARGET_REQUIRES_CONFIRMATION`、零写入、零 Undo；使用已授权的
+`allowSharedTargetMutation` 后，同一 34 点 transition 以一个用户 Undo 提交。写后两个 occurrence
+的目标范围都回读到 34 点，computed-pitch 分别比较 519 和 424 个有限帧，两个边界音符的中心变化
+近乎一致。恢复先清空共享 target 的范围并匹配共享夹具 token，再删除临时引用并匹配原项目 token。
+6 个 Artifact lease 与 9 个 raw handle 全部显式释放；doctor 为 Artifact `0 entries / 0 bytes`、
+handle 0、pending execution 0。
 
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。
