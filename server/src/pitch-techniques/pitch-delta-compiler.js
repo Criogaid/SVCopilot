@@ -633,7 +633,11 @@ function insertDensePoint(run, point) {
     }
     return;
   }
-  run.points.set(point.blick, { blick: point.blick, value: point.value, source: "dense" });
+  run.points.set(point.blick, {
+    blick: point.blick,
+    value: point.value,
+    source: "dense",
+  });
   run.densePointCount += 1;
 }
 
