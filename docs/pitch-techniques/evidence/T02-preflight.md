@@ -3,9 +3,8 @@
 ## 状态
 
 本记录不是 H1 的终态实机证据。初始预检时 `npm run doctor -- --json` 仅确认 bridge
-脚本存在且 protocol 为 2；当时 `hostState` 为 `not_started`。随后活动 MCP 会话已附着到
-SynthV 2.2.1，并完成 200 点恒速实机 Artifact
-[`T02-time-axis-constant-live.json`](T02-time-axis-constant-live.json)。
+脚本存在且 protocol 为 2；当时 `hostState` 为 `not_started`。此预检已被 2026-08-04 的完整
+H1 实机证据取代，见 [T02-live-progress.md](T02-live-progress.md)。
 
 现有 fixture `synthv-2.2.1-win32-v2` 保留先前恒速工程的 45 点观察：
 
@@ -19,8 +18,7 @@ SynthV 2.2.1，并完成 200 点恒速实机 Artifact
 }
 ```
 
-新的恒速 Artifact 覆盖 200 个位置，包含起始 tempo mark 的有效边界位置；它仍未覆盖
-非起始 tempo mark 边界、单点阶跃或密集变速，不能解锁 Hz 门限，也不能判断 T03。
+该 45 点 fixture 仅保留为历史部分观测；它不再决定 H1 或 T03。
 
 ## 已就绪的捕获路径
 
@@ -39,6 +37,6 @@ SynthV 2.2.1，并完成 200 点恒速实机 Artifact
 - `node --test test/host-profile.test.mjs test/time-axis-evidence.test.mjs test/time-axis-capture.test.mjs`: 23 passed。
 - 捕获序列的注入宿主测试记录 200 次 `getSecondsFromBlick` 与 200 次
   `getBlickFromSeconds`，零 setter、零 `newUndoRecord()`。
-- `npm test`: 812 passed。
+- `npm test`: 856 passed（完整 H1 记录前的最近全量验证）。
 - `npm run smoke:mcp`: passed。
 - `git diff --exit-code -- api-docs`: clean。

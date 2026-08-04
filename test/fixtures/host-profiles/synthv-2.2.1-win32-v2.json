@@ -17,8 +17,8 @@
     "sanitizerVersion": 2,
     "readOnly": true
   },
-  "capturedAt": "2026-07-28T02:40:43.479Z",
-  "evidenceSha256": "sha256:af527e13dde3518c63f0c548c807f58d70e113cd431ddcb9812754d0e4175246",
+  "capturedAt": "2026-08-04T02:06:30.462Z",
+  "evidenceSha256": "sha256:a6642180bc2bf88508c1e4a2caa17163ef10a83567f01bd367aadb0384d0d5f8",
   "constants": {
     "quarterBlick": 705600000
   },
@@ -105,11 +105,10 @@
       "evidenceIds": []
     },
     "timeAxis.nodeParityMaxDeviationSeconds": {
-      "status": "partially_observed",
-      "value": 0,
-      "reason": "REQUIRED_TEMPO_SCENARIOS_INCOMPLETE",
+      "status": "confirmed",
+      "value": 1.4210854715202004e-14,
       "evidenceIds": [
-        "EV-TIME-AXIS-H1-20260803"
+        "EV-TIME-AXIS-H1-1"
       ]
     },
     "timeAxis.tempoRampSupported": {
@@ -222,20 +221,20 @@
       "sampleCount": 1
     },
     {
-      "id": "EV-TIME-AXIS-H1-20260803",
+      "id": "EV-TIME-AXIS-H1-1",
       "source": "live_read_only",
-      "scope": "fixture_observation",
+      "scope": "time_axis_probe",
       "supports": [
         "timeAxis.nodeParityMaxDeviationSeconds"
       ],
       "oracleVersion": 1,
-      "resultCode": "TIME_AXIS_NODE_PARITY_PARTIAL",
-      "sampleCount": 45,
+      "resultCode": "TIME_AXIS_NODE_PARITY_CONFIRMED",
+      "sampleCount": 600,
       "timeAxis": {
         "kind": "svcopilot-time-axis-evidence-summary",
         "schemaVersion": "1.0.0",
-        "status": "partially_observed",
-        "resultCode": "TIME_AXIS_NODE_PARITY_PARTIAL",
+        "status": "confirmed",
+        "resultCode": "TIME_AXIS_NODE_PARITY_CONFIRMED",
         "coverage": {
           "requiredScenarios": [
             "constant",
@@ -243,31 +242,39 @@
             "dense_tempo"
           ],
           "observedScenarios": [
-            "constant"
+            "constant",
+            "tempo_step",
+            "dense_tempo"
           ],
           "sampleCountByScenario": {
-            "constant": 45
+            "constant": 200,
+            "tempo_step": 200,
+            "dense_tempo": 200
           },
-          "completeRequiredScenarios": false
+          "completeRequiredScenarios": true
         },
         "metrics": {
-          "sampleCount": 45,
-          "nodeParityMaxDeviationSeconds": 0,
-          "nodeParityMedianDeviationSeconds": null,
-          "nodeParityP95DeviationSeconds": null,
-          "nodeParityMaxDeviationBlick": null,
-          "nodeParityMedianDeviationBlick": null,
-          "nodeParityP95DeviationBlick": null,
+          "sampleCount": 600,
+          "nodeParityMaxDeviationSeconds": 1.4210854715202004e-14,
+          "nodeParityMedianDeviationSeconds": 0,
+          "nodeParityP95DeviationSeconds": 7.105427357601002e-15,
+          "nodeParityMaxDeviationBlick": 1,
+          "nodeParityMedianDeviationBlick": 0,
+          "nodeParityP95DeviationBlick": 1,
           "hostRoundTripMaxDeviationBlick": 1,
-          "hostRoundTripMedianDeviationBlick": null,
-          "hostRoundTripP95DeviationBlick": null,
-          "nodeRoundTripMaxDeviationBlick": null,
-          "nodeRoundTripMedianDeviationBlick": null,
-          "nodeRoundTripP95DeviationBlick": null
+          "hostRoundTripMedianDeviationBlick": 0,
+          "hostRoundTripP95DeviationBlick": 1,
+          "nodeRoundTripMaxDeviationBlick": 0,
+          "nodeRoundTripMedianDeviationBlick": 0,
+          "nodeRoundTripP95DeviationBlick": 0
         },
-        "t03Disposition": "not_determined",
+        "t03Disposition": "not_required",
         "rampSupported": false,
-        "artifactSha256": []
+        "artifactSha256": [
+          "sha256:13866b0afdc2d7c2fbd4905c30dd636b3e5a8d263e69969740c2e3bfc7811955",
+          "sha256:7583781f0fd37ab5a2e3308c7562163681d3925306777581a4ee84581ee143e3",
+          "sha256:796c668467dad8b56ef66218800143a9b92254c8cfce10f5ef1ee237c039d52b"
+        ]
       }
     }
   ]

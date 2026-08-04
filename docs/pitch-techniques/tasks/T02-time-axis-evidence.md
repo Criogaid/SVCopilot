@@ -1,6 +1,6 @@
 # T02 — H1 TimeAxis 证据与 Profile v2
 
-- 状态：`in_progress`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) §7.1、§7.2、§17 提交 2
 - 依赖：T01 基线记录
 - 解锁：T03 裁定、T04、T08
@@ -26,16 +26,24 @@
 
 H1 从 `partially_observed` 变成有证据的终态，T08 可据此使用确定门限。
 
-## 当前阻塞
+## 完成记录
 
-活动 MCP 会话已附着到 SynthV 2.2.1。2026-08-03 已采集 200 点恒速实机 Artifact
-[`T02-time-axis-constant-live.json`](../evidence/T02-time-axis-constant-live.json)：Node 秒值
-误差最大为 0，宿主整数 BLICK 往返误差最大为 1，全部工作流均为只读且零 Undo。
-执行细节和回放结果见 [T02-live-progress.md](../evidence/T02-live-progress.md)。
+2026-08-04 的活动 MCP 会话附着到 SynthV 2.2.1。三个可回放 Artifact 各含 200 个 BLICK
+位置，并覆盖每个 tempo mark 的 `-1/0/+1`：
 
-仍缺少含恰好一个 tempo step 的工程和含多个 tempo mark 的密集变速工程；在二者各完成
-至少 200 点、包含 mark `-1/0/+1` 的实机 Artifact 前，H1 保持 `partially_observed`，
-T03 裁定保持 `not_determined`。
+- [constant](../evidence/T02-time-axis-constant-live-v2.json)
+- [tempo_step](../evidence/T02-time-axis-tempo-step-live.json)
+- [dense_tempo](../evidence/T02-time-axis-dense-tempo-live.json)
 
-离线实现、回放验证和无 setter/Undo 的捕获序列记录见
+聚合结果为 `TIME_AXIS_NODE_PARITY_CONFIRMED`：600 点的 Node 秒值最大误差为
+`1.4210854715202004e-14 s`，宿主 BLICK 往返最大误差为 `1`，因此满足 `<= 1e-6 s` 门限。
+profile fixture `synthv-2.2.1-win32-v2` 已将
+`timeAxis.nodeParityMaxDeviationSeconds` 更新为 `confirmed`。
+
+用户授权在当前临时工程上构造并恢复 tempo fixture；准备和恢复均零显式 Undo boundary，且
+最终读回原始单一 tempo map。三份 Artifact 的采样工作流本身均为 `mode: "read"`，零 setter、
+零 Undo。完整过程、恢复核对与验证命令见
+[T02-live-progress.md](../evidence/T02-live-progress.md)。
+
+T03 的机械裁定为 `not_required`；不得实现 `time_axis_map_v1`。早期离线预检保留在
 [T02-preflight.md](../evidence/T02-preflight.md)。

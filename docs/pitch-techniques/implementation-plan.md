@@ -1010,6 +1010,22 @@ tempoMarks 做**分段线性积分**，全仓库唯一调用宿主 `getSecondsFr
 这是 Context 实例证据，不是宿主全局常量；它直接否定在示例里把 `vibratoEnv`
 硬编码为 `Linear` 的做法。
 
+#### 7.1c 2026-08-04 完整 H1 实机证据（终态）
+
+在 SynthV 2.2.1、bridge protocol 2 上，三个可回放 Artifact 各以 200 个位置执行
+`TimeAxis.getSecondsFromBlick` / `getBlickFromSeconds`，并包含每个 tempo mark 的
+`-1/0/+1`。用户授权的临时 fixture 准备与恢复不属于探针；三份 Artifact 的采样工作流均为
+`mode: "read"`，零 setter、零显式 Undo boundary。
+
+- [恒速](evidence/T02-time-axis-constant-live-v2.json)
+- [单点阶跃](evidence/T02-time-axis-tempo-step-live.json)
+- [多点密集变速](evidence/T02-time-axis-dense-tempo-live.json)
+
+聚合 600 点后，Node 秒值最大偏差为 `1.4210854715202004e-14 s`，小于 `1e-6 s`；宿主
+BLICK 往返最大偏差为 `1`。H1 因此为 `confirmed`，`timeAxis.nodeParityMaxDeviationSeconds`
+写入 profile v2 的 confirmed fact，T03 裁定 `not_required`，生产时间映射保持 Node 分段换算。
+未观测到 tempo ramp，`timeAxis.tempoRampSupported` 保持 `unknown`。
+
 #### 7.1a H1 失败时的生产方案：批量 opcode，不是逐点调用（v2 修正）
 
 原 v1 把"改为逐点调宿主"写作 fallback。这不满足传输现实：

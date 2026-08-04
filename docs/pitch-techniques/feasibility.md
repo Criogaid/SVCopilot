@@ -368,7 +368,7 @@ Saitou 论文按 5.6Sol 判定处置：JAIST 保存稿为 CC BY-NC-ND 4.0，
 
 | # | 未知量 | 为何阻塞 | 判定 |
 |---|---|---|---|
-| H1 | Node 自建秒↔BLICK 换算与宿主 `TimeAxis` 的一致性 | 前序交叉验证未覆盖；2026-08-03 恒速实机仅得到部分证据，见 §5.1 | `partially_observed`；仍阻塞所有 Hz 门禁 |
+| H1 | Node 自建秒↔BLICK 换算与宿主 `TimeAxis` 的一致性 | 2026-08-04 的 600 点三场景实机证据覆盖恒速、单点阶跃和密集变速，见 §5.2 | `confirmed`；Node 分段换算不再阻塞 Hz 门禁 |
 | H2 | `vibratoEnv` / `dF0VbrMod` 与显式正弦的组合关系（相加/覆盖/缩放） | 双重颤音是高可信风险，但叠加公式未经官方证明 | `host-gated`，阻塞任何显式颤音发布 |
 | H3a | `PitchControlCurve` 覆盖区间内 `pitchDelta` 是否仍参与结果 | 决定两个写面能否并列，以及跨面处置策略 | `host-gated` |
 | H3b | absolute MIDI/score/occurrence offset 与 group-relative PitchControl anchor/point 的坐标变换 | 决定 TechniqueIR 能否正确编译到 PitchControl；H3a 不能回答 | `host-gated` |
@@ -395,8 +395,8 @@ Saitou 论文按 5.6Sol 判定处置：JAIST 保存稿为 CC BY-NC-ND 4.0，
   `secondsAtBlick`/`blickAtSeconds` 换算，**一次都没问过宿主**
 
 因此"颤音 Hz 在变速下不漂移"这一保证，实际依赖 Node 侧分段线性模型与
-SynthV 内部 `TimeAxis` 的逐点一致性。此前没有任何比对；§5.1 现已补一份
-恒速局部证据，完整变速矩阵仍未完成。
+SynthV 内部 `TimeAxis` 的逐点一致性。§5.1 的恒速局部证据已经由 §5.2 的完整变速矩阵
+取代，Node 分段换算已获得实机确认。
 
 **与 5.6Sol §5.1 的关系：两者是不同的问题，都真实存在。**
 
@@ -424,6 +424,18 @@ SynthV 内部 `TimeAxis` 的逐点一致性。此前没有任何比对；§5.1 �
 `getInterpolationMethod()` 均返回 `"cubic"`；definition 分别是
 `[-1200,1200], default 0` 与 `[0,2], default 1`。这不是全局常量，
 但已证明文档不能预设 `vibratoEnv=Linear`，必须逐实例捕获。
+
+### 5.2 2026-08-04 完整 TimeAxis H1 结果
+
+SynthV 2.2.1、bridge protocol 2 下，恒速、单点阶跃与多点密集变速各完成 200 个位置的
+双向 TimeAxis 读探针。每个场景都包含 tempo mark 的 `-1/0/+1`；原始 Artifact 见
+[constant](evidence/T02-time-axis-constant-live-v2.json)、
+[tempo step](evidence/T02-time-axis-tempo-step-live.json) 与
+[dense tempo](evidence/T02-time-axis-dense-tempo-live.json)。
+
+聚合 600 点的 Node 秒值最大偏差为 `1.4210854715202004e-14 s`，宿主 BLICK 往返最大偏差为
+`1`。H1 为 `confirmed`，T03 裁定 `not_required`，Node 分段换算可作为生产时间映射；tempo
+ramp 未被观测，相关 capability 仍保持 `unknown`。
 
 ## 6. 终版能力判定矩阵
 

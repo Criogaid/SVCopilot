@@ -211,7 +211,13 @@ test("v2 profiles preserve unknown, partial, confirmed, and contradicted H1 stat
     ...syntheticProbeEvidence(),
     capturedAt: "2026-08-03T00:00:00.000Z",
   });
-  const partial = await loadFixture();
+  const partial = compileHostBehaviorProfile({
+    ...syntheticProbeEvidence(),
+    timeAxisReports: [
+      timeAxisReport("constant", [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }]),
+    ],
+    capturedAt: "2026-08-03T00:00:00.000Z",
+  });
   const confirmed = compileHostBehaviorProfile({
     ...syntheticProbeEvidence(),
     timeAxisReports: completeTimeAxisReports(),
