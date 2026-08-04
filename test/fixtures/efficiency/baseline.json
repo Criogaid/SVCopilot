@@ -1,20 +1,21 @@
 {
   "fixtureVersion": "1",
-  "generatedAt": "2026-08-04T16:41:24.130Z",
+  "generatedAt": "2026-08-04T17:04:02.748Z",
   "summary": {
-    "servedToolsListBytes": 5008,
-    "internalHandlerInventoryBytes": 114131,
+    "servedToolsListBytes": 5015,
+    "internalHandlerInventoryBytes": 114784,
     "facadeReductionPercent": 95.6,
-    "workflowModelVisibleBytes": 28605,
+    "workflowModelVisibleBytes": 31746,
+    "artifactRequestReductionPercent": 61.3,
     "representativeResultBytes": 20054
   },
   "servedMcp": {
     "toolsList": {
       "label": "tools/list tools",
-      "prettyBytes": 7221,
-      "minifiedBytes": 5008,
-      "overheadPercent": 44.19,
-      "payloadMinifiedBytes": 5018,
+      "prettyBytes": 7241,
+      "minifiedBytes": 5015,
+      "overheadPercent": 44.39,
+      "payloadMinifiedBytes": 5025,
       "toolCount": 8,
       "toolNames": [
         "sv_status",
@@ -29,9 +30,9 @@
     },
     "catalog": {
       "label": "svcopilot://operations",
-      "prettyBytes": 10157,
-      "minifiedBytes": 7781,
-      "overheadPercent": 30.54
+      "prettyBytes": 14737,
+      "minifiedBytes": 11787,
+      "overheadPercent": 25.03
     },
     "describeCases": [
       {
@@ -41,7 +42,7 @@
           "edit_phrase"
         ],
         "requestBytes": 55,
-        "responseBytes": 11234,
+        "responseBytes": 11321,
         "returned": 1,
         "deferred": [
           "edit_phrase"
@@ -50,11 +51,11 @@
       {
         "label": "median",
         "operations": [
-          "plan_pitch_correction",
-          "start"
+          "start",
+          "call"
         ],
-        "requestBytes": 48,
-        "responseBytes": 3966,
+        "requestBytes": 31,
+        "responseBytes": 2833,
         "returned": 2,
         "deferred": []
       },
@@ -65,7 +66,7 @@
           "ping"
         ],
         "requestBytes": 30,
-        "responseBytes": 616,
+        "responseBytes": 790,
         "returned": 2,
         "deferred": []
       }
@@ -76,12 +77,12 @@
   },
   "operationSchemas": {
     "label": "internal-handler-inventory",
-    "prettyBytes": 194249,
-    "minifiedBytes": 114131,
-    "overheadPercent": 70.2,
-    "handlerCount": 43,
-    "operationCount": 43,
-    "totalSchemaBytes": 75088,
+    "prettyBytes": 195107,
+    "minifiedBytes": 114784,
+    "overheadPercent": 69.98,
+    "handlerCount": 44,
+    "operationCount": 44,
+    "totalSchemaBytes": 75260,
     "schemasWithDefs": 7,
     "largestOperations": [
       {
@@ -116,7 +117,7 @@
         "operation": "plan_pitch_gesture",
         "facade": "sv_plan",
         "schemaBytes": 4611,
-        "descriptionBytes": 1236,
+        "descriptionBytes": 1275,
         "deduped": true
       },
       {
@@ -212,14 +213,55 @@
     "mcpToolCalls": 3,
     "resourceReads": 1,
     "describeCalls": 3,
-    "requestBytes": 133,
-    "responseBytes": 23597,
-    "modelVisibleBytes": 28605,
+    "requestBytes": 116,
+    "responseBytes": 26731,
+    "modelVisibleBytes": 31746,
     "wallTimeMs": null,
     "hostCalls": 0,
     "bridgeRoundTrips": 0,
     "undoRecords": 0
   },
+  "artifactPaging": [
+    {
+      "payloadBytes": 63356,
+      "pageBytes": 8192,
+      "pageCount": 8,
+      "legacyArgumentBytes": 2984,
+      "shortFacadeArgumentBytes": 648,
+      "shortPayloadArgumentBytes": 384,
+      "facadeArgumentReductionPercent": 78.3,
+      "payloadArgumentReductionPercent": 87.1,
+      "legacyRequestBytes": 3464,
+      "shortRequestBytes": 1376,
+      "requestReductionPercent": 60.3
+    },
+    {
+      "payloadBytes": 109975,
+      "pageBytes": 8192,
+      "pageCount": 14,
+      "legacyArgumentBytes": 5416,
+      "shortFacadeArgumentBytes": 1147,
+      "shortPayloadArgumentBytes": 685,
+      "facadeArgumentReductionPercent": 78.8,
+      "payloadArgumentReductionPercent": 87.4,
+      "legacyRequestBytes": 6260,
+      "shortRequestBytes": 2425,
+      "requestReductionPercent": 61.3
+    },
+    {
+      "payloadBytes": 188236,
+      "pageBytes": 8192,
+      "pageCount": 23,
+      "legacyArgumentBytes": 9079,
+      "shortFacadeArgumentBytes": 1903,
+      "shortPayloadArgumentBytes": 1144,
+      "facadeArgumentReductionPercent": 79,
+      "payloadArgumentReductionPercent": 87.4,
+      "legacyRequestBytes": 10472,
+      "shortRequestBytes": 4009,
+      "requestReductionPercent": 61.7
+    }
+  ],
   "fixturePayloads": {
     "representativeResult": {
       "label": "representative-tool-result",

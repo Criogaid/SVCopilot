@@ -70,6 +70,7 @@ const FACADE_BY_TOOL = new Map([
   ["sv_get_audition_compare", "audition"],
   ["sv_stop_audition_compare", "audition"],
 
+  ["sv_read_artifact", "artifact"],
   ["sv_release_artifact", "artifact"],
 ]);
 
@@ -92,6 +93,7 @@ const OPERATION_NAME_OVERRIDES = new Map([
   ["sv_stop_audition_compare", "stop_compare"],
   // sv_describe 这个工具名让位给 schema discovery 工具，官方 API 描述改叫 describe_api。
   ["sv_describe", "describe_api"],
+  ["sv_read_artifact", "read"],
   ["sv_release_artifact", "release"],
 ]);
 

@@ -50,7 +50,7 @@ epoch，旧 epoch handle 必须拒绝。安装面没有 session namespace 或 co
 | `sv_plan` | 无副作用音乐规划 |
 | `sv_edit` | 显式 dry-run/commit 写入 |
 | `sv_audition` | 人工试听与 A/B 状态机 |
-| `sv_artifact` | Artifact 释放和生命周期管理；内容通过 MCP resource 读取 |
+| `sv_artifact` | Artifact 短 offset 读取、释放和生命周期管理 |
 | `sv_raw` | 官方 SV API 的底层逃生口 |
 | `sv_describe` | 按需返回 operation 的完整 schema 与契约 |
 
@@ -72,8 +72,10 @@ tool 兼容入口。`svcopilot://operations` 提供可发现目录。
 时间轴和请求 include；后续 planner 与 mutation 使用 ordinal/index，不向模型反复暴露带
 Context UUID 的长 Note ID。
 
-大载荷进入 ArtifactStore。普通响应只返回摘要和短引用；Artifact 按有界页读取、校验内容
-hash，并可幂等释放。PlanRef 是密封的 Artifact 身份，不能成为跳过 live preflight 的凭证。
+大载荷进入 ArtifactStore。普通响应只返回摘要和短引用；`artifactRef.read` 给出可直接提交的
+`sv_artifact(read)` 调用，后续页面只传 `artifactId + nextOffset`。服务按最终 MCP envelope 动态
+收缩正文，末页返回 content hash。旧的 hash-bound resource/cursor URI 作为兼容路径保留。
+PlanRef 是密封的可执行 Artifact 身份，不能作为 detail 读取，也不能成为跳过 live preflight 的凭证。
 
 ## 5. 写入与恢复
 

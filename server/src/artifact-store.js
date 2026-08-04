@@ -48,6 +48,14 @@ export function artifactReference(artifact) {
     contentHash: artifact.contentHash,
     kind: artifact.kind,
     schemaVersion: artifact.schemaVersion,
+    read: {
+      tool: "sv_artifact",
+      arguments: {
+        operation: "read",
+        arguments: { artifactId: artifact.id },
+      },
+    },
+    // resource URI 保留为兼容路径；新客户端优先使用上方短 read 调用。
     resourceUri: baseUri,
     firstPageUri: `${baseUri}/pages/start?byteBudget=${DEFAULT_ARTIFACT_PAGE_BYTES}`,
     expiresAt: artifact.expiresAt,
@@ -70,7 +78,8 @@ export function artifactResourceView(artifact) {
         mode: "paged",
         reason: "artifact_exceeds_safe_direct_read_limit",
         directReadMaxBytes: MAX_ARTIFACT_DIRECT_READ_BYTES,
-        firstPageUri: reference.firstPageUri,
+        preferred: reference.read,
+        compatibility: { firstPageUri: reference.firstPageUri },
       },
     };
   }
@@ -234,19 +243,7 @@ export class ArtifactStore {
       throw codedError("ARTIFACT_CURSOR_OUT_OF_BOUNDS", "artifact cursor out of bounds");
     }
 
-    let nextOffset = Math.min(offset + byteBudget, totalBytes);
-    if (nextOffset < totalBytes) {
-      while (nextOffset > offset && isUtf8ContinuationByte(payloadBytes[nextOffset])) {
-        nextOffset -= 1;
-      }
-      if (nextOffset === offset) {
-        throw codedError(
-          "ARTIFACT_PAGE_BUDGET_TOO_SMALL",
-          "artifact byteBudget cannot fit the next UTF-8 code point"
-        );
-      }
-    }
-    const chunk = payloadBytes.subarray(offset, nextOffset).toString("utf8");
+    const { chunk, nextOffset } = sliceUtf8Page(payloadBytes, offset, byteBudget);
     const hasMore = nextOffset < totalBytes;
 
     return {
@@ -266,6 +263,51 @@ export class ArtifactStore {
         hasMore,
         bytesReturned: nextOffset - offset,
         totalBytes,
+      },
+    };
+  }
+
+  readOffsetPage({
+    artifactId,
+    sessionId,
+    offset = 0,
+    byteBudget = MAX_ARTIFACT_PAGE_BYTES,
+  }) {
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw codedError("INVALID_ARGUMENTS", "artifact offset must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(byteBudget) || byteBudget < 4 || byteBudget > MAX_ARTIFACT_PAGE_BYTES) {
+      throw codedError(
+        "INVALID_ARGUMENTS",
+        `artifact byteBudget must be an integer between 4 and ${MAX_ARTIFACT_PAGE_BYTES}`
+      );
+    }
+    const artifact = this.resolve({ artifactId, sessionId });
+    if (artifact.kind === "plan") {
+      throw codedError(
+        "ARTIFACT_NOT_READABLE",
+        "sealed plan artifacts are executable references and cannot be read as detail pages"
+      );
+    }
+    const payloadBytes = Buffer.from(JSON.stringify(artifact.payload), "utf8");
+    if (offset >= payloadBytes.length) {
+      throw codedError("ARTIFACT_OFFSET_OUT_OF_BOUNDS", "artifact offset is out of bounds");
+    }
+    if (isUtf8ContinuationByte(payloadBytes[offset])) {
+      throw codedError(
+        "ARTIFACT_OFFSET_NOT_UTF8_BOUNDARY",
+        "artifact offset must point to a UTF-8 code point boundary"
+      );
+    }
+    const { chunk, nextOffset } = sliceUtf8Page(payloadBytes, offset, byteBudget);
+    const done = nextOffset === payloadBytes.length;
+    return {
+      artifact,
+      page: {
+        text: chunk,
+        nextOffset: done ? null : nextOffset,
+        done,
+        bytesReturned: nextOffset - offset,
       },
     };
   }
@@ -392,6 +434,25 @@ function deepFreeze(value) {
 
 function isUtf8ContinuationByte(value) {
   return (value & 0xc0) === 0x80;
+}
+
+function sliceUtf8Page(payloadBytes, offset, byteBudget) {
+  let nextOffset = Math.min(offset + byteBudget, payloadBytes.length);
+  if (nextOffset < payloadBytes.length) {
+    while (nextOffset > offset && isUtf8ContinuationByte(payloadBytes[nextOffset])) {
+      nextOffset -= 1;
+    }
+    if (nextOffset === offset) {
+      throw codedError(
+        "ARTIFACT_PAGE_BUDGET_TOO_SMALL",
+        "artifact byteBudget cannot fit the next UTF-8 code point"
+      );
+    }
+  }
+  return {
+    chunk: payloadBytes.subarray(offset, nextOffset).toString("utf8"),
+    nextOffset,
+  };
 }
 
 function codedError(code, message) {

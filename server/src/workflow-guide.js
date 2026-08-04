@@ -104,6 +104,11 @@ const GLOBAL_RULES = {
     "apply.preconditions describes what the plan assumed. The target tool re-validates against the live host anyway — a plan is never a token for skipping preflight, because SynthV exposes no project revision.",
     "Every actionable planner result is handed off only through apply.arguments.planRef plus action. Mutation payloads are sealed server-side and are never duplicated inline.",
   ],
+  artifactAccess: [
+    "A detail artifactRef contains an exact read handoff. Submit artifactRef.read.arguments to artifactRef.read.tool instead of copying resourceUri or firstPageUri.",
+    "For each sv_artifact(read) result, append data.text in order and submit data.nextOffset until data.done is true. Parse the concatenated JSON only after the final page, then verify data.contentHash against artifactRef.contentHash.",
+    "The hash-bound resourceUri and cursor page URI are compatibility paths. Sealed planRef values are executable references and cannot be read as detail pages.",
+  ],
   writeSafety: [
     "Always dry-run a write first and read its plannedDiff; then commit the identical arguments with action commit.",
     "SHARED_TARGET_REQUIRES_CONFIRMATION means the target NoteGroup is referenced more than once in the project, so the edit changes every occurrence. Report that to the human and only set allowSharedTargetMutation:true on explicit instruction.",

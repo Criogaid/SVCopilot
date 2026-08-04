@@ -177,6 +177,7 @@ const OPERATION_POLICIES = {
   stop_compare: { request: "editor-state", response: "editor-state", hostTraffic: "write" },
 
   // sv_artifact：进程内不可变数据的租期管理，不碰宿主。
+  read: { request: "scalar-inline", response: "artifact-summary", hostTraffic: "none" },
   release: { request: "scalar-inline", response: "scalar-inline", hostTraffic: "none" },
 
   // sv_raw：官方 API 逃生通道。参数任意，但 handle 只用短整数 + epoch。
@@ -194,7 +195,7 @@ const TOOL_POLICIES = {
   sv_plan: { request: "range-scoped-grouped", response: "mutation-plan-ref" },
   sv_edit: { request: "range-scoped-grouped", response: "mutation-plan-ref" },
   sv_audition: { request: "editor-state", response: "editor-state" },
-  sv_artifact: { request: "scalar-inline", response: "scalar-inline" },
+  sv_artifact: { request: "scalar-inline", response: "artifact-summary" },
   sv_raw: { request: "raw-dispatch", response: "raw-dispatch" },
   sv_describe: { request: "bounded-inline", response: "bounded-inline" },
 };

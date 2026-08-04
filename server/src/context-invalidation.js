@@ -100,6 +100,7 @@ export const CONTEXT_INVALIDATION_BY_OPERATION = Object.freeze({
   align_lyrics: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
   quantize_notes: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
   generate_harmony: { scope: "none", reason: "规划器绝不写宿主：只产出 PlanRef。" },
+  read: { scope: "none", reason: "只读取进程内不可变 artifact，不接触宿主。" },
   release: { scope: "none", reason: "只释放进程内 artifact 租期，不接触宿主。" },
 
   // ---- raw dispatcher ----

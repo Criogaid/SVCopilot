@@ -43,7 +43,7 @@ schema 允许短格式的前提下，仍然写出冗长请求——因为它没�
 | 同一参数重复的 hairpin 条数 | 0（应使用 `amounts` 映射） | 数 gestures 数组 |
 | 同一 schema 重复读取次数 | ≤1（除非客户端截断过内容） | 数 `sv_describe` 调用 |
 | workflow guide 重复读取次数 | ≤1 | 数 resource 读取 |
-| 无关 Artifact detail 读取次数 | 0 | 数 artifact 页面读取 |
+| 无关 Artifact detail 读取次数 | 0 | 数 `sv_artifact(read)` 和兼容 resource 页面读取 |
 | 10 分钟工作流内 Context 过期 | 0 | 记录 `UNKNOWN_CONTEXT` 次数 |
 | 模型是否自然使用 ordinal/index | 是 | 记录首次请求的身份写法 |
 | 模型是否提交 PlanRef 而非内联 | 是 | 记录 apply 提交形状 |

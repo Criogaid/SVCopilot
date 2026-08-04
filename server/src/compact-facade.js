@@ -1,4 +1,4 @@
-// 唯一 MCP surface：把 42 个 direct tool 的元数据收敛成 8 个 facade 工具，
+// 唯一 MCP surface：把全部 direct tool 的元数据收敛成固定的 facade 工具，
 // 同时不复制、不改写任何业务 schema。
 //
 // 三条不可让步的规则：
@@ -105,7 +105,7 @@ export function createCompactFacade(tools) {
         `unknown operation "${operation}"; call ${DESCRIBE_OPERATION_TOOL} or read svcopilot://operations`
       );
       error.code = "UNKNOWN_OPERATION";
-      // 给出该 facade 自己接受的清单，而不是全部 42 个：模型需要的是下一步能打什么。
+      // 给出该 facade 自己接受的清单，而不是全部 operation：模型需要的是下一步能打什么。
       error.details = {
         facadeOperations: (facades.get(facadeTool.replace(/^sv_/, "")) ?? [])
           .map((candidate) => candidate.operation)

@@ -239,6 +239,7 @@ try {
   }
 
   const served = await describeTools([
+    "sv_read_artifact",
     "sv_release_artifact",
     "sv_audition_compare",
     "sv_set_selection",
@@ -255,6 +256,10 @@ try {
     "sv_restore_audition",
     "sv_patch_notes",
   ]);
+  const readArtifactTool = served.get("sv_read_artifact");
+  assert.equal(readArtifactTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(readArtifactTool.inputSchema.required, ["artifactId"]);
+  assert.equal(readArtifactTool.inputSchema.properties.offset.minimum, 0);
   const releaseArtifactTool = served.get("sv_release_artifact");
   assert.equal(releaseArtifactTool.inputSchema.additionalProperties, false);
   assert.deepEqual(releaseArtifactTool.inputSchema.required, ["artifactId"]);
@@ -1230,6 +1235,29 @@ try {
   assert.equal(firstArtifactPage.page.encoding, "json-utf8-fragment");
   assert.ok(firstArtifactPage.page.bytesReturned > 0);
   assert.ok(firstArtifactPage.page.bytesReturned <= 8 * 1024);
+  const shortFragments = [];
+  let shortOffset = 0;
+  let shortHash = null;
+  do {
+    const response = await facadeCall({
+      name: "sv_read_artifact",
+      arguments: {
+        artifactId: rangeSnapshot.artifactRef.artifactId,
+        ...(shortOffset === 0 ? {} : { offset: shortOffset }),
+      },
+    });
+    assert.ok(Buffer.byteLength(JSON.stringify(response), "utf8") <= 16 * 1024);
+    const page = parseToolResult(response);
+    shortFragments.push(page.text);
+    if (page.done) {
+      shortHash = page.contentHash;
+      break;
+    }
+    assert.ok(page.nextOffset > shortOffset);
+    shortOffset = page.nextOffset;
+  } while (true);
+  assert.deepEqual(JSON.parse(shortFragments.join("")), rangeArtifact.payload);
+  assert.equal(shortHash, rangeSnapshot.artifactRef.contentHash);
   const releasedArtifact = parseToolResult(
     await facadeCall({
       name: "sv_release_artifact",

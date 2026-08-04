@@ -164,6 +164,16 @@ test("audition operations drop the redundant verb suffix", () => {
   assert.equal(facade.resolveOperation("sv_status", "describe_api").tool, "sv_describe");
 });
 
+test("artifact facade exposes short read and compatible release operations", () => {
+  const facade = createCompactFacade(TOOLS);
+  const artifact = facade.tools.find((tool) => tool.name === "sv_artifact");
+  assert.deepEqual([...artifact.inputSchema.properties.operation.enum].sort(), ["read", "release"]);
+  assert.equal(facade.resolveOperation("sv_artifact", "read").tool, "sv_read_artifact");
+  assert.equal(facade.resolveOperation("sv_artifact", "release").tool, "sv_release_artifact");
+  // 分组含 release，因此 annotations 必须保持最保守的 destructive=true。
+  assert.equal(artifact.annotations.destructiveHint, true);
+});
+
 test("tools/list is exactly the facade surface and stays small", async () => {
   const listed = await withClient((client) => client.listTools());
   const bytes = Buffer.byteLength(JSON.stringify(listed.tools), "utf8");

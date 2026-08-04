@@ -132,8 +132,13 @@ export async function measureEfficiencySurface() {
   const indexUrl = pathToFileURL(path.join(productDir, "server", "src", "index.js")).href;
   const facadeUrl = pathToFileURL(path.join(productDir, "server", "src", "compact-facade.js")).href;
   const catalogUrl = pathToFileURL(path.join(productDir, "server", "src", "operation-catalog.js")).href;
-  const [{ INTERFACE_VERSION, TOOLS }, { createCompactFacade, MAX_DESCRIBE_BYTES }, { buildOperationCatalog }] =
-    await Promise.all([import(indexUrl), import(facadeUrl), import(catalogUrl)]);
+  const artifactUrl = pathToFileURL(path.join(productDir, "server", "src", "artifact-store.js")).href;
+  const [
+    { INTERFACE_VERSION, TOOLS },
+    { createCompactFacade, MAX_DESCRIBE_BYTES },
+    { buildOperationCatalog },
+    { ArtifactStore, DEFAULT_ARTIFACT_PAGE_BYTES, artifactReference },
+  ] = await Promise.all([import(indexUrl), import(facadeUrl), import(catalogUrl), import(artifactUrl)]);
 
   const facade = createCompactFacade(TOOLS);
   const { operations } = buildOperationCatalog(TOOLS);
@@ -226,7 +231,100 @@ export async function measureEfficiencySurface() {
       bridgeRoundTrips: 0,
       undoRecords: 0,
     },
+    artifactPaging: measureArtifactPaging({
+      ArtifactStore,
+      artifactReference,
+      pageBytes: DEFAULT_ARTIFACT_PAGE_BYTES,
+    }),
   };
+}
+
+function measureArtifactPaging({ ArtifactStore, artifactReference, pageBytes }) {
+  const store = new ArtifactStore({ cursorSecret: Buffer.alloc(32, 7) });
+  const sessionId = "sess_benchmark";
+  return [63_356, 109_975, 188_236].map((payloadBytes) => {
+    const artifact = store.seal({
+      kind: "benchmark-detail",
+      schemaVersion: "1",
+      sessionId,
+      payload: { text: "x".repeat(payloadBytes - 11) },
+    });
+    const reference = artifactReference(artifact);
+    let cursor = "start";
+    let offset = 0;
+    let pageIndex = 0;
+    let legacyArgumentBytes = 0;
+    let shortFacadeArgumentBytes = 0;
+    let shortPayloadArgumentBytes = 0;
+    let legacyRequestBytes = 0;
+    let shortRequestBytes = 0;
+    do {
+      const uri = `${reference.resourceUri}/pages/${encodeURIComponent(cursor)}?byteBudget=${pageBytes}`;
+      const shortArguments = {
+        operation: "read",
+        arguments: {
+          artifactId: artifact.id,
+          ...(offset === 0 ? {} : { offset }),
+        },
+      };
+      const legacyArguments = { uri };
+      legacyArgumentBytes += Buffer.byteLength(JSON.stringify(legacyArguments), "utf8");
+      shortFacadeArgumentBytes += Buffer.byteLength(JSON.stringify(shortArguments), "utf8");
+      shortPayloadArgumentBytes += Buffer.byteLength(JSON.stringify(shortArguments.arguments), "utf8");
+      legacyRequestBytes += Buffer.byteLength(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: pageIndex,
+          method: "resources/read",
+          params: legacyArguments,
+        }),
+        "utf8"
+      );
+      shortRequestBytes += Buffer.byteLength(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: pageIndex,
+          method: "tools/call",
+          params: { name: "sv_artifact", arguments: shortArguments },
+        }),
+        "utf8"
+      );
+      const { page } = store.readPage({
+        artifactId: artifact.id,
+        expectedContentHash: artifact.contentHash,
+        sessionId,
+        cursor,
+        byteBudget: pageBytes,
+      });
+      cursor = page.cursor;
+      offset += page.bytesReturned;
+      pageIndex += 1;
+    } while (cursor !== null);
+
+    return {
+      payloadBytes,
+      pageBytes,
+      pageCount: pageIndex,
+      legacyArgumentBytes,
+      shortFacadeArgumentBytes,
+      shortPayloadArgumentBytes,
+      facadeArgumentReductionPercent: reductionPercent(
+        legacyArgumentBytes,
+        shortFacadeArgumentBytes
+      ),
+      payloadArgumentReductionPercent: reductionPercent(
+        legacyArgumentBytes,
+        shortPayloadArgumentBytes
+      ),
+      legacyRequestBytes,
+      shortRequestBytes,
+      requestReductionPercent: reductionPercent(legacyRequestBytes, shortRequestBytes),
+    };
+  });
+}
+
+function reductionPercent(before, after) {
+  return Number(((1 - after / before) * 100).toFixed(1));
 }
 
 export async function runBenchmark({
@@ -249,6 +347,7 @@ export async function runBenchmark({
       internalHandlerInventoryBytes: surface.operationSchemas.minifiedBytes,
       facadeReductionPercent: surface.servedMcp.reductionVsInternalPercent,
       workflowModelVisibleBytes: surface.workflowTrace.modelVisibleBytes,
+      artifactRequestReductionPercent: surface.artifactPaging[1].requestReductionPercent,
       representativeResultBytes: fixturePayloads.representativeResult.minifiedBytes,
     },
     ...surface,

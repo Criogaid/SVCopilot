@@ -223,7 +223,7 @@ test("tools/list and every describe response stay inside their byte budgets", ()
     description: tool.description,
     inputSchema: tool.inputSchema,
   })));
-  // TOOLS 是内部 42 个 handler；模型看到的是 facade 投影，因此这里测的是后者。
+  // TOOLS 是内部 handler inventory；模型看到的是 facade 投影，因此这里测的是后者。
   const facade = createCompactFacade(TOOLS);
   const servedBytes = utf8(facade.tools);
   assert.ok(

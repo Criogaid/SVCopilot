@@ -32,6 +32,7 @@ try {
   assert.ok(report.operationSchemas);
   assert.ok(report.fixturePayloads);
   assert.ok(report.workflowTrace);
+  assert.ok(report.artifactPaging);
   assert.ok(report.host);
   assert.strictEqual(report.listTools, undefined, "旧的含混 listTools 口径必须删除");
 
@@ -55,6 +56,17 @@ try {
   assert.strictEqual(report.workflowTrace.wallTimeMs, null);
   assert.strictEqual(report.workflowTrace.hostCalls, 0);
   assert.strictEqual(report.host.status, "not_collected");
+
+  assert.deepEqual(report.artifactPaging.map((item) => item.payloadBytes), [63_356, 109_975, 188_236]);
+  for (const item of report.artifactPaging) {
+    assert.ok(item.pageCount > 1);
+    assert.ok(item.facadeArgumentReductionPercent > 75);
+    assert.ok(item.payloadArgumentReductionPercent > 85);
+    assert.ok(item.requestReductionPercent > 50);
+    assert.ok(item.shortFacadeArgumentBytes < item.legacyArgumentBytes);
+    assert.ok(item.shortPayloadArgumentBytes < item.shortFacadeArgumentBytes);
+    assert.ok(item.shortRequestBytes < item.legacyRequestBytes);
+  }
 
   const result = report.fixturePayloads.representativeResult;
   assert.ok(result.minifiedBytes > 0);

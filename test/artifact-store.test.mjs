@@ -6,6 +6,9 @@ import {
   artifactReference,
   artifactResourceView,
 } from "../server/src/artifact-store.js";
+import { readArtifactOffsetPage } from "../server/src/artifact-read.js";
+import { encodeToolResult, measureToolEnvelope } from "../server/src/mcp-result-encoder.js";
+import { COMPACT_MAX_BYTES } from "../server/src/response-budget.js";
 
 const sessionId = "sess_001";
 
@@ -33,6 +36,13 @@ const sessionId = "sess_001";
   assert.strictEqual(reference.schemaVersion, "1");
   assert.strictEqual(reference.expiresAt, artifact.expiresAt);
   assert.strictEqual(reference.totalBytes, artifact.totalBytes);
+  assert.deepStrictEqual(reference.read, {
+    tool: "sv_artifact",
+    arguments: {
+      operation: "read",
+      arguments: { artifactId: artifact.id },
+    },
+  });
   assert.match(reference.resourceUri, /^svcopilot:\/\/artifacts\//);
   assert.strictEqual(
     reference.firstPageUri,
@@ -56,7 +66,8 @@ const sessionId = "sess_001";
   assert.strictEqual(view.payload, undefined);
   assert.strictEqual(view.access.mode, "paged");
   assert.strictEqual(view.access.directReadMaxBytes, MAX_ARTIFACT_DIRECT_READ_BYTES);
-  assert.strictEqual(view.access.firstPageUri, view.firstPageUri);
+  assert.deepStrictEqual(view.access.preferred, view.read);
+  assert.strictEqual(view.access.compatibility.firstPageUri, view.firstPageUri);
 }
 
 // resolve 正确返回 artifact。
@@ -92,6 +103,10 @@ const sessionId = "sess_001";
   const store = new ArtifactStore();
   const artifact = store.seal({ kind: "x", schemaVersion: "1", sessionId, payload: {} });
   assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId: "other" }), /ARTIFACT_SESSION_MISMATCH/);
+  assert.throws(
+    () => store.readOffsetPage({ artifactId: artifact.id, sessionId: "other" }),
+    /ARTIFACT_SESSION_MISMATCH/
+  );
 }
 
 // TTL 过期与未知 artifact 使用不同错误码。
@@ -106,6 +121,10 @@ const sessionId = "sess_001";
     leaseMs: 1000,
   });
   now = 1001;
+  assert.throws(
+    () => store.readOffsetPage({ artifactId: artifact.id, sessionId }),
+    /ARTIFACT_EXPIRED/
+  );
   assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId }), /ARTIFACT_EXPIRED/);
   assert.throws(() => store.resolve({ artifactId: "a_unknown", sessionId }), /ARTIFACT_NOT_FOUND/);
 }
@@ -198,6 +217,97 @@ const sessionId = "sess_001";
       }),
     /ARTIFACT_CURSOR_INVALID/
   );
+}
+
+// 短 offset 页在多字节正文上连续推进，末页才返回完整性 hash。
+{
+  const store = new ArtifactStore();
+  const payload = { text: "甲乙丙丁".repeat(5000), items: [1, 2, 3] };
+  const artifact = store.seal({ kind: "detail", schemaVersion: "1", sessionId, payload });
+  const fragments = [];
+  let offset = 0;
+  let finalHash = null;
+  do {
+    const result = readArtifactOffsetPage({ artifactStore: store, sessionId, artifactId: artifact.id, offset });
+    const envelopeBytes = measureToolEnvelope(encodeToolResult(result)).envelopeUtf8Bytes;
+    assert.ok(envelopeBytes <= COMPACT_MAX_BYTES, `offset page exceeded ${COMPACT_MAX_BYTES} bytes`);
+    fragments.push(result.data.text);
+    if (result.data.done) {
+      assert.strictEqual(result.data.nextOffset, undefined);
+      finalHash = result.data.contentHash;
+      break;
+    }
+    assert.ok(result.data.nextOffset > offset);
+    assert.strictEqual(result.data.contentHash, undefined);
+    offset = result.data.nextOffset;
+  } while (true);
+  assert.deepStrictEqual(JSON.parse(fragments.join("")), payload);
+  assert.strictEqual(finalHash, artifact.contentHash);
+}
+
+// JSON 转义密集正文按最终 MCP envelope 收缩，而不是假设原始 16 KiB 一定装得下。
+{
+  const store = new ArtifactStore();
+  const payload = { text: "\u0000\"\\".repeat(12000) };
+  const artifact = store.seal({ kind: "detail", schemaVersion: "1", sessionId, payload });
+  const result = readArtifactOffsetPage({ artifactStore: store, sessionId, artifactId: artifact.id });
+  const envelopeBytes = measureToolEnvelope(encodeToolResult(result)).envelopeUtf8Bytes;
+  assert.ok(envelopeBytes <= COMPACT_MAX_BYTES);
+  assert.ok(Buffer.byteLength(result.data.text, "utf8") < 16 * 1024);
+  assert.equal(result.data.done, false);
+}
+
+// offset 必须在范围内且位于 UTF-8 code point 边界；sealed plan 仍只能按 PlanRef 执行。
+{
+  const store = new ArtifactStore();
+  const artifact = store.seal({ kind: "detail", schemaVersion: "1", sessionId, payload: { text: "甲" } });
+  assert.throws(
+    () => store.readOffsetPage({ artifactId: artifact.id, sessionId, offset: 10 }),
+    /ARTIFACT_OFFSET_NOT_UTF8_BOUNDARY/
+  );
+  assert.throws(
+    () => store.readOffsetPage({ artifactId: artifact.id, sessionId, offset: artifact.totalBytes }),
+    /ARTIFACT_OFFSET_OUT_OF_BOUNDS/
+  );
+  assert.throws(
+    () => store.readOffsetPage({ artifactId: artifact.id, sessionId, offset: -1 }),
+    /INVALID_ARGUMENTS/
+  );
+  const plan = store.seal({ kind: "plan", schemaVersion: "1", sessionId, payload: { mutation: true } });
+  assert.throws(
+    () => readArtifactOffsetPage({ artifactStore: store, sessionId, artifactId: plan.id }),
+    /ARTIFACT_NOT_READABLE/
+  );
+}
+
+// 新旧翻页只改变传输信封，重组后的规范 JSON 必须完全一致。
+{
+  const store = new ArtifactStore({ cursorSecret: Buffer.alloc(32, 9) });
+  const payload = { text: "兼容".repeat(9000), values: [1, 2, 3] };
+  const artifact = store.seal({ kind: "detail", schemaVersion: "1", sessionId, payload });
+  const legacy = [];
+  let cursor = "start";
+  do {
+    const { page } = store.readPage({
+      artifactId: artifact.id,
+      expectedContentHash: artifact.contentHash,
+      sessionId,
+      cursor,
+      byteBudget: 8192,
+    });
+    legacy.push(page.data);
+    cursor = page.cursor;
+  } while (cursor !== null);
+
+  const short = [];
+  let offset = 0;
+  do {
+    const result = readArtifactOffsetPage({ artifactStore: store, sessionId, artifactId: artifact.id, offset });
+    short.push(result.data.text);
+    if (result.data.done) break;
+    offset = result.data.nextOffset;
+  } while (true);
+  assert.strictEqual(short.join(""), legacy.join(""));
 }
 
 console.log("artifact-store.test.mjs passed");

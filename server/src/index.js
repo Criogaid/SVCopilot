@@ -89,6 +89,7 @@ import {
   artifactReference,
   artifactResourceView,
 } from "./artifact-store.js";
+import { readArtifactOffsetPage } from "./artifact-read.js";
 import { PlanExecutionLedger } from "./plan-ledger.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 import { dedupeSchema } from "./schema-defs.js";
@@ -749,6 +750,21 @@ export const TOOLS = [
     name: "sv_ping",
     description: 'End-to-end health check; returns "pong" when the SynthV bridge loop is alive.',
     inputSchema: { type: "object", properties: {}, required: [] },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "sv_read_artifact",
+    description:
+      "Read one bounded page from an immutable detail artifact. Omit offset for the first page, then submit each returned nextOffset. Concatenate data.text in order, parse the JSON only after data.done is true, and verify the final contentHash. Sealed plan artifacts are not readable through this operation.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        artifactId: { type: "string", minLength: 1 },
+        offset: { type: "integer", minimum: 0 },
+      },
+      required: ["artifactId"],
+    },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
   {
@@ -3116,7 +3132,7 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: "svcopilot://artifacts",
       name: "SV Copilot immutable artifact store",
       description:
-        "Read-only container for large results and sealed plans. Artifact descriptors provide hash-bound full and paged resource URIs.",
+        "Read-only container for large results and sealed plans. Detail descriptors provide an exact short sv_artifact(read) handoff; hash-bound resource URIs remain available for compatibility.",
       mimeType: "application/json",
     },
   ],
@@ -3146,13 +3162,13 @@ server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
     {
       uriTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}",
       name: "SV Copilot artifact",
-      description: "Immutable read-only artifact containing a large result or sealed plan.",
+      description: "Compatibility resource for an immutable artifact descriptor or inline payload.",
       mimeType: "application/json",
     },
     {
       uriTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}/pages/{cursor}",
       name: "SV Copilot artifact page",
-      description: "Paginated read-only chunk of an immutable artifact.",
+      description: "Compatibility cursor page; new clients should use sv_artifact(read) with artifactId and nextOffset.",
       mimeType: "application/json",
     },
   ],
@@ -3256,6 +3272,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "sv_doctor":
         result = doctorReport();
+        break;
+      case "sv_read_artifact":
+        result = readArtifactOffsetPage({
+          artifactStore,
+          sessionId: serverSessionId,
+          artifactId: args.artifactId,
+          offset: args.offset ?? 0,
+        });
         break;
       case "sv_release_artifact":
         result = {
@@ -3718,6 +3742,7 @@ function capabilities() {
       editorState: ["sv_set_selection"],
       artifact: {
         index: "svcopilot://artifacts",
+        preferredRead: { tool: "sv_artifact", operation: "read" },
         resourceTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}",
         pageTemplate: "svcopilot://artifacts/{artifactId}/{contentHash}/pages/{cursor}",
         releaseTool: "sv_release_artifact",
