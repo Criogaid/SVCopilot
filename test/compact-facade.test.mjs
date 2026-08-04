@@ -482,8 +482,33 @@ test("capabilities reports one facade surface with a derived operation count", a
   assert.equal(capabilities.pitchTechniques.writeSurfaces.PitchControlCurve, "capability_gated");
   assert.equal(capabilities.pitchTechniques.capabilityGates.PitchControlCurve.status, "disabled");
   assert.equal(capabilities.pitchTechniques.capabilityGates.boundedClosedLoop.status, "disabled");
+  assert.equal(
+    capabilities.pitchTechniques.capabilityGates.PitchControlCurve.reasonCode,
+    "PITCH_CONTROL_CURVE_HOST_SEMANTICS_INCOMPLETE",
+  );
+  assert.match(
+    capabilities.pitchTechniques.capabilityGates.PitchControlCurve.explanation,
+    /ordering behavior is unknown/,
+  );
+  assert.deepEqual(capabilities.pitchTechniques.capabilityGates.PitchControlCurve.evidence, [
+    { id: "H3a", status: "unknown" },
+    { id: "H3b", status: "partially_observed" },
+  ]);
+  assert.equal("reason" in capabilities.pitchTechniques.capabilityGates.PitchControlCurve, false);
+  assert.equal(capabilities.interfaces.terminology, "svcopilot://terminology");
   assert.deepEqual(
     capabilities.pitchTechniques.acceptedHostProfiles.map((profile) => profile.profileId),
     ["synthv-2.2.1-win32-v2"],
   );
+});
+
+test("terminology resource explains stable codes without changing them", async () => {
+  const catalog = await withClient(async (client) => {
+    const resource = await client.readResource({ uri: "svcopilot://terminology" });
+    return JSON.parse(resource.contents[0].text);
+  });
+  assert.equal(catalog.schemaVersion, "1.0.0");
+  assert.equal(catalog.terms.tempo_step.title, "Single tempo change");
+  assert.match(catalog.terms.tempo_step.description, /Exactly one BPM change/);
+  assert.ok(Buffer.byteLength(JSON.stringify(catalog), "utf8") < 16 * 1024);
 });

@@ -4,6 +4,7 @@ import {
   summarizeTimeAxisEvidence,
   validateTimeAxisEvidenceSummary,
 } from "./time-axis-evidence.mjs";
+import { HOST_SEMANTIC_STATUSES } from "../../server/src/terminology.js";
 
 export const HOST_PROFILE_KIND = "svcopilot-host-profile";
 export const HOST_PROFILE_SCHEMA_VERSION = "2.0.0";
@@ -41,13 +42,7 @@ export const HOST_SEMANTIC_KEYS = Object.freeze([
   "undo.multiCandidateSingleBoundary",
 ]);
 
-const FACT_STATUSES = new Set([
-  "confirmed",
-  "contradicted",
-  "partially_observed",
-  "unknown",
-  "not_observable",
-]);
+const FACT_STATUSES = new Set(HOST_SEMANTIC_STATUSES);
 const EVIDENCE_SOURCES = new Set([
   "live_read_only",
   "official_doc",
@@ -281,6 +276,17 @@ export function validateHostBehaviorProfile(value) {
     throw profileError("profile.evidenceSha256 does not match the profile evidence");
   }
   return deepFreeze(profile);
+}
+
+export function summarizeHostSemanticStatuses(value) {
+  const semantics = requireRecord(value?.semantics, "profile.semantics");
+  const counts = Object.fromEntries(HOST_SEMANTIC_STATUSES.map((status) => [status, 0]));
+  for (const fact of Object.values(semantics)) {
+    const status = fact?.status;
+    if (!FACT_STATUSES.has(status)) throw profileError(`unknown semantic status: ${status}`);
+    counts[status] += 1;
+  }
+  return counts;
 }
 
 export function diffHostBehaviorProfiles(baselineValue, candidateValue) {

@@ -93,6 +93,7 @@ import { PlanExecutionLedger } from "./plan-ledger.js";
 import { DESCRIBE_OPERATION_TOOL, createCompactFacade } from "./compact-facade.js";
 import { dedupeSchema } from "./schema-defs.js";
 import { jsonContentHash } from "./schema-identity.js";
+import { terminologyCatalog, terminologyEntry } from "./terminology.js";
 import { collectDoctorReport, summarizeHostProfiles } from "./doctor.js";
 import { loadRuntimeHostProfiles, selectRuntimeHostProfile } from "./runtime-host-profile.js";
 
@@ -2194,7 +2195,7 @@ export const TOOLS = [
   {
     name: "sv_plan_pitch_gesture",
     description:
-      'Compile explicit pitch techniques into a deterministic Automation replacement plan. Capture the selected range with include ["notes", "automation"] and pitchDelta; either vibrato variant also requires vibratoEnv. transition writes a score-step-cancelling pitchDelta contribution, transient writes a bounded first-peak response, and vibrato selects either an explicit pitchDelta model or a host-envelope scale. The planner never touches the host: it composes captured Automation baseline plus contributions, seals an sv_patch_parameter_curves PlanRef, and includes interpolation read-back postconditions. Exact lowercase "br" and other non-melodic special events are skipped with structured warnings; an all-skipped request returns no_change. vibrato requires confirmed H2 host-profile semantics and otherwise returns HOST_SEMANTIC_UNCONFIRMED before any mutation exists. Submit apply.arguments unchanged with action dry_run first, then commit after human audition. No execution, surface, referenceFrame, or mode field is accepted because this MVP has one fixed write surface and transaction path. If a client collapses nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
+      'Compile explicit pitch techniques into a deterministic Automation replacement plan. Capture the selected range with include ["notes", "automation"] and pitchDelta; either vibrato variant also requires vibratoEnv. transition writes a score-step-cancelling pitchDelta contribution, transient writes a bounded first-peak response, and vibrato selects either an explicit pitchDelta model or a host-envelope scale. The planner never touches the host: it composes captured Automation baseline plus contributions, seals an sv_patch_parameter_curves PlanRef, and includes interpolation read-back postconditions. Exact lowercase "br" and other non-melodic special events are skipped with structured warnings; an all-skipped request returns no_change. vibrato requires confirmed interaction semantics between vibratoEnv and explicit pitchDelta and otherwise returns HOST_SEMANTIC_UNCONFIRMED before any mutation exists. Submit apply.arguments unchanged with action dry_run first, then commit after human audition. No execution, surface, referenceFrame, or mode field is accepted because this MVP has one fixed write surface and transaction path. If a client collapses nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2989,6 +2990,12 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       mimeType: "application/json",
     },
     {
+      uri: "svcopilot://terminology",
+      name: "SV Copilot terminology",
+      description: "Plain-language titles and descriptions for stable machine codes.",
+      mimeType: "application/json",
+    },
+    {
       uri: "svcopilot://guide/music-workflows",
       name: "SV Copilot music workflow guide",
       description:
@@ -3459,6 +3466,9 @@ function readResource(uri) {
   if (parsed.protocol === "svcopilot:" && parsed.hostname === "capabilities") {
     return capabilities();
   }
+  if (parsed.protocol === "svcopilot:" && parsed.hostname === "terminology") {
+    return terminologyCatalog();
+  }
   // 指南：目录页与单 recipe 页共用一个 hostname，用 pathname 区分。
   if (parsed.protocol === "svcopilot:" && parsed.hostname === "guide") {
     const segments = parsed.pathname.replace(/^\//, "").split("/");
@@ -3630,11 +3640,17 @@ function capabilities() {
       capabilityGates: {
         PitchControlCurve: {
           status: "disabled",
-          reason: "H3a_unknown_and_H3b_partially_observed",
+          reasonCode: "PITCH_CONTROL_CURVE_HOST_SEMANTICS_INCOMPLETE",
+          explanation: terminologyEntry("PITCH_CONTROL_CURVE_HOST_SEMANTICS_INCOMPLETE").description,
+          evidence: [
+            { id: "H3a", status: "unknown" },
+            { id: "H3b", status: "partially_observed" },
+          ],
         },
         boundedClosedLoop: {
           status: "disabled",
-          reason: "safety_gates_not_enabled",
+          reasonCode: "BOUNDED_CLOSED_LOOP_SAFETY_GATES_DISABLED",
+          explanation: terminologyEntry("BOUNDED_CLOSED_LOOP_SAFETY_GATES_DISABLED").description,
         },
       },
       acceptedHostProfiles: runtimeHostProfiles.map((profile) => ({
@@ -3731,6 +3747,7 @@ function capabilities() {
         toolTemplate: "svcopilot://schemas/{tool}",
         cacheIdentity: "schemaHash",
       },
+      terminology: "svcopilot://terminology",
     },
     // context 兼容矩阵：哪些工具接受哪种 contextId。range context 由 sv_snapshot_range 签发。
     contextCompatibility: {

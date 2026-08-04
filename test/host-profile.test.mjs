@@ -7,6 +7,7 @@ import {
   computedPitchScenarioFromProfile,
   diffHostBehaviorProfiles,
   hostBehaviorProfileEvidenceSha256,
+  summarizeHostSemanticStatuses,
   validateHostBehaviorProfile,
 } from "../tools/lib/host-behavior-profile.mjs";
 import { blickAtSeconds, secondsAtBlick } from "../server/src/musical-time.js";
@@ -579,5 +580,15 @@ test("profile diff reports semantic drift without last-write-wins promotion", as
   assert.deepEqual(
     diff.semanticChanges.map((item) => item.key),
     ["computedPitch.coordinateSpace", "computedPitch.pendingRepresentation"]
+  );
+});
+
+test("semantic status summary counts partially observed facts", async () => {
+  const profile = validateHostBehaviorProfile(JSON.parse(await readFile(FIXTURE_URL, "utf8")));
+  const counts = summarizeHostSemanticStatuses(profile);
+  assert.ok(counts.partially_observed > 0);
+  assert.equal(
+    Object.values(counts).reduce((sum, count) => sum + count, 0),
+    Object.keys(profile.semantics).length,
   );
 });

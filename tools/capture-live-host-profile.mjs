@@ -9,8 +9,10 @@ import { fileURLToPath } from "node:url";
 import {
   compileHostBehaviorProfile,
   diffHostBehaviorProfiles,
+  summarizeHostSemanticStatuses,
   validateHostBehaviorProfile,
 } from "./lib/host-behavior-profile.mjs";
+import { terminologyDictionary } from "../server/src/terminology.js";
 
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -70,6 +72,7 @@ async function main(args = process.argv.slice(2)) {
     );
     comparison = diffHostBehaviorProfiles(baseline, profile);
   }
+  const semanticSummary = summarizeHostSemanticStatuses(profile);
   console.log(
     JSON.stringify(
       {
@@ -77,7 +80,8 @@ async function main(args = process.argv.slice(2)) {
         output: outputPath,
         profileId: profile.profileId,
         hostSelector: profile.hostSelector,
-        semanticSummary: summarizeSemantics(profile),
+        semanticSummary,
+        terms: terminologyDictionary(Object.keys(semanticSummary)),
         comparison,
       },
       null,
@@ -140,12 +144,6 @@ function resolveOutputPath(explicit, profileId) {
     "candidates",
     `${profileId}-${Date.now()}.json`
   );
-}
-
-function summarizeSemantics(profile) {
-  const counts = { confirmed: 0, contradicted: 0, unknown: 0, not_observable: 0 };
-  for (const fact of Object.values(profile.semantics)) counts[fact.status] += 1;
-  return counts;
 }
 
 function parseArgs(args) {

@@ -63,6 +63,8 @@ tool 兼容入口。`svcopilot://operations` 提供可发现目录。
 客户端不应依赖对象属性顺序自行重算。
 `svcopilot://capabilities` 独立发布连接状态、限制、可用能力和 capability-gated 分支，不通过
 `sv_status` operation 重复同一份数据。
+稳定机器码不会因文案调整而改名；`svcopilot://terminology` 按需提供对应的短标题和领域解释。
+能力 gate 使用 `reasonCode + explanation`，内部证据编号只放在 `evidence` 中，不再充当唯一原因。
 
 ## 4. 读取模型
 

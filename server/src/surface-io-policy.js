@@ -204,6 +204,7 @@ const RESOURCE_POLICIES = {
   "svapi://manifest": { response: "artifact-summary" },
   "svapi://class/{class}": { response: "bounded-inline" },
   "svcopilot://capabilities": { response: "bounded-inline" },
+  "svcopilot://terminology": { response: "bounded-inline" },
   "svcopilot://operations": { response: "bounded-inline" },
   "svcopilot://guide/music-workflows": { response: "bounded-inline" },
   "svcopilot://guide/music-workflows/{recipe}": { response: "bounded-inline" },

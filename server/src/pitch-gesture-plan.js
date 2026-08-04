@@ -1547,10 +1547,11 @@ function requireVibratoGate(hostProfile, selected) {
   if (fact?.status !== "confirmed") {
     throw codedError(
       "HOST_SEMANTIC_UNCONFIRMED",
-      "vibrato planning is blocked until H2 confirms vibratoEnv and explicit pitchDelta interaction",
+      "Vibrato planning requires confirmed interaction semantics between vibratoEnv and explicit pitchDelta.",
       {
         semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
         status: fact?.status ?? "missing",
+        evidenceIds: ["H2"],
       },
     );
   }
@@ -1560,16 +1561,18 @@ function requireVibratoGate(hostProfile, selected) {
   const needsHostEnvelope = selected.some(({ gesture }) => gesture.source === "host_envelope");
   const needsExplicit = selected.some(({ gesture }) => gesture.source === "explicit_pitch_delta");
   if (needsHostEnvelope && !hostEnvelopeAllowed) {
-    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "H2 has no confirmed host-envelope scale semantics", {
+    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "Host-envelope vibrato requires confirmed baseline-scale semantics for vibratoEnv.", {
       semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
+      evidenceIds: ["H2"],
     });
   }
   if (
     needsExplicit
     && (!isRecord(suppression) || suppression.mode !== "replace" || !Number.isFinite(suppression.value))
   ) {
-    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "H2 has no confirmed safe vibratoEnv suppression for explicit pitchDelta", {
+    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "Explicit pitchDelta vibrato requires a confirmed safe vibratoEnv suppression value.", {
       semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
+      evidenceIds: ["H2"],
     });
   }
   return { suppression: needsExplicit ? { value: suppression.value } : null };

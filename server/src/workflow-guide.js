@@ -566,7 +566,7 @@ const RECIPES = [
       automationParameters: ["pitchDelta", "vibratoEnv"],
     }),
     preconditions: [
-      "Any vibrato request additionally needs a confirmed H2 host profile; otherwise sv_plan_pitch_gesture rejects before creating a mutation plan.",
+      "Any vibrato request additionally needs confirmed vibratoEnv and explicit pitchDelta interaction semantics; otherwise sv_plan_pitch_gesture rejects before creating a mutation plan.",
     ],
     steps: [
       {

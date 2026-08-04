@@ -324,7 +324,13 @@ test("both vibrato discriminators compile only after confirmed H2 evidence", asy
   };
   await assert.rejects(
     blockedPlanner.plan({ contextId: stored.contextId, occurrence: 0, gestures: [explicit] }),
-    (error) => error.code === "HOST_SEMANTIC_UNCONFIRMED",
+    (error) => {
+      assert.equal(error.code, "HOST_SEMANTIC_UNCONFIRMED");
+      assert.doesNotMatch(error.message, /\bH2\b/);
+      assert.match(error.message, /vibratoEnv and explicit pitchDelta/);
+      assert.deepEqual(error.details.evidenceIds, ["H2"]);
+      return true;
+    },
   );
 
   const fixture = createFixture({ hostProfile: confirmedVibratoProfile() });

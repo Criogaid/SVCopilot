@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
 import { StdioClientTransport } from "../server/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
 import { facadeForTool, operationNameForTool } from "../server/src/operation-catalog.js";
+import { terminologyDictionary } from "../server/src/terminology.js";
 import {
   TIME_AXIS_MINIMUM_SAMPLES,
 } from "./lib/time-axis-evidence.mjs";
@@ -48,6 +49,7 @@ async function main(args = process.argv.slice(2)) {
       ok: true,
       output: options.output,
       scenario: report.scenario,
+      terms: terminologyDictionary([report.scenario]),
       sampleCount: report.summary.sampleCount,
       summary: report.summary,
       readOnly: true,

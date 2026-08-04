@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { blickAtSeconds, secondsAtBlick } from "../server/src/musical-time.js";
+import { terminologyCatalog, terminologyEntry } from "../server/src/terminology.js";
 import {
   createTimeAxisProbePlan,
   evaluateTimeAxisProbe,
@@ -165,4 +166,14 @@ test("TimeAxis evidence rejects stale summaries and unknown fields", () => {
     () => validateTimeAxisProbeReport(extra),
     (error) => error.code === "INVALID_TIME_AXIS_EVIDENCE" && /unknown field/.test(error.message)
   );
+});
+
+test("time-axis scenario codes have plain-language terminology", () => {
+  const term = terminologyEntry("tempo_step");
+  assert.equal(term.title, "Single tempo change");
+  assert.match(term.description, /Exactly one BPM change/);
+  const catalog = terminologyCatalog();
+  for (const scenario of ["constant", "tempo_step", "dense_tempo"]) {
+    assert.ok(catalog.terms[scenario]);
+  }
 });

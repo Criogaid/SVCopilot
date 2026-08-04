@@ -73,7 +73,8 @@ SynthV，也不重写 profile。`--repeat` 最少为 2，单次全 `null` 观察
 - `NoteGroupReference` 的 onset/end 不能由 `timeOffset + 首尾音符` 推导；reference 可有独立
   裁剪或留白。
 - pending computed pitch 以请求长度的全 `null` 数组表示。
-- 600 个 constant / tempo-step / dense-tempo 样本的 Node/宿主秒轴最大偏差为
+- 600 个 constant（无 BPM 变化）/ tempo-step（范围内恰好一次 BPM 变化）/
+  dense-tempo（范围内至少两次 BPM 变化）样本的 Node/宿主秒轴最大偏差为
   `1.4210854715202004e-14` 秒，因此不需要 T03 批量换算 opcode。
 - Automation 没有公开 interpolation setter；当前宿主的 PitchControl `getValueAt` 证据为
   13 样本 piecewise-linear。
