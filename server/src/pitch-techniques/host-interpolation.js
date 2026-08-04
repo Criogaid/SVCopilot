@@ -440,7 +440,9 @@ async function readFiniteValue(readValue, blick, phase) {
 }
 
 function quantizeFingerprintValue(value) {
-  const quantized = Math.round(value / BASELINE_FINGERPRINT_QUANTUM_CENT)
+  // Automation.get() 以 float32 返回；先对齐宿主精度，避免微差跨过 fingerprint 舍入边界。
+  const hostValue = Math.fround(value);
+  const quantized = Math.round(hostValue / BASELINE_FINGERPRINT_QUANTUM_CENT)
     * BASELINE_FINGERPRINT_QUANTUM_CENT;
   return quantized === 0 ? 0 : quantized;
 }

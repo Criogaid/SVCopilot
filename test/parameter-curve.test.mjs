@@ -661,6 +661,25 @@ test("sealed pitchDelta interpolation preflights baseline evidence and verifies 
   );
 });
 
+test("baseline fingerprints normalize predicted interpolation to host float32 precision", () => {
+  const interpolationEvidence = {
+    method: "linear",
+    source: "host_getInterpolationMethod",
+    capturedAtContextId: "ctx_float32_boundary",
+    resolvedParameter: "pitchDelta",
+  };
+  const predicted = [{ blick: 57_065_400_000, value: 80.51849937438965 }];
+  const observed = predicted.map((sample) => ({
+    ...sample,
+    value: Math.fround(sample.value),
+  }));
+
+  assert.equal(
+    createHostInterpolationBaselineFingerprint({ interpolationEvidence, samples: predicted }),
+    createHostInterpolationBaselineFingerprint({ interpolationEvidence, samples: observed }),
+  );
+});
+
 test("sealed pitchDelta interpolation failure rolls back or reports rollback failure", async () => {
   const ignoredSetter = configurePitchDelta(createCurveModel());
   ignoredSetter.ignoreRemove = true;
