@@ -106,6 +106,110 @@
         "status": "pending_human",
         "perception": "human_only"
       }
+    },
+    {
+      "id": "mvp-05-explicit-pitch-delta-vibrato",
+      "status": "in_progress",
+      "capturedAt": "2026-08-04T05:42:11.4351697-03:00",
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "computedPitch": {
+            "requestedFrames": 384,
+            "finiteFrames": 363,
+            "nullFrames": 21
+          },
+          "baselinePoints": {
+            "pitchDelta": 26,
+            "vibratoEnv": 0
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "curveCount": 2,
+          "curves": [
+            {
+              "parameter": "pitchDelta",
+              "pointCount": 102
+            },
+            {
+              "parameter": "vibratoEnv",
+              "pointCount": 94,
+              "mode": "replace",
+              "value": 0
+            }
+          ]
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "beforePointCounts": {
+            "pitchDelta": 2,
+            "vibratoEnv": 0
+          }
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "hostWriteMs": 611,
+          "hostVerificationMs": 467
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "stablePollsRequested": 2,
+          "attempts": 2,
+          "elapsedMs": 104,
+          "requestedFrames": 384,
+          "returnedFrames": 363,
+          "coverage": 0.9453125
+        },
+        "compare": {
+          "status": "succeeded",
+          "frameCount": 384,
+          "validFrameCount": 363,
+          "coverage": 0.9453125,
+          "meanCent": 11.119206746419271,
+          "medianCent": 0.8296966552734375,
+          "maeCent": 30.348784601721224,
+          "rmseCent": 47.938862595600376,
+          "p95AbsCent": 104.86297607421875,
+          "maxAbsCent": 182.08885192871094
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "pitchDeltaPoints": {
+            "before": 102,
+            "after": 2
+          },
+          "vibratoEnvPoints": {
+            "before": 94,
+            "after": 0
+          },
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "restorationTokenMatched": true
+        }
+      },
+      "artifactLeaseCleanup": {
+        "status": "partial",
+        "explicitlyReleasedLeases": 3,
+        "sessionArtifactEntriesAfterRelease": 5,
+        "remainingDescriptorEnumeration": "unavailable",
+        "ttlMs": 1800000,
+        "completionGate": "Do not mark this scenario complete until all temporary artifact leases are explicitly released or their expiry is confirmed."
+      },
+      "transportMetrics": {
+        "status": "not_recorded_for_initial_scenario",
+        "reason": "This scenario precedes the T18 aggregate timing and byte capture pass."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
     }
   ],
   "pendingMvpScenarioIds": [

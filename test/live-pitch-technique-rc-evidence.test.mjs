@@ -27,6 +27,7 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.deepEqual(evidence.completedMvpScenarioIds, ["mvp-04-host-envelope-vibrato"]);
   assert.equal(evidence.pendingMvpScenarioIds.length, 13);
   assert.equal(evidence.p2b.status, "not_started");
+  assert.equal(evidence.scenarios.length, 2);
 
   const scenario = evidence.scenarios[0];
   assert.equal(scenario.id, "mvp-04-host-envelope-vibrato");
@@ -37,6 +38,13 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(scenario.workflow.commit.undoBoundaryCalls, 2);
   assert.equal(scenario.workflow.cleanup.restorationTokenMatched, true);
   assert.equal(scenario.humanAudition.status, "pending_human");
+  const partialScenario = evidence.scenarios[1];
+  assert.equal(partialScenario.id, "mvp-05-explicit-pitch-delta-vibrato");
+  assert.equal(partialScenario.status, "in_progress");
+  assert.equal(partialScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(partialScenario.workflow.cleanup.restorationTokenMatched, true);
+  assert.equal(partialScenario.artifactLeaseCleanup.status, "partial");
+  assert.ok(evidence.pendingMvpScenarioIds.includes(partialScenario.id));
   assert.equal(JSON.stringify(evidence).includes("contextId"), false);
   assert.equal(JSON.stringify(evidence).includes("groupUuid"), false);
 });
