@@ -255,6 +255,14 @@ test("recipes that consume range data declare what the capture must include", ()
     const capture = recipe.steps.find((step) => step.operation === "snapshot_range");
     assert.ok(capture.requiredInclude.includes("computedPitch"), `${id} needs computedPitch`);
   }
+
+  const pitch = musicWorkflowGuideRecipe("plan_and_commit_pitch", "0.8.0").recipe;
+  const pitchCapture = pitch.steps.find((step) => step.operation === "snapshot_range");
+  assert.deepEqual(
+    pitchCapture.arguments.arguments.automationParameters,
+    ["pitchDelta", "vibratoEnv"],
+    "the pitch recipe must capture both Automation parameters needed by vibrato",
+  );
 });
 
 test("the diagnosis recipe leads with the composite analyzer, not four separate calls", () => {

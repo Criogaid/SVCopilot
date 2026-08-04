@@ -60,7 +60,23 @@ const CALLS = [
       harmony: { interval: "third_above" },
     },
   ],
-  ["sv_plan", "plan_pitch_gesture", { contextId: MISSING_CONTEXT, gestures: [] }],
+  [
+    "sv_plan",
+    "plan_pitch_gesture",
+    {
+      contextId: MISSING_CONTEXT,
+      occurrence: 0,
+      gestures: [
+        {
+          type: "transition",
+          from: 0,
+          to: 1,
+          width: { seconds: 0.2 },
+          curve: { family: "linear" },
+        },
+      ],
+    },
+  ],
   [
     "sv_edit",
     "patch_notes",

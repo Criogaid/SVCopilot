@@ -62,12 +62,23 @@ export async function readAutomationSnapshot(
       `Automation ${resolved.typeName} exceeds the ${maxPoints}-point capture safety limit`
     );
   }
+  const supportPoints = await readAutomationSupportPoints(
+    capture,
+    resolved.automation,
+    localRange,
+    resolved.interpolationMethod,
+  );
   return {
     requestedParameter,
     resolvedParameter: resolved.typeName,
     definition: resolved.definition,
     interpolationMethod: resolved.interpolationMethod,
     points: read.points.map((point) => ({
+      localBlick: point.blick,
+      absoluteBlick: point.blick + target.groupTimeOffsetBlick,
+      value: point.value,
+    })),
+    supportPoints: supportPoints.map((point) => ({
       localBlick: point.blick,
       absoluteBlick: point.blick + target.groupTimeOffsetBlick,
       value: point.value,
@@ -1538,6 +1549,26 @@ export async function verifyCurve(
     capture,
     automation
   );
+}
+
+async function readAutomationSupportPoints(capture, automation, range, interpolationMethod) {
+  const supportCount = String(interpolationMethod).toLowerCase() === "cubic" ? 2 : 1;
+  try {
+    const raw = await capture.call(automation, "getAllPoints", [], {
+      resultFormat: "typed-v2",
+      resultShape: "array",
+    });
+    const allPoints = normalizePoints(raw);
+    return [
+      ...allPoints.filter((point) => point.blick < range.fromLocal).slice(-supportCount),
+      ...allPoints.filter((point) => point.blick > range.toLocal).slice(0, supportCount),
+    ];
+  } catch (error) {
+    // 大曲线的主区间读取已有分块回退；支撑点缺失由 planner 的 baseline 证据门禁如实拒绝，
+    // 不能在这里猜测范围外插值值。
+    if (error?.code === "FRAME_TOO_LARGE") return [];
+    throw error;
+  }
 }
 
 async function verifyHostInterpolationAfterWrite(

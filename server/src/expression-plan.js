@@ -2,7 +2,6 @@ import { canonicalHashHex } from "./canonical-json.js";
 import { artifactReference, planReference } from "./artifact-store.js";
 import { buildPlanArtifact } from "./plan-reference.js";
 
-import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
 import { COMPACT_MAX_BYTES } from "./response-budget.js";
 import {
@@ -19,7 +18,6 @@ import { resolveMutationScope } from "./scope-source.js";
 import {
   assertExpressionGestureShapes,
   expandExpressionGestures,
-  normalizeExpressionDefaults,
 } from "./expression-gestures.js";
 
 // sv_plan_expression：dry-run 演唱表现规划器（M-03 / §6.1 演唱表现手法生成器）。
@@ -30,61 +28,50 @@ import {
 //   sv_patch_parameter_curves 事务核（预检/Undo/读回/补偿全部复用，本模块零 mutation）。
 // - 确定性：同一 context 数据 + 同一请求 → 逐字节相同的 plan（planId 为内容哈希）；
 //   意图映射是显式小词表 + 常量模板，全部标 heuristic，不伪装成听感预测。
-// - 单位显式：每条 operation 携带 writeSurface 与 unit（官方 getDefinition 语义：
-//   pitchDelta=cents、loudness=dB、vibratoEnv=0..2 倍率、tension/breathiness=±1）。
-//   SynthV 的 pitch 写面单位互不相同（automation=cents，PitchControl=半音），P0 只
-//   规划 automation 写面并显式声明，杜绝 +25 的量纲歧义。
+// - 单位显式：每条 operation 携带 writeSurface 与 unit。这个 planner 只处理
+//   loudness/tension/breathiness/voicing/gender；音高技法由 sv_plan_pitch_gesture 统一处理。
 // - 诚实边界：规划基于快照指纹，宿主并发漂移由 apply 阶段的 UUID/live 校验兜底；
 //   replace 模式会覆盖表现手法作用区间内的既有控制点，规划器不读宿主、无法核对，review
 //   中显式声明 existingPointsChecked:false；能否"更好听"永远是 human_only。
 export const EXPRESSION_PLAN_DEFAULTS = Object.freeze({
   constraints: Object.freeze({
-    maxAbsPitchDeltaCents: 200,
     maxAbsLoudnessDeltaDb: 6,
     maxAbsTensionDelta: 0.5,
     maxAbsBreathinessDelta: 0.5,
     maxTotalPoints: 400,
-    avoidExcessiveVibrato: true,
   }),
   sampling: Object.freeze({
     pointsPerQuarter: 8,
-    vibratoPointsPerCycle: 8,
   }),
   intent: Object.freeze({
     phraseGapQuarter: 1,
-    sustainQuarter: 2,
-    minVibratoQuarter: 1.5,
   }),
 });
 
 // 官方 Automation getDefinition 的单位/值域（写入前的最终 clamp 边界）。
 const PARAMETER_INFO = Object.freeze({
-  pitchDelta: Object.freeze({ unit: "cents", range: Object.freeze([-1200, 1200]), baseline: 0 }),
-  vibratoEnv: Object.freeze({ unit: "x", range: Object.freeze([0, 2]), baseline: 1 }),
   loudness: Object.freeze({ unit: "dB", range: Object.freeze([-48, 12]), baseline: 0 }),
   tension: Object.freeze({ unit: "normalized", range: Object.freeze([-1, 1]), baseline: 0 }),
   breathiness: Object.freeze({ unit: "normalized", range: Object.freeze([-1, 1]), baseline: 0 }),
+  voicing: Object.freeze({ unit: "normalized", range: Object.freeze([-1, 1]), baseline: 0 }),
+  gender: Object.freeze({ unit: "normalized", range: Object.freeze([-1, 1]), baseline: 0 }),
 });
-const HAIRPIN_PARAMETERS = Object.freeze(["loudness", "tension", "breathiness"]);
-const GESTURE_TYPES = Object.freeze(["scoop", "fall", "portamento", "vibrato", "hairpin"]);
 const INTENT_GENRES = Object.freeze(["jpop"]);
 const INTENT_SECTIONS = Object.freeze(["verse", "prechorus", "chorus", "bridge"]);
 const INTENT_EMOTIONS = Object.freeze(["cool_anger", "tender"]);
 const INTENT_TECHNIQUES = Object.freeze(["controlled_belt", "soft_airy", "light_rasp"]);
-// section-aware presets（M-04）：可审阅的常量展开，不是黑箱按钮。每个 preset 只是现有
-// intent 词表字段 + 约束默认值的组合（spoken_rap_transition 额外播种 vibratoEnv 压平
-// 表现手法）；展开结果逐字段回显在 presetExpansion 中，用户显式传的同名 intent 字段覆盖
-// preset 值并发警告，用户 constraints 永远优先于 preset 约束默认值。
+// section-aware presets（M-04）：可审阅的常量展开，不是黑箱按钮。音高意图只给出
+// sv_plan_pitch_gesture 指引，不在这里生成第二套音高操作。
 export const INTENT_PRESETS = Object.freeze({
   jpop_cool: Object.freeze({
     intent: Object.freeze({ genre: "jpop", emotion: "cool_anger" }),
     constraintDefaults: Object.freeze({}),
-    notes: "jpop onset scoops with the cool_anger color modifiers",
+    notes: "jpop pitch ornaments require a separate plan_pitch_gesture request; this preset only shapes color and dynamics",
   }),
   jpop_belt: Object.freeze({
     intent: Object.freeze({ genre: "jpop", technique: Object.freeze(["controlled_belt"]) }),
     constraintDefaults: Object.freeze({}),
-    notes: "jpop onset scoops plus controlled-belt dynamic/tension arcs and sustained vibrato",
+    notes: "controlled-belt dynamics and tension arcs; plan pitch ornaments or vibrato separately with plan_pitch_gesture",
   }),
   controlled_anger: Object.freeze({
     intent: Object.freeze({ emotion: "cool_anger", technique: Object.freeze(["controlled_belt"]) }),
@@ -98,10 +85,10 @@ export const INTENT_PRESETS = Object.freeze({
   }),
   spoken_rap_transition: Object.freeze({
     intent: Object.freeze({}),
-    constraintDefaults: Object.freeze({ maxAbsPitchDeltaCents: 40 }),
-    seeds: "flatten_vibrato",
+    constraintDefaults: Object.freeze({}),
+    pitchTechniqueGuidance: true,
     notes:
-      "flattens the host's natural vibrato on sustains via vibratoEnv 0.2 (its presence is unobservable) and narrows the pitchDelta budget for a speech-like delivery; combine with explicit gestures for the transition itself",
+      "does not modify pitch or host vibrato; use plan_pitch_gesture for any transition, transient, or vibrato decision",
   }),
 });
 const MAX_GESTURES = 32;
@@ -228,7 +215,6 @@ function buildGestures(loaded, input, warnings) {
   // 只见 canonical gesture，不再关心外部写法（§3.4 / §3.5）。
   const canonical = expandExpressionGestures({
     gestures: input.gestures,
-    defaults: input.defaults,
     scope: loaded.scope,
   });
   const explicit = canonical.map((gesture, index) =>
@@ -262,7 +248,10 @@ function buildGestures(loaded, input, warnings) {
       input.gestures.length === 0 &&
       input.intent &&
       loaded.semanticEvents.every((event) => !event.melodicEligible);
-    if (allIntentTargetsExcluded) return [];
+    const delegatedToPitchPlanner = warnings.some(
+      (warning) => warning.code === "PITCH_TECHNIQUE_DELEGATED",
+    );
+    if (allIntentTargetsExcluded || delegatedToPitchPlanner) return [];
     throw codedError(
       "EMPTY_PLAN",
       "no gestures to plan: provide explicit gestures, or an intent that matches the phrase structure"
@@ -273,265 +262,10 @@ function buildGestures(loaded, input, warnings) {
 
 // 把一个显式或由意图派生的表现手法请求绑定到音符跨度，生成连续求值函数与采样位置。
 function instantiateGesture(gesture, loaded, input, meta) {
-  switch (gesture.type) {
-    case "scoop":
-      return instantiateScoop(gesture, loaded, input, meta);
-    case "fall":
-      return instantiateFall(gesture, loaded, input, meta);
-    case "portamento":
-      return instantiatePortamento(gesture, loaded, input, meta);
-    case "vibrato":
-      return instantiateVibrato(gesture, loaded, input, meta);
-    case "hairpin":
-      return instantiateHairpin(gesture, loaded, input, meta);
-    default:
-      throw codedError("INVALID_ARGUMENTS", `unknown gesture type: ${String(gesture.type)}`);
+  if (gesture.type !== "hairpin") {
+    throw codedError("INVALID_ARGUMENTS", "plan_expression supports hairpin only");
   }
-}
-
-function instantiateScoop(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
-  const depth = gesture.depthCents ?? 30;
-  const power = gesture.shapePower ?? 2;
-  const lengthBlick = Math.min(
-    quartersToBlick(gesture.lengthQuarter ?? 0.2, loaded.quarterBlick),
-    note.durationBlick
-  );
-  const from = note.absOnsetBlick;
-  const to = note.absOnsetBlick + lengthBlick;
-  return {
-    ...meta,
-    type: "scoop",
-    parameter: "pitchDelta",
-    merge: "delta",
-    notes: [note.fingerprint],
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: { depthCents: depth, lengthQuarter: blickToQuarters(lengthBlick, loaded.quarterBlick), shapePower: power },
-    evaluate: (blick) => {
-      const u = clamp01((blick - from) / Math.max(1, to - from));
-      return -depth * (1 - u) ** power;
-    },
-    samplePositions: () =>
-      linearPositions(from, to, sampleCount(lengthBlick, loaded.quarterBlick, input.sampling)),
-  };
-}
-
-function instantiateFall(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
-  const depth = gesture.depthCents ?? 40;
-  const power = gesture.shapePower ?? 2;
-  const lengthBlick = Math.min(
-    quartersToBlick(gesture.lengthQuarter ?? 0.3, loaded.quarterBlick),
-    note.durationBlick
-  );
-  const from = note.absEndBlick - lengthBlick;
-  const to = note.absEndBlick;
-  return {
-    ...meta,
-    type: "fall",
-    parameter: "pitchDelta",
-    merge: "delta",
-    notes: [note.fingerprint],
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: { depthCents: depth, lengthQuarter: blickToQuarters(lengthBlick, loaded.quarterBlick), shapePower: power },
-    evaluate: (blick) => {
-      const u = clamp01((blick - from) / Math.max(1, to - from));
-      return -depth * u ** power;
-    },
-    samplePositions: () =>
-      linearPositions(from, to, sampleCount(lengthBlick, loaded.quarterBlick, input.sampling)),
-  };
-}
-
-// 对称滑音：前音末端向目标弯 +D/2，后音起始从 −D/2 回正——感知音高连续，
-// 而 pitchDelta 在边界处的跳变恰好抵消音符本身的跳变。
-function instantiatePortamento(gesture, loaded, input, meta) {
-  const fromNote = requireNote(loaded, gesture.fromNote, `${meta.gestureId}.fromNote`);
-  const toNote = requireNote(loaded, gesture.toNote, `${meta.gestureId}.toNote`);
-  if (toNote.absOnsetBlick !== fromNote.absEndBlick) {
-    throw codedError(
-      "PORTAMENTO_NOT_ADJACENT",
-      `${meta.gestureId}: portamento requires adjacent notes without a rest between them`
-    );
-  }
-  const intervalCents = (toNote.targetSemitone - fromNote.targetSemitone) * 100;
-  if (intervalCents === 0) {
-    throw codedError(
-      "INVALID_ARGUMENTS",
-      `${meta.gestureId}: portamento between equal pitches has no effect`
-    );
-  }
-  const requestedLength = quartersToBlick(gesture.lengthQuarter ?? 0.15, loaded.quarterBlick);
-  const lenBefore = Math.min(requestedLength, Math.floor(fromNote.durationBlick / 2));
-  const lenAfter = Math.min(requestedLength, Math.floor(toNote.durationBlick / 2));
-  const boundary = toNote.absOnsetBlick;
-  const maxCents = gesture.maxCents ?? input.constraints.maxAbsPitchDeltaCents;
-  const halfRaw = intervalCents / 2;
-  const half = Math.sign(halfRaw) * Math.min(Math.abs(halfRaw), maxCents);
-  const clampedGlide = Math.abs(half) < Math.abs(halfRaw);
-  return {
-    ...meta,
-    type: "portamento",
-    parameter: "pitchDelta",
-    merge: "delta",
-    notes: [fromNote.fingerprint, toNote.fingerprint],
-    spanFromBlick: boundary - lenBefore,
-    spanToBlick: boundary + lenAfter,
-    params: {
-      intervalCents,
-      glideHalfCents: half,
-      clampedGlide,
-      lengthQuarter: blickToQuarters(requestedLength, loaded.quarterBlick),
-    },
-    ...(clampedGlide
-      ? { reasons: [...meta.reasons, "glide depth clamped by maxAbsPitchDeltaCents"] }
-      : {}),
-    evaluate: (blick) => {
-      if (blick < boundary) {
-        const u = clamp01((blick - (boundary - lenBefore)) / Math.max(1, lenBefore));
-        return half * smoothstep(u);
-      }
-      const u = clamp01((blick - boundary) / Math.max(1, lenAfter));
-      return -half * (1 - smoothstep(u));
-    },
-    samplePositions: () => {
-      const perSide = Math.max(
-        3,
-        sampleCount(requestedLength, loaded.quarterBlick, input.sampling)
-      );
-      const before = linearPositions(boundary - lenBefore, boundary - 1, perSide);
-      const after = linearPositions(boundary, boundary + lenAfter, perSide);
-      return [...before, ...after];
-    },
-  };
-}
-
-function instantiateVibrato(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
-  const surface = gesture.surface ?? "pitchDelta";
-  const quarter = loaded.quarterBlick;
-  if (
-    input.constraints.avoidExcessiveVibrato &&
-    note.durationBlick < quartersToBlick(input.intentDefaults.minVibratoQuarter, quarter)
-  ) {
-    throw codedError(
-      "CONSTRAINT_VIOLATION",
-      `${meta.gestureId}: note is shorter than ${input.intentDefaults.minVibratoQuarter} quarters; disable avoidExcessiveVibrato to force vibrato`
-    );
-  }
-  const delayBlick = quartersToBlick(gesture.onsetDelayQuarter ?? 0.3, quarter);
-  const rampBlick = quartersToBlick(gesture.rampQuarter ?? 0.3, quarter);
-  const from = note.absOnsetBlick + Math.min(delayBlick, note.durationBlick);
-  const to = note.absEndBlick;
-  const startSeconds = secondsAtBlick(loaded.tempoMarks, quarter, from);
-  const endSeconds = secondsAtBlick(loaded.tempoMarks, quarter, to);
-  if (startSeconds === null || endSeconds === null) {
-    throw codedError(
-      "TEMPO_MAP_MISSING",
-      `${meta.gestureId}: vibrato needs a usable tempo map to express rateHz`
-    );
-  }
-  const rateHz = gesture.rateHz ?? 5.5;
-  const rampSeconds = Math.max(0, secondsAtBlick(loaded.tempoMarks, quarter, from + rampBlick) - startSeconds);
-  if (surface === "vibratoEnv") {
-    const level = gesture.level ?? 1;
-    return {
-      ...meta,
-      type: "vibrato",
-      parameter: "vibratoEnv",
-      merge: "absolute",
-      notes: [note.fingerprint],
-      spanFromBlick: note.absOnsetBlick,
-      spanToBlick: to,
-      params: {
-        surface,
-        level,
-        onsetDelayQuarter: blickToQuarters(from - note.absOnsetBlick, quarter),
-        rampQuarter: blickToQuarters(rampBlick, quarter),
-      },
-      // 诚实边界：宿主是否存在 natural vibrato 不可观测（Note 颤音属性 version-1-only），
-      // 包络只在其存在时生效。
-      surfaceWarning: {
-        code: "NATURAL_VIBRATO_UNOBSERVABLE",
-        message:
-          "vibratoEnv scales the host's own vibrato, whose presence/depth is unobservable through the official API; audition to confirm the effect.",
-      },
-      evaluate: (blick) => {
-        if (blick < from) return 0;
-        const u = clamp01((blick - from) / Math.max(1, rampBlick));
-        return level * smoothstep(u);
-      },
-      samplePositions: () => {
-        const rampEnd = Math.min(from + rampBlick, to);
-        return [
-          note.absOnsetBlick,
-          ...linearPositions(from, rampEnd, Math.max(3, sampleCount(rampBlick, quarter, input.sampling))),
-          to,
-        ];
-      },
-    };
-  }
-  const depth = gesture.depthCents ?? 30;
-  const fadeBlick = quartersToBlick(gesture.fadeOutQuarter ?? 0.2, quarter);
-  const fadeSeconds = Math.max(
-    0,
-    endSeconds - secondsAtBlick(loaded.tempoMarks, quarter, Math.max(from, to - fadeBlick))
-  );
-  const spanSeconds = endSeconds - startSeconds;
-  const minSpanSeconds = Math.max(2 / rateHz, rampSeconds + fadeSeconds);
-  if (spanSeconds < minSpanSeconds) {
-    throw codedError(
-      "VIBRATO_SPAN_TOO_SHORT",
-      `${meta.gestureId}: the note sustain after onsetDelay is too short for ${rateHz} Hz vibrato (needs >= ${minSpanSeconds.toFixed(3)} s)`
-    );
-  }
-  const envelope = (seconds) => {
-    const sinceStart = seconds - startSeconds;
-    const untilEnd = endSeconds - seconds;
-    let value = 1;
-    if (rampSeconds > 0) value *= smoothstep(clamp01(sinceStart / rampSeconds));
-    if (fadeSeconds > 0) value *= smoothstep(clamp01(untilEnd / fadeSeconds));
-    return value;
-  };
-  return {
-    ...meta,
-    type: "vibrato",
-    parameter: "pitchDelta",
-    merge: "delta",
-    notes: [note.fingerprint],
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: {
-      surface,
-      depthCents: depth,
-      rateHz,
-      onsetDelayQuarter: blickToQuarters(from - note.absOnsetBlick, quarter),
-      rampQuarter: blickToQuarters(rampBlick, quarter),
-      fadeOutQuarter: blickToQuarters(fadeBlick, quarter),
-    },
-    surfaceWarning: {
-      code: "NATURAL_VIBRATO_UNOBSERVABLE",
-      message:
-        "explicit pitchDelta vibrato may stack with the host's own (unobservable) natural vibrato; audition and check with sv_compare_computed_pitch.",
-    },
-    evaluate: (blick) => {
-      const seconds = secondsAtBlick(loaded.tempoMarks, quarter, blick);
-      if (seconds === null || seconds < startSeconds || seconds > endSeconds) return 0;
-      return depth * envelope(seconds) * Math.sin(2 * Math.PI * rateHz * (seconds - startSeconds));
-    },
-    samplePositions: () => {
-      const step = 1 / (rateHz * input.sampling.vibratoPointsPerCycle);
-      const positions = [];
-      for (let seconds = startSeconds; seconds <= endSeconds; seconds += step) {
-        const blick = blickAtSeconds(loaded.tempoMarks, quarter, seconds);
-        if (blick !== null) positions.push(Math.round(blick));
-      }
-      positions.push(to);
-      return positions;
-    },
-  };
+  return instantiateHairpin(gesture, loaded, input, meta);
 }
 
 function instantiateHairpin(gesture, loaded, input, meta) {
@@ -608,7 +342,6 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
     });
   }
   const phrases = segmentPhrases(melodicNotes, quartersToBlick(input.intentDefaults.phraseGapQuarter, quarter));
-  const sustainBlick = quartersToBlick(input.intentDefaults.sustainQuarter, quarter);
   const candidates = [];
   let sequence = 0;
   const push = (source, confidenceScore, reasons, spec) => {
@@ -616,20 +349,22 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   };
 
   if (intent.genre === "jpop") {
-    for (const phrase of phrases) {
-      push(
-        "intent:genre:jpop",
-        0.55,
-        [`jpop onset shaping on post-rest entrance "${phrase.notes[0].lyrics}"`],
-        { type: "scoop", note: phrase.notes[0].fingerprint, depthCents: 30, lengthQuarter: 0.15 }
-      );
-    }
+    appendOnce(warnings, {
+      code: "PITCH_TECHNIQUE_DELEGATED",
+      message:
+        "jpop onset ornaments are pitch techniques; plan them separately with sv_plan_pitch_gesture.",
+      tool: "sv_plan_pitch_gesture",
+    });
   }
   for (const technique of intent.technique ?? []) {
     if (technique === "controlled_belt") {
+      appendOnce(warnings, {
+        code: "PITCH_TECHNIQUE_DELEGATED",
+        message:
+          "controlled_belt vibrato is a pitch technique; plan it separately with sv_plan_pitch_gesture.",
+        tool: "sv_plan_pitch_gesture",
+      });
       for (const phrase of phrases) {
-        const sustains = phrase.notes.filter((note) => note.durationBlick >= sustainBlick);
-        if (sustains.length === 0) continue;
         push(
           "intent:technique:controlled_belt",
           0.6,
@@ -656,21 +391,6 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
             peakPosition: 0.65,
           }
         );
-        for (const sustain of sustains) {
-          push(
-            "intent:technique:controlled_belt",
-            0.5,
-            [`controlled vibrato on sustained "${sustain.lyrics}"`],
-            {
-              type: "vibrato",
-              note: sustain.fingerprint,
-              depthCents: 30,
-              rateHz: 5.5,
-              onsetDelayQuarter: 0.4,
-              rampQuarter: 0.4,
-            }
-          );
-        }
       }
     } else if (technique === "soft_airy") {
       for (const phrase of phrases) {
@@ -726,26 +446,13 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
   }
 
   applyIntentModifiers(candidates, intent);
-  if (intent.presetSeeds === "flatten_vibrato") {
-    // spoken_rap_transition：对每个长音播种 vibratoEnv 压平包络（绝对值 0.2 ≈ 关掉颤音）。
-    // natural vibrato 是否存在不可观测——包络只在其存在时生效，低置信如实声明。
-    for (const phrase of phrases) {
-      for (const sustain of phrase.notes.filter((note) => note.durationBlick >= sustainBlick)) {
-        push(
-          `intent:preset:${intent.presetName}`,
-          0.4,
-          [`flatten host vibrato on sustained "${sustain.lyrics}" for a speech-like delivery`],
-          {
-            type: "vibrato",
-            note: sustain.fingerprint,
-            surface: "vibratoEnv",
-            level: 0.2,
-            onsetDelayQuarter: 0,
-            rampQuarter: 0.1,
-          }
-        );
-      }
-    }
+  if (intent.pitchTechniqueGuidance) {
+    appendOnce(warnings, {
+      code: "PITCH_TECHNIQUE_DELEGATED",
+      message:
+        "spoken_rap_transition does not write pitch curves; plan any pitch or vibrato change with sv_plan_pitch_gesture.",
+      tool: "sv_plan_pitch_gesture",
+    });
   }
   if (candidates.length === 0 && (intent.section || intent.emotion)) {
     // genre/technique 未产出任何候选，但用户单独给了 section/emotion：直接播种基线表现方案兜底，
@@ -760,7 +467,7 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
     const superseded = explicitGestures.some(
       (gesture) =>
         gesture.type === candidate.spec.type &&
-        gesture.parameter === (candidate.spec.parameter ?? gestureDefaultParameter(candidate.spec.type)) &&
+        gesture.parameter === candidate.spec.parameter &&
         gesture.spanFromBlick <= bounds.to &&
         bounds.from <= gesture.spanToBlick
     );
@@ -795,7 +502,7 @@ function deriveIntentGestures(loaded, input, explicitGestures, warnings) {
       }
     }
   }
-  if (derived.length === 0) {
+  if (derived.length === 0 && !warnings.some((warning) => warning.code === "PITCH_TECHNIQUE_DELEGATED")) {
     appendOnce(warnings, {
       code: "INTENT_NO_CANDIDATES",
       message:
@@ -810,11 +517,6 @@ function applyIntentModifiers(candidates, intent) {
   for (const candidate of candidates) {
     const spec = candidate.spec;
     if (intent.emotion === "cool_anger") {
-      if (spec.type === "vibrato" && spec.depthCents !== undefined) {
-        const capped = Math.min(spec.depthCents, 30);
-        if (capped !== spec.depthCents) candidate.reasons.push("cool_anger: vibrato depth capped to 30 cents");
-        spec.depthCents = capped;
-      }
       if (spec.type === "hairpin" && spec.parameter === "tension") {
         spec.amount += 0.05;
         candidate.reasons.push("cool_anger: tension raised by 0.05");
@@ -823,15 +525,7 @@ function applyIntentModifiers(candidates, intent) {
         spec.amount -= 0.05;
         candidate.reasons.push("cool_anger: breathiness reduced by 0.05");
       }
-      if (spec.type === "scoop") {
-        spec.depthCents += 5;
-        candidate.reasons.push("cool_anger: slightly deeper onset scoop");
-      }
     } else if (intent.emotion === "tender") {
-      if (spec.type === "vibrato" && spec.depthCents !== undefined) {
-        spec.depthCents = Math.min(60, spec.depthCents + 5);
-        candidate.reasons.push("tender: slightly deeper vibrato");
-      }
       if (spec.type === "hairpin" && spec.parameter === "loudness") {
         spec.amount -= 1;
         candidate.reasons.push("tender: softer dynamics");
@@ -839,10 +533,6 @@ function applyIntentModifiers(candidates, intent) {
       if (spec.type === "hairpin" && spec.parameter === "breathiness") {
         spec.amount += 0.05;
         candidate.reasons.push("tender: more breath");
-      }
-      if (spec.type === "scoop") {
-        spec.depthCents = Math.max(10, spec.depthCents - 10);
-        candidate.reasons.push("tender: gentler onset scoop");
       }
     }
     if (["chorus", "prechorus"].includes(intent.section) && spec.type === "hairpin" && spec.parameter === "loudness") {
@@ -920,10 +610,6 @@ function seedIntentBaselines(intent, phrases, push) {
   }
 }
 
-function gestureDefaultParameter(type) {
-  return type === "hairpin" ? "loudness" : type === "vibrato" ? "pitchDelta" : "pitchDelta";
-}
-
 function candidateSpanBounds(spec, loaded) {
   // intent 派生的 spec 与展开层输出同形：身份是 fingerprint 引用。
   const references = [spec.note, spec.fromNote, spec.toNote].filter(Boolean);
@@ -982,13 +668,6 @@ function compileOperations(gestures, loaded, input, warnings) {
     const parameterGestures = byParameter.get(parameter);
     const info = PARAMETER_INFO[parameter];
     for (const cluster of clusterBySpanOverlap(parameterGestures)) {
-      const absoluteGestures = cluster.filter((gesture) => gesture.merge === "absolute");
-      if (absoluteGestures.length > 0 && cluster.length > 1) {
-        throw codedError(
-          "PLAN_CONFLICT",
-          `${parameter}: absolute-valued gestures (vibratoEnv) cannot overlap other gestures on the same parameter`
-        );
-      }
       operations.push(
         compileCluster(cluster, parameter, info, loaded, input, guardBlick, warnings)
       );
@@ -1062,19 +741,12 @@ function compileCluster(cluster, parameter, info, loaded, input, guardBlick, war
   }
   const sortedPositions = [...positions].sort((left, right) => left - right);
   const limit = constraintLimitFor(parameter, input.constraints);
-  const isAbsolute = cluster[0].merge === "absolute";
   let clampedCount = 0;
   const points = sortedPositions.map((blick) => {
-    let value;
-    if (isAbsolute) {
-      // absolute 表现手法（vibratoEnv）每簇仅一项（PLAN_CONFLICT 已挡重叠），值即包络本身。
-      value = cluster[0].evaluate(blick);
-    } else {
-      value = 0;
-      for (const gesture of cluster) {
-        if (blick >= gesture.spanFromBlick && blick <= gesture.spanToBlick) {
-          value += gesture.evaluate(blick);
-        }
+    let value = 0;
+    for (const gesture of cluster) {
+      if (blick >= gesture.spanFromBlick && blick <= gesture.spanToBlick) {
+        value += gesture.evaluate(blick);
       }
     }
     const clamped = clampValue(value, info, limit);
@@ -1134,8 +806,6 @@ function compileCluster(cluster, parameter, info, loaded, input, guardBlick, war
 
 function constraintLimitFor(parameter, constraints) {
   switch (parameter) {
-    case "pitchDelta":
-      return constraints.maxAbsPitchDeltaCents;
     case "loudness":
       return constraints.maxAbsLoudnessDeltaDb;
     case "tension":
@@ -1143,7 +813,7 @@ function constraintLimitFor(parameter, constraints) {
     case "breathiness":
       return constraints.maxAbsBreathinessDelta;
     default:
-      return null; // vibratoEnv 只受宿主 0..2 值域约束
+      return null;
   }
 }
 
@@ -1285,7 +955,7 @@ function buildPlanResponse(loaded, input, gestures, compiled, warnings, timings,
         "Apply through apply.arguments (sv_patch_parameter_curves) with action dry_run first, then commit the same sealed plan as one transaction and one Undo step.",
         "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
       ]
-    : ["No melodic intent target remained after special-event filtering; no host write is needed."];
+    : ["This request produced no non-pitch expression operation; no host write is needed."];
   if (requiresSharedTargetConfirmation) {
     checklist.push(
       "The target NoteGroup is shared by multiple occurrences; commit requires target.allowSharedTargetMutation:true and affects every occurrence."
@@ -1440,7 +1110,7 @@ function normalizePlanRequest(request) {
   if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
-    ["contextId", "occurrence", "defaults", "gestures", "intent", "constraints", "sampling"],
+    ["contextId", "occurrence", "gestures", "intent", "constraints", "sampling"],
     "request"
   );
   if (typeof request.contextId !== "string" || request.contextId.length === 0) {
@@ -1464,7 +1134,6 @@ function normalizePlanRequest(request) {
   // （scope 解析之后）才校验，一个拼错字段的请求会先收到 UNKNOWN_CONTEXT，
   // 于是模型去重新快照——而问题在它自己的请求里，重新快照多少次都不会变好。
   assertExpressionGestureShapes(gestures);
-  const defaults = normalizeExpressionDefaults(request.defaults);
   const { intent, presetExpansion } = normalizeIntent(request.intent);
   if (gestures.length === 0 && !intent) {
     throw codedError("INVALID_ARGUMENTS", "provide gestures, intent, or both");
@@ -1477,7 +1146,6 @@ function normalizePlanRequest(request) {
   return {
     contextId: request.contextId,
     occurrence: request.occurrence,
-    defaults,
     gestures,
     intent,
     presetExpansion,
@@ -1548,13 +1216,17 @@ function normalizeIntent(value) {
     }
   }
   return {
-    intent: { ...merged, presetSeeds: preset.seeds ?? null, presetName: value.preset },
+    intent: {
+      ...merged,
+      pitchTechniqueGuidance: preset.pitchTechniqueGuidance === true,
+      presetName: value.preset,
+    },
     presetExpansion: {
       preset: value.preset,
       expandedFields,
       overriddenFields,
       constraintDefaults: preset.constraintDefaults,
-      ...(preset.seeds ? { seeds: preset.seeds } : {}),
+      ...(preset.pitchTechniqueGuidance ? { pitchTechniqueGuidance: true } : {}),
       notes: preset.notes,
     },
   };
@@ -1568,26 +1240,14 @@ function normalizeConstraints(value, presetDefaults = null) {
   assertKnownKeys(
     value,
     [
-      "maxAbsPitchDeltaCents",
       "maxAbsLoudnessDeltaDb",
       "maxAbsTensionDelta",
       "maxAbsBreathinessDelta",
       "maxTotalPoints",
-      "avoidExcessiveVibrato",
     ],
     "constraints"
   );
-  if (value.avoidExcessiveVibrato !== undefined && typeof value.avoidExcessiveVibrato !== "boolean") {
-    throw codedError("INVALID_ARGUMENTS", "constraints.avoidExcessiveVibrato must be a boolean");
-  }
   return {
-    maxAbsPitchDeltaCents: checkedNumber(
-      value.maxAbsPitchDeltaCents,
-      10,
-      1200,
-      defaults.maxAbsPitchDeltaCents,
-      "constraints.maxAbsPitchDeltaCents"
-    ),
     maxAbsLoudnessDeltaDb: checkedNumber(
       value.maxAbsLoudnessDeltaDb,
       0.5,
@@ -1616,7 +1276,6 @@ function normalizeConstraints(value, presetDefaults = null) {
       defaults.maxTotalPoints,
       "constraints.maxTotalPoints"
     ),
-    avoidExcessiveVibrato: value.avoidExcessiveVibrato ?? defaults.avoidExcessiveVibrato,
   };
 }
 
@@ -1624,7 +1283,7 @@ function normalizeSampling(value) {
   const defaults = EXPRESSION_PLAN_DEFAULTS.sampling;
   if (value === undefined) return { ...defaults };
   if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "sampling must be an object");
-  assertKnownKeys(value, ["pointsPerQuarter", "vibratoPointsPerCycle"], "sampling");
+  assertKnownKeys(value, ["pointsPerQuarter"], "sampling");
   return {
     pointsPerQuarter: checkedInteger(
       value.pointsPerQuarter,
@@ -1632,13 +1291,6 @@ function normalizeSampling(value) {
       32,
       defaults.pointsPerQuarter,
       "sampling.pointsPerQuarter"
-    ),
-    vibratoPointsPerCycle: checkedInteger(
-      value.vibratoPointsPerCycle,
-      4,
-      16,
-      defaults.vibratoPointsPerCycle,
-      "sampling.vibratoPointsPerCycle"
     ),
   };
 }

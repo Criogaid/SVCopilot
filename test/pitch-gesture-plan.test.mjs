@@ -2,393 +2,332 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ArtifactStore } from "../server/src/artifact-store.js";
-import { RangeSnapshotService } from "../server/src/musical-range.js";
-import { PitchControlPatchService } from "../server/src/pitch-control-patch.js";
+import { ParameterCurveService, normalizeCurveInput } from "../server/src/parameter-curve.js";
 import { PitchGesturePlanService } from "../server/src/pitch-gesture-plan.js";
-import { SnapshotService, SnapshotStore } from "../server/src/snapshot.js";
+import { SnapshotStore } from "../server/src/snapshot.js";
 import { createPitchHostModel } from "./helpers/pitch-host.mjs";
 
-const Q = 705600000;
+const Q = 705_600_000;
 
-// 三个相邻音符 + 一个长音：n0[0,Q] n1[Q,2Q] 相邻；n2[2Q,6Q] 长 sustain（供 vibrato）。
-const NOTES = [
+const DEFAULT_NOTES = Object.freeze([
   { onset: 0, duration: Q, pitch: 60, lyrics: "a" },
   { onset: Q, duration: Q, pitch: 62, lyrics: "i" },
   { onset: 2 * Q, duration: 4 * Q, pitch: 64, lyrics: "u" },
-];
+]);
 
-function createFixture(options = {}) {
-  const model = createPitchHostModel({ notes: NOTES, ...options });
-  const session = { withExclusive: (task) => task(model.host) };
+function confirmedVibratoProfile() {
+  return {
+    profileHash: "profile_confirmed_vibrato",
+    semantics: {
+      "vibrato.hostEnvelopeWithExplicitPitchDelta": {
+        status: "confirmed",
+        value: {
+          hostEnvelope: "baseline_scale",
+          explicitPitchDelta: { vibratoEnv: { mode: "replace", value: 0 } },
+        },
+      },
+    },
+  };
+}
+
+function automation(parameter, points = []) {
+  const definition = parameter === "vibratoEnv"
+    ? { typeName: "vibratoEnv", range: [0, 2], defaultValue: 1 }
+    : { typeName: "pitchDelta", range: [-1200, 1200], defaultValue: 0 };
+  return {
+    requestedParameter: parameter,
+    resolvedParameter: parameter,
+    definition,
+    interpolationMethod: "linear",
+    supportPoints: [],
+    points: points.map(([localBlick, value]) => ({ localBlick, value })),
+  };
+}
+
+function noteFingerprint(note, index) {
+  return {
+    indexInGroup: index,
+    onsetBlick: note.onset,
+    durationBlick: note.duration,
+    pitch: note.pitch,
+    lyrics: note.lyrics,
+    phonemesOverride: "",
+    languageOverride: "",
+    detuneCents: 0,
+  };
+}
+
+function createFixture({
+  notes = DEFAULT_NOTES,
+  includeVibratoEnv = true,
+  hostProfile = null,
+  pitchDeltaPoints = [],
+} = {}) {
+  const model = createPitchHostModel({ notes, automationPoints: pitchDeltaPoints });
   const store = new SnapshotStore({ now: () => 1000 });
   const artifactStore = new ArtifactStore({ now: () => 1000 });
-  const sessionId = "sess_test";
-  const snapshots = new RangeSnapshotService(session, { now: () => 1000, store, artifactStore, sessionId });
-  const snapshotService = new SnapshotService(session, { store, now: () => 1000 });
-  const planService = new PitchGesturePlanService({ store, now: () => 1000, artifactStore, sessionId });
-  // planRef 是唯一交接方式（inline apply 已删除），因此 planner 就是 service 本身。
-  const planner = planService;
-  const patch = new PitchControlPatchService(session, snapshotService, {
-    sleepFn: async () => {},
-    now: () => 1000,
-    idGenerator: () => "pc_new_1",
+  const fingerprints = notes.map(noteFingerprint);
+  const stored = store.create({
+    epoch: 1,
+    scope: { kind: "range" },
+    observedAt: new Date(1000).toISOString(),
+    context: {
+      kind: "range",
+      quarterBlick: Q,
+      tempoMarks: [{ positionBlick: 0, positionSeconds: 0, bpm: 120 }],
+      automationCaptured: true,
+      automationByOccurrence: {
+        0: [
+          automation("pitchDelta", pitchDeltaPoints),
+          ...(includeVibratoEnv ? [automation("vibratoEnv")] : []),
+        ],
+      },
+      occurrences: [
+        {
+          occurrence: 0,
+          trackIndex: 0,
+          groupIndex: 0,
+          targetGroupUuid: model.uuid,
+          timeOffsetBlick: 0,
+          sharedTargetOccurrences: [],
+          groupNoteCount: fingerprints.length,
+          noteFingerprints: fingerprints,
+        },
+      ],
+    },
+  });
+  const sessionId = "sess_pitch_gesture";
+  const planner = new PitchGesturePlanService({
+    store,
     artifactStore,
     sessionId,
+    now: () => 1000,
+    hostProfile,
   });
-  // planRef 是唯一交接方式，因此"计划的内容"只能从封存的 artifact 读回。
-  // 断言必须看真正会被提交的那份 mutationRequest，而不是响应里的某个副本——
-  // 后者一旦与封存内容漂移，测试反而会为漂移背书。
-  const sealedRequest = (plan) =>
-    artifactStore.resolve({
-      artifactId: plan.apply.arguments.planRef,
-      expectedKind: "plan",
-      sessionId,
-    }).payload.mutationRequest;
-  return { model, snapshots, planner, patch, store, artifactStore, sealedRequest };
+  const patch = new ParameterCurveService(
+    { withExclusive: (task) => task(model.host) },
+    { artifactStore, sessionId, now: () => 1000 },
+  );
+  const sealed = (plan) => artifactStore.resolve({
+    artifactId: plan.apply.arguments.planRef,
+    expectedKind: "plan",
+    sessionId,
+  }).payload;
+  return { model, store, stored, planner, patch, sealed };
 }
 
-async function snapshotNotes(snapshots) {
-  return snapshots.snapshot({
-    scope: { kind: "range", from: { bar: 1 }, to: { bar: 20 } },
-    include: ["notes", "tempoMap", "meterMap"],
-  });
-}
-
-// 身份就是组内 index（§3.1）；保留 helper 让测试改动最小、意图仍可读。
-const nid = (_snapshot, index) => index;
-
-test("a full gesture set compiles to bounded group-local add curves with a unified apply envelope", async () => {
-  const { snapshots, planner, sealedRequest } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [
-      { type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3, direction: "up" },
-      { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 0.5 } },
-      { type: "release", note: nid(snapshot, 2), depthSemitone: 0.4, direction: "down" },
-      { type: "vibrato", note: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5.5, startSeconds: 0.3 },
-    ],
-  });
-  assert.equal(result.ok, true);
-  assert.equal(result.status, "planned");
-  assert.equal(result.effects, "none");
-  assert.equal(result.apply.tool, "sv_patch_pitch_controls");
-  assert.equal(result.summary.expectedUserUndoSteps, 1);
-  const ops = sealedRequest(result).operations;
-  assert.equal(ops.length, 4);
-  for (const op of ops) {
-    assert.equal(op.op, "add");
-    assert.equal(op.control.kind, "curve");
-    assert.equal(op.control.generator, "sv_plan_pitch_gesture");
-    // 有界不超调：所有点相对 anchor 的偏移都在 constraints 上限内。
-    for (const point of op.control.points) {
-      assert.ok(Math.abs(point.pitchFromAnchorSemitone) <= 2 + 1e-9);
-      assert.ok(Number.isSafeInteger(point.timeFromAnchorBlick));
-    }
-    // anchor 相对时间严格递增。
-    for (let index = 1; index < op.control.points.length; index += 1) {
-      assert.ok(op.control.points[index].timeFromAnchorBlick > op.control.points[index - 1].timeFromAnchorBlick);
-    }
-  }
-  // 单位纪律：anchor 音高是 group-relative semitone（取音符目标音）。
-  const attack = result.gestures.find((g) => g.type === "attack");
-  assert.equal(attack.anchor.groupRelativeSemitone, 60);
-  // apply.arguments 携带 expectedNotes/expectedTimeOffsetBlick 漂移守卫。
-  const sealed = sealedRequest(result);
-  assert.ok(Array.isArray(sealed.target.expectedNotes));
-  assert.equal(sealed.target.expectedTimeOffsetBlick, 0);
-  assert.equal(sealed.occurrence, 0);
-});
-
-test("planner output is schema-valid and plannable against the live host (dry-run, zero writes)", async () => {
-  const { model, snapshots, planner, patch } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const plan = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [
-      { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 0.5 } },
-      { type: "release", note: nid(snapshot, 2), depthSemitone: 0.4 },
-    ],
-  });
-  // apply.arguments 逐字（含 action: "dry_run"）喂给真实事务核：应 dry_run 且零写、零 Undo。
-  const dryRun = await patch.patch(plan.apply.arguments);
-  assert.equal(dryRun.ok, true);
-  assert.equal(dryRun.status, "dry_run");
-  assert.equal(model.undoCount, 0);
-  assert.equal(model.controls.length, 0);
-  // 再去掉 dryRun 提交：应成功且读回验证通过，生成自有 curve。
-  const commit = await patch.patch({ ...plan.apply.arguments, action: "commit" });
-  assert.equal(commit.ok, true);
-  assert.equal(commit.status, "succeeded");
-  assert.equal(commit.effects, "verified");
-  assert.equal(commit.undo.expectedUserUndoSteps, 1);
-  const state = model.controlsSnapshot();
-  assert.equal(state.length, 2);
-  assert.ok(state.every((c) => c.scriptData["svcopilot.owner"] === "svcopilot"));
-});
-
-test("identical input produces a byte-stable plan id and sealed mutation request", async () => {
-  const { snapshots, planner, sealedRequest } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const request = {
-    contextId: snapshot.contextId,
-    gestures: [
-      { type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 },
-      { type: "vibrato", note: nid(snapshot, 2), rateHz: 5, depthSemitone: 0.25 },
-    ],
+function transition(from = 0, to = 1) {
+  return {
+    type: "transition",
+    from,
+    to,
+    width: { seconds: 0.2 },
+    curve: { family: "linear" },
   };
-  const first = await planner.plan(request);
-  const second = await planner.plan(request);
-  assert.equal(first.planId, second.planId);
-  // apply.arguments 现在只承载 planRef，而 artifactId 每次封存都是新的随机 ID，
-  // 因此逐字节比它是在断言"随机数相等"。确定性真正落在被封存的 mutation request 上——
-  // 那才是提交时会作用到宿主的东西。
-  assert.equal(
-    JSON.stringify(sealedRequest(first)),
-    JSON.stringify(sealedRequest(second))
-  );
-});
+}
 
-test("transition follows the source and target pitches without overshooting", async () => {
-  const { snapshots, planner, sealedRequest } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [
-      { type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 1), width: { quarters: 1 } },
-    ],
-  });
-  const control = sealedRequest(result).operations[0].control;
-  const points = control.points;
-  // 音程 +2 半音、anchor 位于目标音 62：相对值必须从 -2 到 0，
-  // 展开后的绝对音高才是 60 -> 62，而不是错误的 61 -> 63。
-  assert.ok(Math.abs(control.anchorPitchSemitone + points[0].pitchFromAnchorSemitone - 60) < 1e-9);
-  assert.ok(Math.abs(control.anchorPitchSemitone + points.at(-1).pitchFromAnchorSemitone - 62) < 1e-9);
-  let previous = -Infinity;
-  for (const point of points) {
-    assert.ok(point.pitchFromAnchorSemitone >= -2 - 1e-9);
-    assert.ok(point.pitchFromAnchorSemitone <= 1e-9);
-    assert.ok(point.pitchFromAnchorSemitone >= previous - 1e-9);
-    previous = point.pitchFromAnchorSemitone;
-  }
-});
-
-test("vibrato stays within depth and reports its sampling", async () => {
-  const { snapshots, planner, sealedRequest } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [{ type: "vibrato", note: nid(snapshot, 2), depthSemitone: 0.3, rateHz: 5 }],
-  });
-  const points = sealedRequest(result).operations[0].control.points;
-  assert.ok(points.length > 4);
-  for (const point of points) {
-    assert.ok(Math.abs(point.pitchFromAnchorSemitone) <= 0.3 + 1e-9);
-  }
-});
-
-test("transition between non-adjacent notes is rejected", async () => {
-  const { snapshots, planner } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  await assert.rejects(
-    planner.plan({
-      contextId: snapshot.contextId,
-      gestures: [{ type: "transition", from: nid(snapshot, 0), to: nid(snapshot, 2) }],
-    }),
-    (error) => error.code === "TRANSITION_NOT_ADJACENT"
-  );
-});
-
-test("vibrato on a too-short note is rejected", async () => {
-  const { snapshots, planner } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  await assert.rejects(
-    planner.plan({
-      contextId: snapshot.contextId,
-      gestures: [{ type: "vibrato", note: nid(snapshot, 0), rateHz: 5 }],
-    }),
-    (error) => error.code === "CONSTRAINT_VIOLATION"
-  );
-});
-
-test("seconds-based durations convert through the tempo map", async () => {
-  const { snapshots, planner, sealedRequest } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [
-      { type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3, length: { seconds: 0.25 } },
-    ],
-  });
-  // 120bpm 下 0.25s = 0.5 quarter = Q/2。
-  const op = sealedRequest(result).operations[0].control;
-  const span = Math.max(...op.points.map((p) => p.timeFromAnchorBlick));
-  assert.ok(span > 0 && span <= Q / 2 + 1);
-});
-
-test("depth clamping to constraints is reported as a warning", async () => {
-  const { snapshots, planner, sealedRequest } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    constraints: { maxAbsDepthSemitone: 0.5 },
-    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 2 }],
-  });
-  assert.ok(result.warnings.some((w) => w.code === "CONSTRAINT_CLAMPED"));
-  const points = sealedRequest(result).operations[0].control.points;
-  for (const point of points) assert.ok(Math.abs(point.pitchFromAnchorSemitone) <= 0.5 + 1e-9);
-});
-
-test("breath targets default to warn-and-skip with a zero-write no-change plan", async () => {
-  const { snapshots, planner } = createFixture({
-    notes: [{ onset: 0, duration: Q, pitch: 59, lyrics: "br" }],
-  });
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
+test("transition seals a compact ParameterCurve PlanRef and commits through the verified transaction", async () => {
+  const { model, stored, planner, patch, sealed } = createFixture();
+  const plan = await planner.plan({
+    contextId: stored.contextId,
+    occurrence: 0,
+    gestures: [transition()],
   });
 
-  assert.equal(result.status, "no_change");
-  assert.equal(result.apply, null);
-  assert.equal(Object.hasOwn(result, "applyRequests"), false);
-  assert.equal(result.summary.requestedGestureCount, 1);
-  assert.equal(result.summary.gestureCount, 0);
-  assert.equal(result.summary.skippedGestureCount, 1);
-  assert.equal(result.summary.operationCount, 0);
-  assert.equal(result.summary.applyCallCount, 0);
-  assert.equal(result.summary.expectedUserUndoSteps, 0);
-  assert.equal(result.summary.excludedEvents.byRole.breath_event, 1);
-  const warning = result.warnings.find(
-    (item) => item.code === "NON_MELODIC_SPECIAL_EVENT_SKIPPED"
-  );
-  assert.equal(warning.noteIndex, 0);
-  assert.equal(warning.semanticRole, "breath_event");
-  assert.equal(warning.evidence, "official_documented_special_lyric_br");
-});
+  assert.equal(plan.status, "planned");
+  assert.equal(plan.effects, "none");
+  assert.match(plan.planId, /^plan_[A-Fa-f0-9]{16}$/);
+  assert.equal(plan.review.requiresHumanAudition, true);
+  assert.equal(plan.apply.tool, "sv_patch_parameter_curves");
+  assert.deepEqual(Object.keys(plan.apply.arguments).sort(), ["action", "planRef"]);
+  assert.equal(Object.hasOwn(plan, "curves"), false);
 
-test("breath targets require explicit include, while low-level dry-run remains available", async () => {
-  const { model, snapshots, planner, patch } = createFixture({
-    notes: [{ onset: 0, duration: Q, pitch: 59, lyrics: "br" }],
-  });
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    specialEventPolicy: "include",
-    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
-  });
+  const payload = sealed(plan);
+  assert.equal(payload.targetTool, "sv_patch_parameter_curves");
+  assert.equal(payload.mutationRequest.curves.length, 1);
+  const curve = normalizeCurveInput(payload.mutationRequest.curves[0]);
+  assert.equal(curve.parameter, "pitchDelta");
+  assert.equal(curve.mode, "replace");
+  assert.ok(curve.hostInterpolation);
+  assert.ok(curve.points.length >= 2);
 
-  assert.equal(result.status, "planned");
-  assert.equal(result.gestures[0].anchor.groupRelativeSemitone, 59);
-  assert.equal(result.summary.skippedGestureCount, 0);
-  const dryRun = await patch.patch(result.apply.arguments);
+  const dryRun = await patch.patchCurves(plan.apply.arguments);
   assert.equal(dryRun.status, "dry_run");
   assert.equal(model.undoCount, 0);
-  assert.equal(model.controls.length, 0);
+  assert.equal(model.automationPoints.length, 0);
+
+  const committed = await patch.patchCurves({ ...plan.apply.arguments, action: "commit" });
+  assert.equal(committed.status, "succeeded");
+  assert.equal(committed.effects, "verified");
+  assert.equal(committed.undo.expectedUserUndoSteps, 1);
+  assert.ok(model.automationPoints.length >= 2);
 });
 
-test("near-miss breath spelling stays melodic but carries the shared semantic warning", async () => {
-  const { snapshots, planner } = createFixture({
-    notes: [{ onset: 0, duration: Q, pitch: 59, lyrics: "BR" }],
-  });
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
-  });
-
-  assert.equal(result.status, "planned");
-  assert.equal(result.summary.skippedGestureCount, 0);
-  assert.equal(result.summary.excludedEvents.count, 0);
-  assert.ok(
-    result.warnings.some(
-      (warning) =>
-        warning.code === "SUSPICIOUS_SPECIAL_LYRIC_VARIANT" &&
-        warning.notes.some((note) => note.indexInGroup === 0)
-    )
-  );
-});
-
-test("special-event error policy rejects the whole pitch plan before compilation", async () => {
-  const { snapshots, planner } = createFixture({
-    notes: [
-      { onset: 0, duration: Q, pitch: 60, lyrics: "a" },
-      { onset: Q, duration: Q, pitch: 59, lyrics: "br" },
-    ],
-  });
-  const snapshot = await snapshotNotes(snapshots);
+test("transition rejects the old surface and invalid same-note selection", async () => {
+  const { stored, planner } = createFixture();
   await assert.rejects(
     planner.plan({
-      contextId: snapshot.contextId,
-      specialEventPolicy: "error",
-      gestures: [
-        { type: "attack", note: nid(snapshot, 0) },
-        { type: "release", note: nid(snapshot, 1) },
-      ],
+      contextId: stored.contextId,
+      occurrence: 0,
+      gestures: [{ type: "attack", note: 0 }],
     }),
-    (error) => {
-      assert.equal(error.code, "NON_MELODIC_SPECIAL_EVENT_TARGETED");
-      assert.equal(error.details.noteIndex, 1);
-      assert.equal(error.details.semanticRole, "breath_event");
-      return true;
-    }
+    (error) => error.code === "INVALID_ARGUMENTS",
+  );
+  await assert.rejects(
+    planner.plan({
+      contextId: stored.contextId,
+      occurrence: 0,
+      gestures: [transition(0, 0)],
+    }),
+    (error) => error.code === "INVALID_ARGUMENTS",
   );
 });
 
-test("release auto direction never infers melody from a following breath event", async () => {
-  const { snapshots, planner } = createFixture({
-    notes: [
-      { onset: 0, duration: Q, pitch: 60, lyrics: "a" },
-      { onset: Q, duration: Q, pitch: 72, lyrics: "br" },
-    ],
-  });
-  const snapshot = await snapshotNotes(snapshots);
-  const result = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [{ type: "release", note: nid(snapshot, 0), direction: "auto" }],
-  });
-  assert.equal(result.gestures[0].params.direction, "down");
-});
-
-test("the planner never touches the host", async () => {
-  const { model, snapshots, planner } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
-  const callsBefore = model.hostCalls.length;
-  await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
-  });
-  assert.equal(model.hostCalls.length, callsBefore);
-  assert.equal(model.undoCount, 0);
-  assert.equal(model.controls.length, 0);
-});
-
-test("planRef path: planner returns short planRef and executor resolves it", async () => {
-  const { snapshots, planner, patch, model } = createFixture();
-  const snapshot = await snapshotNotes(snapshots);
+test("transient compiles its first-peak model and rejects an undamped non-taper tail", async () => {
+  const { stored, planner, sealed } = createFixture();
   const plan = await planner.plan({
-    contextId: snapshot.contextId,
-    gestures: [{ type: "attack", note: nid(snapshot, 0), depthSemitone: 0.3 }],
+    contextId: stored.contextId,
+    occurrence: 0,
+    gestures: [
+      {
+        type: "transient",
+        note: 1,
+        intent: "overshoot",
+        peakSemitone: 0.2,
+        peakTimeSeconds: 0.05,
+        spanSeconds: 0.24,
+        tailPolicy: "continuous_taper",
+      },
+    ],
   });
   assert.equal(plan.status, "planned");
-  assert.ok(plan.apply.arguments.planRef, "apply.arguments should carry planRef");
-  assert.strictEqual(plan.apply.arguments.action, "dry_run");
-  assert.ok(!plan.apply.arguments.operations, "operations should not be inline when planRef is used");
+  assert.equal(sealed(plan).pitchTechniques.ir.techniques[0].model.family, "first_peak_transient");
 
-  // dry-run via planRef
-  const dryRun = await patch.patch({
-    planRef: plan.apply.arguments.planRef,
-    action: "dry_run",
-  });
-  assert.equal(dryRun.status, "dry_run");
-  assert.equal(dryRun.effects, "none");
-  assert.equal(model.undoCount, 0);
+  await assert.rejects(
+    planner.plan({
+      contextId: stored.contextId,
+      occurrence: 0,
+      gestures: [
+        {
+          type: "transient",
+          note: 1,
+          intent: "preparation",
+          peakSemitone: -0.15,
+          peakTimeSeconds: 0.05,
+          spanSeconds: 0.2,
+          dampingRatio: 0,
+        },
+      ],
+    }),
+    (error) => error.code === "UNDAMPED_TAIL_REQUIRES_TAPER",
+  );
+});
 
-  // commit via planRef
-  const commit = await patch.patch({
-    planRef: plan.apply.arguments.planRef,
-    action: "commit",
+test("both vibrato discriminators compile only after confirmed H2 evidence", async () => {
+  const { stored, planner: blockedPlanner } = createFixture();
+  const explicit = {
+    type: "vibrato",
+    source: "explicit_pitch_delta",
+    note: 2,
+    startRatio: 0.1,
+    endRatio: 0.7,
+    rateHz: 5,
+    depthSemitone: 0.2,
+    fadeInSeconds: 0.1,
+    fadeOutSeconds: 0.1,
+  };
+  await assert.rejects(
+    blockedPlanner.plan({ contextId: stored.contextId, occurrence: 0, gestures: [explicit] }),
+    (error) => error.code === "HOST_SEMANTIC_UNCONFIRMED",
+  );
+
+  const fixture = createFixture({ hostProfile: confirmedVibratoProfile() });
+  const explicitPlan = await fixture.planner.plan({
+    contextId: fixture.stored.contextId,
+    occurrence: 0,
+    gestures: [explicit],
   });
-  assert.equal(commit.status, "succeeded");
-  assert.equal(model.controls.length, 1);
+  const explicitParameters = fixture.sealed(explicitPlan).mutationRequest.curves
+    .map((curve) => curve.parameter)
+    .sort();
+  assert.deepEqual(explicitParameters, ["pitchDelta", "vibratoEnv"]);
+  const irModel = fixture.sealed(explicitPlan).pitchTechniques.ir.techniques[0].model;
+  assert.equal(irModel.endRateHz, 5);
+  assert.equal(irModel.endDepthSemitone, 0.2);
+
+  const hostPlan = await fixture.planner.plan({
+    contextId: fixture.stored.contextId,
+    occurrence: 0,
+    gestures: [{ type: "vibrato", source: "host_envelope", note: 2, envelopeScale: 0.5 }],
+  });
+  assert.deepEqual(
+    fixture.sealed(hostPlan).mutationRequest.curves.map((curve) => curve.parameter),
+    ["vibratoEnv"],
+  );
+});
+
+test("vibrato relationships and missing vibratoEnv capture fail before any plan exists", async () => {
+  const badRatio = createFixture({ hostProfile: confirmedVibratoProfile() });
+  await assert.rejects(
+    badRatio.planner.plan({
+      contextId: badRatio.stored.contextId,
+      occurrence: 0,
+      gestures: [{ type: "vibrato", source: "host_envelope", note: 2, startRatio: 0.8, endRatio: 0.8 }],
+    }),
+    (error) => error.code === "INVALID_ARGUMENTS",
+  );
+
+  const missingCapture = createFixture({
+    hostProfile: confirmedVibratoProfile(),
+    includeVibratoEnv: false,
+  });
+  await assert.rejects(
+    missingCapture.planner.plan({
+      contextId: missingCapture.stored.contextId,
+      occurrence: 0,
+      gestures: [{ type: "vibrato", source: "host_envelope", note: 2, envelopeScale: 0.5 }],
+    }),
+    (error) => {
+      assert.equal(error.code, "CAPTURE_EVIDENCE_REQUIRED");
+      assert.deepEqual(error.details.remediation.automationParameters, ["pitchDelta", "vibratoEnv"]);
+      return true;
+    },
+  );
+});
+
+test("breath targets become a zero-write no_change plan", async () => {
+  const fixture = createFixture({
+    notes: [{ onset: 0, duration: Q, pitch: 60, lyrics: "br" }],
+  });
+  const plan = await fixture.planner.plan({
+    contextId: fixture.stored.contextId,
+    occurrence: 0,
+    gestures: [{
+      type: "transient",
+      note: 0,
+      intent: "overshoot",
+      peakSemitone: 0.2,
+      peakTimeSeconds: 0.04,
+      spanSeconds: 0.2,
+    }],
+  });
+  assert.equal(plan.status, "no_change");
+  assert.equal(plan.apply, null);
+  assert.equal(plan.data.curves, 0);
+  assert.equal(plan.warnings[0].code, "NON_MELODIC_SPECIAL_EVENT_SKIPPED");
+});
+
+test("identical pitch requests produce the same sealed mutation payload", async () => {
+  const fixture = createFixture();
+  const request = {
+    contextId: fixture.stored.contextId,
+    occurrence: 0,
+    gestures: [transition()],
+  };
+  const first = await fixture.planner.plan(request);
+  const second = await fixture.planner.plan(request);
+  assert.equal(
+    JSON.stringify(fixture.sealed(first).mutationRequest),
+    JSON.stringify(fixture.sealed(second).mutationRequest),
+  );
 });

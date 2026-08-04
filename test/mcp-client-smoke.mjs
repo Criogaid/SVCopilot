@@ -557,21 +557,28 @@ try {
   });
   assert.ok(pitchGestureResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
   const pitchGestureSchema = parseResource(pitchGestureResource).inputSchema;
-  assert.deepEqual(pitchGestureSchema.properties.specialEventPolicy.enum, [
-    "warn_and_skip",
-    "include",
-    "error",
+  assert.deepEqual(pitchGestureSchema.required, ["contextId", "occurrence", "gestures"]);
+  assert.deepEqual(pitchGestureSchema.properties.gestures.items.oneOf.map((schema) => schema.$ref), [
+    "#/$defs/transition",
+    "#/$defs/transient",
+    "#/$defs/explicitVibrato",
+    "#/$defs/hostVibrato",
   ]);
-  assert.equal(pitchGestureSchema.properties.specialEventPolicy.default, "warn_and_skip");
+  assert.equal(pitchGestureSchema.properties.specialEventPolicy, undefined);
   const planResource = await client.readResource({
     uri: "svcopilot://schemas/sv_plan_expression",
   });
   assert.ok(planResource.contents[0].text.length < MAX_SCHEMA_RESOURCE_CHARS);
   const planSchema = parseResource(planResource).inputSchema;
-  assert.deepEqual(
-    planSchema.properties.gestures.items.oneOf.map((schema) => schema.properties.type.const),
-    ["scoop", "fall", "portamento", "vibrato", "hairpin"]
-  );
+  assert.equal(planSchema.properties.gestures.items.properties.type.const, "hairpin");
+  assert.deepEqual(Object.keys(planSchema.properties.gestures.items.properties.amounts.properties), [
+    "loudness",
+    "tension",
+    "breathiness",
+    "voicing",
+    "gender",
+  ]);
+  assert.equal(planSchema.properties.defaults, undefined);
   assert.deepEqual(planSchema.properties.intent.properties.emotion.enum, [
     "cool_anger",
     "tender",

@@ -33,6 +33,7 @@ export function createPitchHostModel(options = {}) {
     notes = null,
     controls = [],
     computedPitchValues = null,
+    automationPoints = [],
     quarterBlick = profileDefaults.quarterBlick ?? DEFAULT_Q,
     // shared-target：第二个 NoteGroupReference 指向同一 group，但 offset 不同。
     secondReference = null,
@@ -68,7 +69,7 @@ export function createPitchHostModel(options = {}) {
     notes: noteList,
     // controls: [{ id, state:{kind,position,pitch,points,scriptData,detached} }]，按 position 升序。
     controls: [],
-    automationPoints: [],
+    automationPoints: automationPoints.map((point) => [point[0], point[1]]),
     undoCount: 0,
     hostCalls: [],
     failures: [],
@@ -441,14 +442,19 @@ export function createPitchHostModel(options = {}) {
         if (method === "getDefinition") return { typeName: "pitchDelta", range: [-1200, 1200], defaultValue: 0 };
         if (method === "getInterpolationMethod") return "Linear";
         if (method === "getAllPoints") return model.automationPoints.map((point) => [point[0], point[1]]);
-        if (method === "getPoints") return model.automationPoints.map((point) => [point[0], point[1]]);
+        if (method === "getPoints") {
+          const [from, to] = args;
+          return model.automationPoints
+            .filter(([blick]) => blick >= from && blick <= to)
+            .map((point) => [point[0], point[1]]);
+        }
         if (method === "removeAll") {
           model.automationPoints = [];
           return null;
         }
         if (method === "remove") {
           const [from, to] = args;
-          model.automationPoints = model.automationPoints.filter((point) => point[0] < from || point[0] > to);
+          model.automationPoints = model.automationPoints.filter((point) => point[0] < from || point[0] >= to);
           return null;
         }
         if (method === "add") {
@@ -457,8 +463,16 @@ export function createPitchHostModel(options = {}) {
           return null;
         }
         if (method === "get") {
-          const found = model.automationPoints.find((point) => point[0] === args[0]);
-          return found ? found[1] : 0;
+          const blick = args[0];
+          const points = model.automationPoints;
+          if (points.length === 0) return 0;
+          const exact = points.find((point) => point[0] === blick);
+          if (exact) return exact[1];
+          const right = points.findIndex((point) => point[0] > blick);
+          if (right <= 0 || right === -1) return 0;
+          const left = points[right - 1];
+          const next = points[right];
+          return left[1] + ((next[1] - left[1]) * (blick - left[0])) / (next[0] - left[0]);
         }
       }
       const noteIndex = noteList.findIndex((note) => note.handle.__handle__ === id);

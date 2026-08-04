@@ -32,6 +32,7 @@ const EXAMPLE = {
   // 已迁移到 fingerprint 身份的 operation 用组内 index 引用音符（§3.1）。
   noteIndex: 0,
   secondNoteIndex: 1,
+  planRef: "art_EXAMPLE",
   auditionId: "aud_EXAMPLE",
 };
 
@@ -95,7 +96,7 @@ const GLOBAL_RULES = {
     "On STALE_CONTEXT or UNKNOWN_CONTEXT: re-run sv_snapshot_range and re-run the planner with the same options. Never retry the old request and never reuse note indexes from the old context.",
   ],
   planHandoff: [
-    "Every planner (sv_plan_expression, sv_align_lyrics, sv_quantize_notes, sv_generate_harmony) returns the SAME apply envelope. Read apply.tool, submit apply.arguments verbatim to that tool. You never need to parse planner-specific field names.",
+    "Every planner (sv_plan_expression, sv_plan_pitch_gesture, sv_align_lyrics, sv_quantize_notes, sv_generate_harmony) returns the SAME apply envelope. Read apply.tool, submit apply.arguments verbatim to that tool. You never need to parse planner-specific field names.",
     "apply is null when there is nothing to do (status no_change). That is success, not an error.",
     "Submit apply.arguments with action dry_run for the review pass, then the identical arguments with action commit.",
     "apply.atomicity is always \"verified_compensation\" — read-back compensation, never ACID.",
@@ -454,7 +455,7 @@ const RECIPES = [
     id: "plan_and_commit_expression",
     title: "Plan an expression edit and commit it as Automation curves",
     goal:
-      "Turn a musical intention into reviewable, unit-explicit Automation curves and commit them in one Undo.",
+      "Turn non-pitch dynamics and color intent into reviewable Automation curves and commit them in one Undo.",
     requiredCapabilities: ["automation"],
     expectedCalls: { min: 4, max: 6 },
     humanGates: ["Whether the expression sounds right is human_only — end with an audition."],
@@ -479,22 +480,20 @@ const RECIPES = [
         arguments: {
           contextId: EXAMPLE.contextId,
           gestures: [
-            { type: "scoop", targets: [[EXAMPLE.noteIndex, 40]], lengthQuarter: 0.2 },
             {
               type: "hairpin",
               from: EXAMPLE.noteIndex,
               to: EXAMPLE.secondNoteIndex,
-              amounts: { loudness: 3 },
+              amounts: { loudness: 3, tension: 0.15 },
             },
           ],
         },
         acceptable: ["ok"],
         readingRules: [
-          "Units are explicit and must not be mixed: pitchDelta=cents, loudness=dB, tension/breathiness=±1, vibratoEnv=0..2 multiplier.",
+          "This planner owns only loudness (dB), tension/breathiness/voicing/gender (normalized); plan every transition, transient, or vibrato with sv_plan_pitch_gesture.",
           "intent.preset expands into reviewable fields via presetExpansion — show that expansion, never treat it as an opaque button.",
           "apply.arguments.target carries expectedNotes and expectedTimeOffsetBlick drift guards. Submit them; do not strip them.",
           "Intent-derived gestures never anchor on breath notes. Explicit gestures may, deliberately.",
-          "Natural vibrato presence is host-unobservable, so a pitchDelta vibrato may stack with it.",
         ],
       },
       {
@@ -502,18 +501,7 @@ const RECIPES = [
         tool: "sv_patch_parameter_curves",
         purpose: "Dry-run the planned curves; read the diff summary before writing.",
         arguments: {
-          target: { contextId: EXAMPLE.contextId, occurrence: EXAMPLE.occurrence },
-          curves: [
-            {
-              parameter: "pitchDelta",
-              mode: "replace",
-              range: { from: { anchor: { note: EXAMPLE.noteIndex, position: "onset" } }, to: { anchor: { note: EXAMPLE.noteIndex, position: "center" } } },
-              points: [
-                { anchor: { note: EXAMPLE.noteIndex, position: "onset" }, value: -40 },
-                { anchor: { note: EXAMPLE.noteIndex, position: "center" }, value: 0 },
-              ],
-            },
-          ],
+          planRef: EXAMPLE.planRef,
           action: "dry_run",
         },
         note: "Submit apply.arguments from step 2 verbatim with action dry_run. The sealed plan contains every disjoint curve range in one transaction.",
@@ -524,17 +512,8 @@ const RECIPES = [
         tool: "sv_patch_parameter_curves",
         purpose: "Commit the identical arguments with action commit. One Undo interval for all curves.",
         arguments: {
-          target: { contextId: EXAMPLE.contextId, occurrence: EXAMPLE.occurrence },
-          curves: [
-            {
-              parameter: "loudness",
-              mode: "add",
-              range: { fromBlick: 0, toBlick: 705600000, coordinate: "local" },
-              amount: 1.5,
-            },
-          ],
+          planRef: EXAMPLE.planRef,
           action: "commit",
-          atomic: true,
         },
         acceptable: ["succeeded", "no_change"],
         needsHumanDecision: ["SHARED_TARGET_REQUIRES_CONFIRMATION"],
@@ -558,73 +537,67 @@ const RECIPES = [
   },
   {
     id: "plan_and_commit_pitch",
-    title: "Plan a pitch gesture and commit it as PitchControl curves",
+    title: "Plan a pitch gesture and commit it as Automation curves",
     goal:
-      "Turn a pitch intention (slide, attack, release, vibrato) into reviewable, unit-explicit PitchControl curves and commit them in one Undo; optionally bake the host's computed pitch into a curve.",
-    requiredCapabilities: ["pitchControls"],
-    expectedCalls: { min: 3, max: 6 },
+      "Turn a transition, transient, or vibrato intention into a reviewable pitchDelta Automation replacement and commit it in one Undo.",
+    requiredCapabilities: ["automation"],
+    expectedCalls: { min: 4, max: 4 },
     humanGates: ["Whether the tuning sounds right is human_only — end with an audition."],
-    captureTemplate: captureTemplate(["notes", "pitchControls", "computedPitch"]),
+    captureTemplate: captureTemplate(["notes", "automation"], {
+      automationParameters: ["pitchDelta", "vibratoEnv"],
+    }),
     preconditions: [
-      "PitchControl write is SynthV 2.1+ and host-gated: offline transaction semantics are verified, but insertion/ordering/clone/remove/scriptData behavior must be confirmed on the real host before release (see tools/pitch-control-probe.mjs).",
+      "Any vibrato request additionally needs a confirmed H2 host profile; otherwise sv_plan_pitch_gesture rejects before creating a mutation plan.",
     ],
     steps: [
       {
         n: 1,
         tool: "sv_snapshot_range",
         purpose:
-          "Capture notes (required to anchor gestures), existing pitchControls (to see ownership/fingerprints), and computedPitch (if you may bake).",
+          "Capture notes and Automation baseline evidence before planning a pitch technique.",
         arguments: {
           scope: { kind: "range", from: { bar: 1 }, to: { bar: 9 } },
-          include: ["notes", "pitchControls", "computedPitch"],
+          include: ["notes", "automation"],
+          automationParameters: ["pitchDelta", "vibratoEnv"],
         },
-        requiredInclude: ["notes", "pitchControls"],
+        requiredInclude: ["notes", "automation"],
         acceptable: ["status captured"],
         readingRules: [
-          "pitchControls entries carry kind (point/curve), group-local AND occurrence-absolute coordinates, ownership, and a content fingerprint. indexInGroup is only a hint — the host re-sorts on every add/remove, so identity is the fingerprint, never the index.",
-          "pitch values are group-relative semitones and times are group-local integer BLICK; the occurrence-absolute fields add timeOffset/pitchOffset. Never mix these with pitchDelta cents.",
+          "transition and transient require captured pitchDelta. Either vibrato branch additionally requires captured vibratoEnv; re-snapshot with the missing parameter before retrying CAPTURE_EVIDENCE_REQUIRED.",
+          "The planner seals the observed baseline and interpolation evidence. Do not hand-write a replacement curve from a remembered note index.",
         ],
       },
       {
         n: 2,
         tool: "sv_plan_pitch_gesture",
         purpose:
-          "Compile an explicit gesture into a bounded apply envelope. Pure in-memory; writes nothing.",
+          "Compile an explicit technique into a bounded Automation apply envelope. Pure in-memory; writes nothing.",
         arguments: {
           contextId: EXAMPLE.contextId,
           occurrence: EXAMPLE.occurrence,
           gestures: [
-            { type: "attack", note: EXAMPLE.noteIndex, depthSemitone: 0.3, direction: "up" },
+            {
+              type: "transition",
+              from: EXAMPLE.noteIndex,
+              to: EXAMPLE.secondNoteIndex,
+              width: { seconds: 0.24 },
+              curve: { family: "richards", inflectionRatio: 0.58, sharpness: 8 },
+            },
           ],
         },
         acceptable: ["ok", "status planned"],
         readingRules: [
-          "apply.arguments.operations are add-only curve definitions in group-local coordinates; the planner never deletes or overwrites existing pitch controls.",
-          "apply.arguments.target carries expectedNotes/expectedTimeOffsetBlick/expectedPitchOffsetSemitone drift guards — submit them, do not strip them.",
-          "Depth/frequency/phase are bounded; a CONSTRAINT_CLAMPED warning means a value was clamped to the configured budget.",
+          "transition cancels the score step in pitchDelta; transient uses a bounded first-peak model; vibrato explicitly chooses explicit_pitch_delta or host_envelope.",
+          "The sealed request composes the captured baseline before replacing the bounded range, then verifies host interpolation after commit. Submit apply.arguments unchanged.",
+          "Exact lowercase br and other non-melodic events are skipped. An all-skipped request is no_change, not a zero-valued curve.",
         ],
       },
       {
         n: 3,
-        tool: "sv_patch_pitch_controls",
-        purpose: "Dry-run the planned operations; read the planned operations before writing.",
+        tool: "sv_patch_parameter_curves",
+        purpose: "Dry-run the sealed Automation plan; read the planned diff before writing.",
         arguments: {
-          contextId: EXAMPLE.contextId,
-          occurrence: EXAMPLE.occurrence,
-          operations: [
-            {
-              op: "add",
-              control: {
-                kind: "curve",
-                anchorPositionBlick: 0,
-                anchorPitchSemitone: 60,
-                points: [
-                  { timeFromAnchorBlick: 0, pitchFromAnchorSemitone: -0.3 },
-                  { timeFromAnchorBlick: 705600000, pitchFromAnchorSemitone: 0 },
-                ],
-              },
-            },
-          ],
+          planRef: EXAMPLE.planRef,
           action: "dry_run",
         },
         note: "In practice submit apply.arguments from step 2 verbatim with action dry_run.",
@@ -632,62 +605,26 @@ const RECIPES = [
       },
       {
         n: 4,
-        tool: "sv_patch_pitch_controls",
-        purpose: "Commit the identical arguments with action commit. One Undo interval for all operations.",
+        tool: "sv_patch_parameter_curves",
+        purpose: "Commit the identical arguments with action commit. One Undo interval for all curves.",
         arguments: {
-          contextId: EXAMPLE.contextId,
-          occurrence: EXAMPLE.occurrence,
-          operations: [
-            {
-              op: "add",
-              control: {
-                kind: "curve",
-                anchorPositionBlick: 0,
-                anchorPitchSemitone: 60,
-                points: [
-                  { timeFromAnchorBlick: 0, pitchFromAnchorSemitone: -0.3 },
-                  { timeFromAnchorBlick: 705600000, pitchFromAnchorSemitone: 0 },
-                ],
-              },
-            },
-          ],
+          planRef: EXAMPLE.planRef,
           action: "commit",
-          atomic: true,
         },
         acceptable: ["succeeded", "no_change"],
         needsHumanDecision: ["SHARED_TARGET_REQUIRES_CONFIRMATION"],
         nonRetryable: [
-          "STALE_CONTEXT / UNKNOWN_CONTROL / TARGET_CONFLICT — the group or an anchored note changed after the snapshot; re-snapshot and RE-PLAN, do not resubmit",
-          "AMBIGUOUS_CONTROL — identical duplicates cannot be addressed; re-snapshot and disambiguate, never first-match",
+          "STALE_CONTEXT / CAPTURE_EVIDENCE_REQUIRED — the target or captured baseline no longer supports this plan; re-snapshot and RE-PLAN, do not resubmit",
           "outcome_unknown — re-snapshot and compare before any further action",
         ],
         afterSuccess:
-          "This contextId is deleted. New controls carry the svcopilot.* ownership namespace; re-snapshot with include:[\"pitchControls\"] to read back the written curves.",
-      },
-      {
-        n: 5,
-        tool: "sv_bake_computed_pitch",
-        purpose:
-          "Optional: freeze the host's computed pitch into ONE owned curve when coverage is sufficient (all-null or below-threshold writes nothing).",
-        arguments: {
-          contextId: EXAMPLE.contextId,
-          occurrence: EXAMPLE.occurrence,
-          action: "dry_run",
-        },
-        optional: true,
-        acceptable: ["dry_run", "INSUFFICIENT_COMPUTED_PITCH (zero write; wait for processing and re-snapshot)"],
-        readingRules: [
-          "All-null or empty computed pitch means NOT ENOUGH DATA — never zero error and never bakeable data.",
-          "Existing pitchDelta automation is preserved; clearing it is not supported in this version. Audit for double-counting if pitchDelta drove the computed pitch.",
-          "Commit with action commit to write inside one Undo; the curve is svcopilot-owned so a later replace_owned bake can replace it cleanly.",
-        ],
+          "Curve writes do NOT delete the contextId, but re-snapshot before an analysis that must reflect the new Automation values.",
       },
     ],
     nextRecipes: ["verify_after_edit", "audition_for_human"],
     reportingRules: [
       "Distinguish a verified write (host read-back) from 'the tuning sounds right' (human_only).",
-      "PitchControl has no host UUID — refer to controls by controlId + fingerprint, never by a remembered index.",
-      "Never claim a bake or gesture improved the intonation; report objective evidence and offer an audition.",
+      "Never claim a gesture improved the intonation; report the verified curve postcondition and offer an audition.",
     ],
     capabilityBlockedBranches: [
       "Asked to hear the result → MCP has no audio input; use audition_for_human so a person listens.",
@@ -1094,7 +1031,7 @@ const TOOL_SELECTION = {
     { need: "Lyric and prosody problems", tool: "sv_validate_lyrics_prosody" },
     { need: "Objective intonation evidence", tool: "sv_compare_computed_pitch" },
     { need: "Cross-section style statistics", tool: "sv_style_profile" },
-    { need: "Expression / dynamics / vibrato plan", tool: "sv_plan_expression" },
+    { need: "Expression / dynamics / color plan", tool: "sv_plan_expression" },
     { need: "Fill lyrics onto notes", tool: "sv_align_lyrics" },
     { need: "Tighten timing to a grid", tool: "sv_quantize_notes" },
     { need: "Add a harmony line", tool: "sv_generate_harmony" },
@@ -1102,7 +1039,7 @@ const TOOL_SELECTION = {
     { need: "Insert / delete / split / merge notes", tool: "sv_restructure_notes" },
     { need: "Write Automation curves", tool: "sv_patch_parameter_curves" },
     { need: "Read / write PitchControl points & curves", tool: "sv_patch_pitch_controls" },
-    { need: "Plan a pitch gesture (slide/vibrato/attack)", tool: "sv_plan_pitch_gesture" },
+    { need: "Plan a pitch gesture (transition/transient/vibrato)", tool: "sv_plan_pitch_gesture" },
     {
       need: "Freeze host computed pitch into a curve",
       tool: "sv_bake_computed_pitch",

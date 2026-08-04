@@ -9,6 +9,7 @@ export const HOST_INTERPOLATION_MAX_TOTAL_SAMPLES =
 
 const BASELINE_FINGERPRINT_QUANTUM_CENT = 0.001;
 const INTERPOLATION_METHODS = new Set(["linear", "cosine", "cubic"]);
+const SUPPORTED_PARAMETERS = new Set(["pitchDelta", "vibratoEnv"]);
 
 export function buildHostInterpolationPostcondition({
   interpolationEvidence,
@@ -104,10 +105,10 @@ export function assertHostInterpolationPostconditionFitsCurve(postcondition, {
       `hostInterpolation evidence targets ${postcondition.interpolationEvidence.resolvedParameter}, not ${parameter}`
     );
   }
-  if (parameter !== "pitchDelta") {
+  if (!SUPPORTED_PARAMETERS.has(parameter)) {
     throw codedError(
       "INTERPOLATION_PARAMETER_MISMATCH",
-      "host interpolation postconditions currently support pitchDelta only"
+      "host interpolation postconditions currently support pitchDelta or vibratoEnv only"
     );
   }
   for (const sample of [

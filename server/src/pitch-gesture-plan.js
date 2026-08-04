@@ -1,662 +1,1420 @@
-import { canonicalHashHex } from "./canonical-json.js";
+import { canonicalHashHex, contentHash } from "./canonical-json.js";
+import { encodeDense, decodeDense } from "./dense-codec.js";
 import { planReference } from "./artifact-store.js";
 import { buildPlanArtifact } from "./plan-reference.js";
-import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { buildApplyEnvelope, planSealError, sealApplyEnvelope } from "./plan-envelope.js";
-import { ServiceTiming } from "./service-timing.js";
+import { blickAtSeconds, secondsAtBlick } from "./musical-time.js";
 import { analyzeVocalEventSequence } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
 import { resolveMutationScope, resolveNoteIndex } from "./scope-source.js";
-
-// sv_plan_pitch_gesture —— 把"起音上滑 / 句尾下坠 / 转音 / 颤音"等音乐意图编译成
-// PitchControlCurve 的 add 操作（主计划 P1-C Phase 3，目标写面 sv_patch_pitch_controls）。
-//
-// 关键契约（与 sv_plan_expression 一致，绝不放宽）：
-// - 纯内存只读：只读取 sv_snapshot_range 已存的音符指纹 / tempo / quarter 数据，不进入
-//   ExecutionCoordinator、绝不写宿主。真正的写入由调用方把 apply 交给
-//   sv_patch_pitch_controls 事务核（预检 / Undo / 读回 / 补偿全部复用，本模块零 mutation）。
-// - 确定性：同一 context 数据 + 同一请求 → 逐字节相同的 plan（planId 为内容哈希）。
-// - 单位纪律（GOAL §5.4）：意图可用秒或音符比例表达，经 TimeAxis 转成整数 BLICK；
-//   PitchControl 的 pitch 一律是 group-relative semitone（绝不与 pitchDelta 的 cents 混用），
-//   请求用 depthSemitone 等带单位后缀的字段，从 schema 上杜绝量纲歧义。
-// - 有界不超调：所有包络/振荡都被 clamp 到深度范围，不用任何名义单调实际过冲的三次插值。
-// - 诚实边界：只生成 add；不删除/覆盖不属于本计划的既有 PitchControl（那是另一个需显式
-//   fingerprint 的事务）。anchor 音高默认取音符目标音（group-relative），调用方可覆盖；
-//   它不会从宿主 computed pitch 推断（那是 sv_bake_computed_pitch 的职责）。能否"更好听"
-//   永远是 human_only。
+import {
+  PITCH_DELTA_LIMIT_CENT,
+  TRANSIENT_TAPER_RATIO,
+  compileFirstPeakTransient,
+  compilePitchDeltaTransition,
+  timeVaryingVibrato,
+} from "../../docs/pitch-techniques/reference/model.mjs";
+import { normalizeTechniqueIr } from "./pitch-techniques/ir.js";
+import { composeTechniqueContributions } from "./pitch-techniques/compose.js";
+import { compilePitchDeltaMutationPlan } from "./pitch-techniques/pitch-delta-compiler.js";
+import { buildHostInterpolationPostcondition } from "./pitch-techniques/host-interpolation.js";
+import {
+  captureRemediation,
+  createCapturedAutomationBaseline,
+  evaluateAutomationPoints,
+  evaluateCapturedAutomation,
+  replaceAutomationPoints,
+} from "./pitch-techniques/automation-baseline.js";
 
 export const PITCH_GESTURE_DEFAULTS = Object.freeze({
-  specialEventPolicy: "warn_and_skip",
+  retainCorrectionTarget: false,
   constraints: Object.freeze({
-    maxAbsDepthSemitone: 2,
-    maxTotalPoints: 600,
-    maxPointsPerCurve: 400,
-    minVibratoQuarter: 1.5,
-  }),
-  sampling: Object.freeze({
-    pointsPerQuarter: 8,
-    vibratoPointsPerCycle: 8,
+    maxAbsPeakSemitone: 1.5,
+    maxTotalPoints: 1200,
+    maxFitErrorCent: 1,
   }),
 });
-export const PITCH_GESTURE_TYPES = Object.freeze(["transition", "attack", "release", "vibrato"]);
-export const PITCH_GESTURE_SHAPES = Object.freeze(["linear", "smoothstep", "cosine"]);
-export const PITCH_GESTURE_DIRECTIONS = Object.freeze(["up", "down", "auto"]);
-const MAX_GESTURES = 32;
+export const PITCH_GESTURE_TYPES = Object.freeze(["transition", "transient", "vibrato"]);
 
+const MAX_GESTURES = 32;
+const MAX_VERIFICATION_MANDATORY_SAMPLES = 256;
+const MAX_VERIFICATION_ADAPTIVE_SAMPLES = 128;
+const BASE_SAMPLE_INTERVAL_SECONDS = 0.004;
+const CENT_QUANTUM = 1e-6;
+const SECOND_QUANTUM = 1e-9;
+const PHASE_LIMIT_RAD = 6.283185307179;
+
+const DENSE_POINT_PROFILE = Object.freeze({
+  schemaVersion: "1",
+  kind: "pitch-technique-automation-points",
+  maxRows: 2000,
+  columns: Object.freeze([
+    Object.freeze({ name: "blick", unit: "blick", type: "integer", encoding: "delta" }),
+    Object.freeze({
+      name: "value",
+      unit: "parameter_value",
+      type: "number",
+      encoding: "qint",
+      scale: CENT_QUANTUM,
+      maxError: CENT_QUANTUM / 2,
+    }),
+  ]),
+});
+
+const CORRECTION_TARGET_PROFILE = Object.freeze({
+  schemaVersion: "1",
+  kind: "pitch-technique-correction-target",
+  maxRows: 2000,
+  columns: Object.freeze([
+    Object.freeze({ name: "absoluteBlick", unit: "blick", type: "integer", encoding: "delta" }),
+    Object.freeze({
+      name: "targetCent",
+      unit: "cent",
+      type: "number",
+      encoding: "qint",
+      scale: CENT_QUANTUM,
+      maxError: CENT_QUANTUM / 2,
+    }),
+  ]),
+});
+
+// P2 固定写 Automation：PitchControlCurve 仍是 H3 门禁后的独立增量，不能借旧 planner 偷渡。
 const PROVENANCE = Object.freeze({
-  planner: "deterministic_pitch_gesture_compiler",
-  anchorsBasis: "observed_snapshot_fingerprints",
-  interpolation: "bounded_no_overshoot",
-  hostWriteSurfaces: Object.freeze(["pitchControl"]),
-  specialLyrics: "official_v2_manual_enter_notes",
+  planner: "pitch_technique_automation_v1",
+  writeSurface: "pitchDelta",
+  composition: "baseline_plus_contribution",
+  verification: "captured_interpolation_then_host_get",
   perception: "human_only",
 });
 
 export class PitchGesturePlanService {
-  constructor({ store, now = () => Date.now(), artifactStore = null, sessionId = null } = {}) {
+  constructor({
+    store,
+    now = () => Date.now(),
+    artifactStore = null,
+    sessionId = null,
+    hostProfile = null,
+    hostProfileHash = null,
+  } = {}) {
     if (!store) throw new Error("PitchGesturePlanService requires the shared SnapshotStore");
     this.store = store;
     this.now = now;
     this.artifactStore = artifactStore;
     this.sessionId = sessionId;
+    this.hostProfile = hostProfile;
+    this.hostProfileHash = hostProfileHash ?? profileHash(hostProfile);
   }
 
   async plan(request = {}) {
-    const timer = new ServiceTiming({ now: this.now, phaseNames: ["loadMs", "buildMs", "compileMs"] });
     const input = normalizePlanRequest(request);
-    timer.requestCoordinator();
     const warnings = [];
-    const loaded = await timer.measure("loadMs", async () => resolvePlanSource(this.store, input));
-    // 紧凑 index 引用在此解析成 Context 内被冻结的 fingerprint 引用（§3.5）。
-    // 必须早于策略选择：那一步也要按 Note 判断语义资格。
-    const resolvedGestures = resolveGestureNotes(input.gestures, loaded);
-    const selection = selectGesturesForPolicy(resolvedGestures, loaded, input, warnings);
-    const gestures = await timer.measure("buildMs", async () =>
-      selection.included.map(({ gesture, requestIndex }) =>
-        instantiateGesture(gesture, loaded, input, warnings, requestIndex)
-      )
-    );
-    const compiled = await timer.measure("compileMs", async () =>
-      compileOperations(gestures, loaded, input, warnings)
-    );
-    return buildPlanResponse(
-      loaded,
+    const loaded = resolvePlanSource(this.store, input);
+    const selected = resolveAndSelectGestures(input.gestures, loaded, warnings);
+    if (selected.length === 0) {
+      return noChangeResponse(input, warnings);
+    }
+
+    const requiresVibratoEnvelope = selected.some(({ gesture }) => gesture.type === "vibrato");
+    const baselines = loadCapturedBaselines(loaded, requiresVibratoEnvelope);
+    const techniques = buildTechniqueCandidates(selected, loaded, input);
+    const ir = buildTechniqueIr({
       input,
-      gestures,
+      loaded,
+      techniques,
+      baselines,
+      hostProfileHash: this.hostProfileHash,
+    });
+    const vibratoGate = requiresVibratoEnvelope
+      ? requireVibratoGate(this.hostProfile, selected)
+      : null;
+
+    const compiled = compileAutomationPlan({
+      input,
+      loaded,
+      ir,
+      baselines,
+      vibratoGate,
+    });
+    warnings.push(...compiled.warnings);
+    if (compiled.curves.length === 0) {
+      return noChangeResponse(input, warnings, { techniques: ir.techniques.length });
+    }
+    return sealPlanResponse({
+      input,
+      loaded,
+      ir,
       compiled,
-      selection,
       warnings,
-      timer.finish(),
-      this.artifactStore,
-      this.sessionId
-    );
+      artifactStore: this.artifactStore,
+      sessionId: this.sessionId,
+    });
   }
 }
 
-// ---------- 上下文与音符解析（纯数据） ----------
+function normalizePlanRequest(request) {
+  if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
+  assertKnownKeys(
+    request,
+    ["contextId", "occurrence", "gestures", "retainCorrectionTarget", "constraints"],
+    "request",
+  );
+  if (typeof request.contextId !== "string" || request.contextId.length === 0) {
+    throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0) {
+    throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer");
+  }
+  if (!Array.isArray(request.gestures) || request.gestures.length === 0 || request.gestures.length > MAX_GESTURES) {
+    throw codedError("INVALID_ARGUMENTS", `gestures must contain 1-${MAX_GESTURES} items`);
+  }
+  if (
+    request.retainCorrectionTarget !== undefined
+    && typeof request.retainCorrectionTarget !== "boolean"
+  ) {
+    throw codedError("INVALID_ARGUMENTS", "retainCorrectionTarget must be a boolean");
+  }
+  return {
+    contextId: request.contextId,
+    occurrence: request.occurrence,
+    gestures: request.gestures.map(normalizeGesture),
+    retainCorrectionTarget:
+      request.retainCorrectionTarget ?? PITCH_GESTURE_DEFAULTS.retainCorrectionTarget,
+    constraints: normalizeConstraints(request.constraints),
+  };
+}
+
+function normalizeGesture(value, index) {
+  const path = `gestures[${index}]`;
+  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", `${path} must be an object`);
+  if (!PITCH_GESTURE_TYPES.includes(value.type)) {
+    throw codedError("INVALID_ARGUMENTS", `${path}.type must be transition, transient, or vibrato`);
+  }
+  if (value.type === "transition") return normalizeTransition(value, path);
+  if (value.type === "transient") return normalizeTransient(value, path);
+  return normalizeVibrato(value, path);
+}
+
+function normalizeTransition(value, path) {
+  assertKnownKeys(value, ["type", "from", "to", "priority", "width", "curve"], path);
+  requireNoteIndex(value.from, `${path}.from`);
+  requireNoteIndex(value.to, `${path}.to`);
+  if (value.from === value.to) {
+    throw codedError("INVALID_ARGUMENTS", `${path}.from and ${path}.to must differ`);
+  }
+  if (!isRecord(value.width)) throw codedError("INVALID_ARGUMENTS", `${path}.width must be an object`);
+  assertKnownKeys(value.width, ["seconds"], `${path}.width`);
+  requireNumber(value.width.seconds, 1e-9, 2, `${path}.width.seconds`);
+  if (!isRecord(value.curve)) throw codedError("INVALID_ARGUMENTS", `${path}.curve must be an object`);
+  if (value.curve.family === "linear") {
+    assertKnownKeys(value.curve, ["family"], `${path}.curve`);
+    return {
+      type: "transition",
+      from: value.from,
+      to: value.to,
+      priority: normalizePriority(value.priority, `${path}.priority`),
+      width: { seconds: value.width.seconds },
+      curve: { family: "linear" },
+    };
+  }
+  if (value.curve.family !== "richards") {
+    throw codedError("INVALID_ARGUMENTS", `${path}.curve.family must be linear or richards`);
+  }
+  assertKnownKeys(
+    value.curve,
+    ["family", "inflectionRatio", "sharpness", "asymmetryLogB"],
+    `${path}.curve`,
+  );
+  return {
+    type: "transition",
+    from: value.from,
+    to: value.to,
+    priority: normalizePriority(value.priority, `${path}.priority`),
+    width: { seconds: value.width.seconds },
+    curve: {
+      family: "richards",
+      inflectionRatio: optionalNumber(value.curve.inflectionRatio, 0.05, 0.95, 0.5, `${path}.curve.inflectionRatio`),
+      sharpness: optionalNumber(value.curve.sharpness, 1, 40, 6, `${path}.curve.sharpness`),
+      asymmetryLogB: optionalNumber(value.curve.asymmetryLogB, -3, 3, 0, `${path}.curve.asymmetryLogB`),
+    },
+  };
+}
+
+function normalizeTransient(value, path) {
+  assertKnownKeys(
+    value,
+    [
+      "type",
+      "note",
+      "intent",
+      "priority",
+      "peakSemitone",
+      "peakTimeSeconds",
+      "dampingRatio",
+      "onsetSeconds",
+      "spanSeconds",
+      "tailPolicy",
+    ],
+    path,
+  );
+  requireNoteIndex(value.note, `${path}.note`);
+  if (!["overshoot", "preparation"].includes(value.intent)) {
+    throw codedError("INVALID_ARGUMENTS", `${path}.intent must be overshoot or preparation`);
+  }
+  requireNumber(value.peakSemitone, -1.5, 1.5, `${path}.peakSemitone`);
+  requireNumber(value.peakTimeSeconds, 0.005, 0.5, `${path}.peakTimeSeconds`);
+  requireNumber(value.spanSeconds, 1e-9, 2, `${path}.spanSeconds`);
+  const dampingRatio = optionalNumber(
+    value.dampingRatio,
+    0,
+    1,
+    value.intent === "overshoot" ? 0.5422 : 0.6681,
+    `${path}.dampingRatio`,
+  );
+  const tailPolicy = value.tailPolicy ?? "reject";
+  if (!["reject", "continuous_taper"].includes(tailPolicy)) {
+    throw codedError("INVALID_ARGUMENTS", `${path}.tailPolicy must be reject or continuous_taper`);
+  }
+  if (dampingRatio === 0 && tailPolicy !== "continuous_taper") {
+    throw codedError(
+      "UNDAMPED_TAIL_REQUIRES_TAPER",
+      `${path}: dampingRatio 0 requires tailPolicy continuous_taper`,
+      { dampingRatio, tailPolicy },
+    );
+  }
+  if (value.peakTimeSeconds >= value.spanSeconds) {
+    throw codedError("INVALID_ARGUMENTS", `${path}.peakTimeSeconds must be below spanSeconds`);
+  }
+  return {
+    type: "transient",
+    note: value.note,
+    intent: value.intent,
+    priority: normalizePriority(value.priority, `${path}.priority`),
+    peakSemitone: value.peakSemitone,
+    peakTimeSeconds: value.peakTimeSeconds,
+    dampingRatio,
+    onsetSeconds: optionalNumber(value.onsetSeconds, -0.5, 0.5, 0, `${path}.onsetSeconds`),
+    spanSeconds: value.spanSeconds,
+    tailPolicy,
+  };
+}
+
+function normalizeVibrato(value, path) {
+  if (value.source === "explicit_pitch_delta") {
+    assertKnownKeys(
+      value,
+      [
+        "type",
+        "source",
+        "note",
+        "priority",
+        "startRatio",
+        "endRatio",
+        "rateHz",
+        "endRateHz",
+        "depthSemitone",
+        "endDepthSemitone",
+        "centerDriftSemitone",
+        "phaseRad",
+        "fadeInSeconds",
+        "fadeOutSeconds",
+      ],
+      path,
+    );
+    requireNoteIndex(value.note, `${path}.note`);
+    const startRatio = optionalNumber(value.startRatio, 0, 1, 0, `${path}.startRatio`);
+    const endRatio = optionalNumber(value.endRatio, 0, 1, 1, `${path}.endRatio`);
+    assertStrictOrder(startRatio, endRatio, "startRatio", "endRatio", path);
+    const rateHz = optionalNumber(value.rateHz, 0.5, 12, 5.5, `${path}.rateHz`);
+    const depthSemitone = optionalNumber(value.depthSemitone, 0.01, 2, 0.3, `${path}.depthSemitone`);
+    return {
+      type: "vibrato",
+      source: "explicit_pitch_delta",
+      note: value.note,
+      priority: normalizePriority(value.priority, `${path}.priority`),
+      startRatio,
+      endRatio,
+      rateHz,
+      endRateHz: optionalNumber(value.endRateHz, 0.5, 12, rateHz, `${path}.endRateHz`),
+      depthSemitone,
+      endDepthSemitone: optionalNumber(
+        value.endDepthSemitone,
+        0.01,
+        2,
+        depthSemitone,
+        `${path}.endDepthSemitone`,
+      ),
+      centerDriftSemitone: optionalNumber(value.centerDriftSemitone, -1, 1, 0, `${path}.centerDriftSemitone`),
+      phaseRad: optionalNumber(value.phaseRad, -PHASE_LIMIT_RAD, PHASE_LIMIT_RAD, 0, `${path}.phaseRad`),
+      fadeInSeconds: optionalNumber(value.fadeInSeconds, 1e-9, 1, 0.3, `${path}.fadeInSeconds`),
+      fadeOutSeconds: optionalNumber(value.fadeOutSeconds, 1e-9, 1, 0.2, `${path}.fadeOutSeconds`),
+    };
+  }
+  if (value.source !== "host_envelope") {
+    throw codedError("INVALID_ARGUMENTS", `${path}.source must be explicit_pitch_delta or host_envelope`);
+  }
+  assertKnownKeys(
+    value,
+    ["type", "source", "note", "priority", "startRatio", "endRatio", "envelopeScale"],
+    path,
+  );
+  requireNoteIndex(value.note, `${path}.note`);
+  const startRatio = optionalNumber(value.startRatio, 0, 1, 0, `${path}.startRatio`);
+  const endRatio = optionalNumber(value.endRatio, 0, 1, 1, `${path}.endRatio`);
+  assertStrictOrder(startRatio, endRatio, "startRatio", "endRatio", path);
+  return {
+    type: "vibrato",
+    source: "host_envelope",
+    note: value.note,
+    priority: normalizePriority(value.priority, `${path}.priority`),
+    startRatio,
+    endRatio,
+    envelopeScale: optionalNumber(value.envelopeScale, 0, 2, 1, `${path}.envelopeScale`),
+  };
+}
+
+function normalizeConstraints(value) {
+  if (value === undefined) return { ...PITCH_GESTURE_DEFAULTS.constraints };
+  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "constraints must be an object");
+  assertKnownKeys(value, ["maxAbsPeakSemitone", "maxTotalPoints", "maxFitErrorCent"], "constraints");
+  return {
+    maxAbsPeakSemitone: optionalNumber(
+      value.maxAbsPeakSemitone,
+      1e-6,
+      1.5,
+      PITCH_GESTURE_DEFAULTS.constraints.maxAbsPeakSemitone,
+      "constraints.maxAbsPeakSemitone",
+    ),
+    maxTotalPoints: optionalInteger(
+      value.maxTotalPoints,
+      2,
+      4000,
+      PITCH_GESTURE_DEFAULTS.constraints.maxTotalPoints,
+      "constraints.maxTotalPoints",
+    ),
+    maxFitErrorCent: optionalNumber(
+      value.maxFitErrorCent,
+      1e-6,
+      20,
+      PITCH_GESTURE_DEFAULTS.constraints.maxFitErrorCent,
+      "constraints.maxFitErrorCent",
+    ),
+  };
+}
 
 function resolvePlanSource(store, input) {
   const stored = store.get(input.contextId);
-  if (!stored) {
-    throw unknownContextError(store, input.contextId);
-  }
+  if (!stored) throw unknownContextError(store, input.contextId);
   if (stored.context?.kind !== "range") {
     throw codedError(
       "INVALID_CONTEXT",
-      'sv_plan_pitch_gesture needs a range context from sv_snapshot_range with include ["notes"]'
+      'sv_plan_pitch_gesture needs a range context from sv_snapshot_range with include ["notes", "automation"]',
     );
   }
-  // 身份解析统一走 scope-source（§3.5）：Context/Occurrence/Note index 的校验与错误
-  // 形状只有一处实现。本函数余下的部分是 planner 自己的派生层。
-  const scope = resolveMutationScope({
-    source: { kind: "snapshot", stored },
-    occurrence: input.occurrence,
-  });
+  const scope = resolveMutationScope({ source: { kind: "snapshot", stored }, occurrence: input.occurrence });
   const occurrence = scope.occurrence;
   const quarterBlick = stored.context.quarterBlick;
   if (!Number.isSafeInteger(quarterBlick) || quarterBlick <= 0) {
     throw codedError("INVALID_CONTEXT", "context is missing a usable SV.QUARTER timebase");
   }
-  const timeOffset = occurrence.timeOffsetBlick ?? 0;
-  // group-local 坐标：PitchControl 的 position 是相对 NoteGroup 的（不含 occurrence timeOffset）。
-  const notes = [...occurrence.noteFingerprints]
+  const tempoMarks = stored.context.tempoMarks;
+  if (!Array.isArray(tempoMarks) || tempoMarks.length === 0) {
+    throw codedError("INVALID_CONTEXT", "context is missing a usable tempo map");
+  }
+  const timeOffsetBlick = occurrence.timeOffsetBlick;
+  if (!Number.isSafeInteger(timeOffsetBlick)) {
+    throw codedError("INVALID_CONTEXT", "occurrence is missing timeOffsetBlick");
+  }
+  const notes = (occurrence.noteFingerprints ?? [])
     .map((fingerprint) => ({
       fingerprint,
       indexInGroup: fingerprint.indexInGroup,
-      lyrics: fingerprint.lyrics,
-      targetSemitone: fingerprint.pitch + (fingerprint.detuneCents ?? 0) / 100,
-      localOnsetBlick: fingerprint.onsetBlick,
-      localEndBlick: fingerprint.onsetBlick + fingerprint.durationBlick,
+      onsetBlick: fingerprint.onsetBlick,
       durationBlick: fingerprint.durationBlick,
+      endBlick: fingerprint.onsetBlick + fingerprint.durationBlick,
+      pitchSemitone: fingerprint.pitch + fingerprint.detuneCents / 100,
+      lyrics: fingerprint.lyrics,
     }))
-    .sort((left, right) => left.localOnsetBlick - right.localOnsetBlick);
-  // 派生视图按 fingerprint 引用索引：展开层返回的就是那个引用，因此是 O(1) 查表。
-  const noteByFingerprint = new Map(notes.map((note) => [note.fingerprint, note]));
-  const semantics = analyzeVocalEventSequence(notes);
-  const semanticEvents = semantics.events;
-  // 共享语义模块原样回传调用方给的 note 对象，因此这里用对象身份建索引。
-  const eventByNote = new Map(semanticEvents.map((event) => [event.note, event]));
+    .sort((left, right) => left.onsetBlick - right.onsetBlick || left.indexInGroup - right.indexInGroup);
+  const noteByIndex = new Map(notes.map((note) => [note.indexInGroup, note]));
+  const semanticEvents = analyzeVocalEventSequence(notes);
+  const eventByIndex = new Map(semanticEvents.events.map((event) => [event.note.indexInGroup, event]));
   return {
     stored,
-    occurrence,
-    notes,
     scope,
-    noteByFingerprint,
-    eventByNote,
-    semanticIssues: semantics.issues,
+    occurrence,
     quarterBlick,
-    tempoMarks: stored.context.tempoMarks ?? [],
-    timeOffsetBlick: timeOffset,
+    tempoMarks,
+    timeOffsetBlick,
+    notes,
+    noteByIndex,
+    eventByIndex,
   };
 }
 
-function requireNote(loaded, fingerprint, label) {
-  const note = loaded.noteByFingerprint.get(fingerprint);
-  if (!note) {
-    throw codedError(
-      "INTERNAL_ERROR",
-      `${label}: fingerprint is not in the planner's derived view; scope and derived notes disagree`
-    );
+function resolveAndSelectGestures(gestures, loaded, warnings) {
+  const selected = [];
+  for (const [requestIndex, gesture] of gestures.entries()) {
+    const indexes = gesture.type === "transition" ? [gesture.from, gesture.to] : [gesture.note];
+    const notes = indexes.map((index, position) => {
+      const field = gesture.type === "transition" ? (position === 0 ? "from" : "to") : "note";
+      resolveNoteIndex(loaded.scope, index, `/gestures/${requestIndex}/${field}`);
+      const note = loaded.noteByIndex.get(index);
+      if (!note) throw codedError("INTERNAL_ERROR", "resolved note is missing from the planner view");
+      return note;
+    });
+    const nonMelodic = notes
+      .map((note) => ({ note, event: loaded.eventByIndex.get(note.indexInGroup) }))
+      .find(({ event }) => event && !event.melodicEligible);
+    if (nonMelodic) {
+      warnings.push({
+        code: "NON_MELODIC_SPECIAL_EVENT_SKIPPED",
+        noteIndex: nonMelodic.note.indexInGroup,
+        semanticRole: nonMelodic.event.semanticRole,
+        evidence: nonMelodic.event.semanticEvidence,
+        message: "Skipped a pitch technique that targets a non-melodic special lyric event.",
+      });
+      continue;
+    }
+    selected.push({ requestIndex, gesture, notes });
   }
-  return note;
+  return selected;
 }
 
-// 把 gesture 里的组内 index 解析成 fingerprint 引用。两种失败保持可区分
-// （越界 / 未捕获）由 resolveNoteIndex 负责。
-function resolveGestureNotes(gestures, loaded) {
-  return gestures.map((gesture, index) => {
-    const path = `/gestures/${index}`;
+function loadCapturedBaselines(loaded, requiresVibratoEnvelope) {
+  const parameters = requiresVibratoEnvelope ? ["pitchDelta", "vibratoEnv"] : ["pitchDelta"];
+  if (loaded.stored.context.automationCaptured !== true) {
+    throw captureEvidenceRequired(parameters, ["automation"]);
+  }
+  const captured = loaded.stored.context.automationByOccurrence?.[loaded.scope.occurrenceOrdinal] ?? [];
+  const baselines = new Map();
+  for (const parameter of parameters) {
+    const curve = captured.find((item) => item?.resolvedParameter === parameter);
+    if (!curve) throw captureEvidenceRequired(parameters, [parameter]);
+    baselines.set(
+      parameter,
+      createCapturedAutomationBaseline({
+        curve,
+        contextId: loaded.stored.contextId,
+        parameter,
+      }),
+    );
+  }
+  return baselines;
+}
+
+function buildTechniqueCandidates(selected, loaded, input) {
+  return selected.map(({ requestIndex, gesture, notes }) => {
     if (gesture.type === "transition") {
+      const [fromNote, toNote] = notes;
+      const from = noteWithSeconds(fromNote, loaded);
+      const to = noteWithSeconds(toNote, loaded);
+      const transition = compilePitchDeltaTransition({
+        fromNote: from,
+        toNote: to,
+        widthSeconds: gesture.width.seconds,
+        curve: gesture.curve,
+        maxAbsPitchDeltaCent: input.constraints.maxAbsPeakSemitone * 100,
+      });
       return {
-        ...gesture,
-        fromNote: resolveNoteIndex(loaded.scope, gesture.from, `${path}/from`),
-        toNote: resolveNoteIndex(loaded.scope, gesture.to, `${path}/to`),
+        id: `request_${requestIndex}`,
+        requestIndex,
+        kind: "portamento",
+        anchors: { fromNote: fromNote.indexInGroup, toNote: toNote.indexInGroup },
+        priority: gesture.priority,
+        exclusive: false,
+        model: gesture.curve.family === "linear"
+          ? { family: "linear" }
+          : {
+              family: "richards_segment_normalized",
+              inflectionRatio: gesture.curve.inflectionRatio,
+              sharpness: gesture.curve.sharpness,
+              asymmetryLogB: gesture.curve.asymmetryLogB,
+            },
+        span: { fromSeconds: transition.fromSeconds, toSeconds: transition.toSeconds },
+      };
+    }
+    const [note] = notes;
+    const noteTiming = noteWithSeconds(note, loaded);
+    if (gesture.type === "transient") {
+      const fromSeconds = noteTiming.onsetSeconds + gesture.onsetSeconds;
+      const toSeconds = fromSeconds + gesture.spanSeconds;
+      assertProjectSeconds(fromSeconds, toSeconds, loaded, "transient");
+      if (Math.abs(gesture.peakSemitone) > input.constraints.maxAbsPeakSemitone) {
+        throw codedError("CONSTRAINT_VIOLATION", "transient peak exceeds constraints.maxAbsPeakSemitone", {
+          peakSemitone: gesture.peakSemitone,
+          maxAbsPeakSemitone: input.constraints.maxAbsPeakSemitone,
+        });
+      }
+      // 编译一次以提前报告 tail/taper 关系错误，避免把失败拖到密封之后。
+      compileFirstPeakTransient({
+        peakSemitone: gesture.peakSemitone,
+        peakTimeSeconds: gesture.peakTimeSeconds,
+        dampingRatio: gesture.dampingRatio,
+        onsetSeconds: fromSeconds,
+        spanSeconds: gesture.spanSeconds,
+        tailPolicy: gesture.tailPolicy,
+        maxFitErrorCent: input.constraints.maxFitErrorCent,
+        sampleIntervalSeconds: BASE_SAMPLE_INTERVAL_SECONDS,
+      });
+      return {
+        id: `request_${requestIndex}`,
+        requestIndex,
+        kind: "transient",
+        anchors: { note: note.indexInGroup },
+        priority: gesture.priority,
+        exclusive: false,
+        model: {
+          family: "first_peak_transient",
+          intent: gesture.intent,
+          peakSemitone: gesture.peakSemitone,
+          peakTimeSeconds: gesture.peakTimeSeconds,
+          dampingRatio: gesture.dampingRatio,
+          onsetSeconds: fromSeconds,
+          spanSeconds: gesture.spanSeconds,
+          tailPolicy: gesture.tailPolicy,
+          taperRatio: TRANSIENT_TAPER_RATIO,
+          maxFitErrorCent: input.constraints.maxFitErrorCent,
+          sampleIntervalSeconds: BASE_SAMPLE_INTERVAL_SECONDS,
+        },
+        span: { fromSeconds, toSeconds },
+      };
+    }
+    const durationSeconds = noteTiming.endSeconds - noteTiming.onsetSeconds;
+    const startSeconds = noteTiming.onsetSeconds + durationSeconds * gesture.startRatio;
+    const endSeconds = noteTiming.onsetSeconds + durationSeconds * gesture.endRatio;
+    assertProjectSeconds(startSeconds, endSeconds, loaded, "vibrato");
+    if (gesture.source === "explicit_pitch_delta") {
+      if (
+        Math.max(Math.abs(gesture.depthSemitone), Math.abs(gesture.endDepthSemitone))
+        > input.constraints.maxAbsPeakSemitone
+      ) {
+        throw codedError("CONSTRAINT_VIOLATION", "vibrato depth exceeds constraints.maxAbsPeakSemitone", {
+          maximumDepthSemitone: Math.max(Math.abs(gesture.depthSemitone), Math.abs(gesture.endDepthSemitone)),
+          maxAbsPeakSemitone: input.constraints.maxAbsPeakSemitone,
+        });
+      }
+      return {
+        id: `request_${requestIndex}`,
+        requestIndex,
+        kind: "vibrato",
+        anchors: { note: note.indexInGroup },
+        priority: gesture.priority,
+        exclusive: false,
+        model: {
+          family: "time_varying_vibrato",
+          source: "explicit_pitch_delta",
+          startRatio: gesture.startRatio,
+          endRatio: gesture.endRatio,
+          startSeconds,
+          endSeconds,
+          rateHz: gesture.rateHz,
+          endRateHz: gesture.endRateHz,
+          depthSemitone: gesture.depthSemitone,
+          endDepthSemitone: gesture.endDepthSemitone,
+          centerDriftSemitone: gesture.centerDriftSemitone,
+          phaseRad: gesture.phaseRad,
+          fadeInSeconds: gesture.fadeInSeconds,
+          fadeOutSeconds: gesture.fadeOutSeconds,
+        },
+        span: { fromSeconds: startSeconds, toSeconds: endSeconds },
       };
     }
     return {
-      ...gesture,
-      note: resolveNoteIndex(loaded.scope, gesture.note, `${path}/note`),
+      id: `request_${requestIndex}`,
+      requestIndex,
+      kind: "vibrato",
+      anchors: { note: note.indexInGroup },
+      priority: gesture.priority,
+      exclusive: false,
+      model: {
+        family: "host_envelope",
+        source: "host_envelope",
+        startRatio: gesture.startRatio,
+        endRatio: gesture.endRatio,
+        startSeconds,
+        endSeconds,
+        envelopeScale: gesture.envelopeScale,
+      },
+      span: { fromSeconds: startSeconds, toSeconds: endSeconds },
     };
   });
 }
 
-function selectGesturesForPolicy(gestures, loaded, input, warnings) {
-  const included = [];
-  const excluded = [];
-  // 关联走对象身份，但两侧的"对象"不是同一个：gesture 持有 Context 里的 fingerprint，
-  // 而共享语义模块回传的是本 planner 传进去的派生视图对象。用 noteByFingerprint 把
-  // 前者映射成后者，比较才成立。
-  const referenced = new Set(
-    gestures
-      .flatMap((item) => gestureNotes(item))
-      .map((fingerprint) => loaded.noteByFingerprint.get(fingerprint))
-  );
-  for (const issue of loaded.semanticIssues) {
-    if ((issue.notes ?? []).some((note) => referenced.has(note))) {
-      warnings.push({ ...issue });
-    }
+function buildTechniqueIr({ input, loaded, techniques, baselines, hostProfileHash }) {
+  const requiredParameters = techniques.some((technique) => technique.kind === "vibrato")
+    ? ["pitchDelta", "vibratoEnv"]
+    : ["pitchDelta"];
+  return normalizeTechniqueIr({
+    schemaVersion: 1,
+    modelVersion: "pitch-techniques-v1",
+    scope: {
+      contextId: input.contextId,
+      occurrence: input.occurrence,
+      expectedTargetGroupUuid: loaded.occurrence.targetGroupUuid,
+    },
+    timeDomain: "seconds",
+    referenceFrame: "pitch_delta_contribution_cents",
+    techniques,
+    composition: {
+      rule: "sum_then_clamp",
+      maxAbsCents: input.constraints.maxAbsPeakSemitone * 100,
+      overlapPolicy: "explicit_priority_then_canonical_key",
+    },
+    target: {
+      surface: "pitchDelta",
+      compositionMode: "baseline_plus_contribution",
+      mutationMode: "replace",
+      referenceFrame: "pitch_delta_contribution_cents",
+      requiredInclude: {
+        include: ["notes", "automation"],
+        automationParameters: requiredParameters,
+      },
+      baselineGuard: Object.fromEntries(requiredParameters.map((parameter) => [
+        `${parameter}Fingerprint`,
+        baselines.get(parameter).fingerprint,
+      ])),
+      interpolationEvidence: Object.fromEntries(requiredParameters.map((parameter) => [
+        parameter,
+        baselines.get(parameter).interpolationEvidence,
+      ])),
+      hostProfileHash,
+    },
+  });
+}
+
+function compileAutomationPlan({ input, loaded, ir, baselines, vibratoGate }) {
+  const warnings = [];
+  const pitchTechniques = ir.techniques.filter((technique) => technique.model.source !== "host_envelope");
+  const envelopeTechniques = ir.techniques.filter((technique) => technique.model.source === "host_envelope");
+  const curves = [];
+  let pitchDetail = null;
+  if (pitchTechniques.length > 0) {
+    const pitchIr = normalizeTechniqueIr({
+      ...ir,
+      techniques: pitchTechniques.map((technique) => ({
+        id: technique.id,
+        kind: technique.kind,
+        anchors: technique.anchors,
+        priority: technique.priority,
+        exclusive: technique.exclusive,
+        model: technique.model,
+        span: technique.span,
+      })),
+      target: pitchOnlyTarget(ir.target),
+    });
+    const pitch = compilePitchDeltaCurves({ input, loaded, ir: pitchIr, baseline: baselines.get("pitchDelta") });
+    curves.push(...pitch.curves);
+    warnings.push(...pitch.warnings);
+    pitchDetail = pitch.detail;
   }
-  for (let requestIndex = 0; requestIndex < gestures.length; requestIndex += 1) {
-    const gesture = gestures[requestIndex];
-    const gestureId = `g${requestIndex}-${gesture.type}`;
-    const targetedEvents = gestureNotes(gesture)
-      .map((fingerprint) => loaded.eventByNote.get(loaded.noteByFingerprint.get(fingerprint)))
-      .filter(Boolean);
-    const nonMelodic = targetedEvents.filter((event) => !event.melodicEligible);
-    if (nonMelodic.length === 0 || input.specialEventPolicy === "include") {
-      included.push({ gesture, requestIndex });
+  if (envelopeTechniques.length > 0) {
+    const envelope = compileEnvelopeScaleCurves({
+      input,
+      loaded,
+      techniques: envelopeTechniques,
+      baseline: baselines.get("vibratoEnv"),
+    });
+    curves.push(...envelope.curves);
+    warnings.push(...envelope.warnings);
+  }
+  const explicit = ir.techniques.filter((technique) => technique.model.source === "explicit_pitch_delta");
+  if (explicit.length > 0) {
+    const suppressed = compileExplicitVibratoSuppression({
+      input,
+      loaded,
+      techniques: explicit,
+      baseline: baselines.get("vibratoEnv"),
+      gate: vibratoGate,
+    });
+    curves.push(...suppressed.curves);
+  }
+  const totalPoints = curves.reduce((total, curve) => total + decodeDense(curve.points).length, 0);
+  if (totalPoints > input.constraints.maxTotalPoints) {
+    throw codedError("PITCH_DELTA_POINT_BUDGET_EXCEEDED", "compiled points exceed constraints.maxTotalPoints", {
+      maximum: input.constraints.maxTotalPoints,
+      actual: totalPoints,
+    });
+  }
+  return {
+    curves,
+    warnings,
+    pointCount: totalPoints,
+    detail: pitchDetail,
+  };
+}
+
+function compilePitchDeltaCurves({ input, loaded, ir, baseline }) {
+  const descriptors = buildPitchDescriptors(ir, loaded, input);
+  const mandatory = buildPitchMandatoryAnchors({ descriptors, ir, baseline, loaded, input });
+  const grid = buildTechniqueGrid({
+    techniques: ir.techniques,
+    mandatoryTimes: mandatory.map((anchor) => anchor.timeSeconds),
+    baseline,
+    loaded,
+    maxPoints: input.constraints.maxTotalPoints,
+    vibratoRateHz: maximumVibratoRate(ir.techniques),
+  });
+  const baselineCents = grid.seconds.map((seconds, index) => (
+    grid.finiteMask[index] ? evaluateBaselineAtSeconds(baseline, seconds, loaded) : null
+  ));
+  const techniqueValues = ir.techniques.map((technique) => ({
+    canonicalKey: technique.canonicalKey,
+    values: grid.seconds.map((seconds, index) => (
+      grid.finiteMask[index] ? descriptors.get(technique.canonicalKey).evaluate(seconds) : null
+    )),
+  }));
+  const composition = composeTechniqueContributions({
+    ir,
+    seconds: grid.seconds,
+    finiteMask: grid.finiteMask,
+    techniqueValues,
+    baselineCents,
+  });
+  const evidence = deepFreeze({
+    notes: loaded.notes.map((note) => ({
+      indexInGroup: note.indexInGroup,
+      onsetBlick: note.onsetBlick,
+      durationBlick: note.durationBlick,
+      pitchSemitone: note.pitchSemitone,
+    })),
+    occurrenceTimeOffsetBlick: loaded.timeOffsetBlick,
+    tempoMarks: loaded.tempoMarks,
+    quarterBlick: loaded.quarterBlick,
+    baselineCents,
+    mandatoryAnchors: mandatory,
+  });
+  const plan = compilePitchDeltaMutationPlan({
+    ir,
+    composition,
+    evidence,
+    maxPoints: input.constraints.maxTotalPoints,
+  });
+  const curves = attachHostInterpolation({
+    curves: plan.mutation.curves,
+    baseline,
+    mandatoryAnchors: mandatory,
+    maxFitErrorCent: input.constraints.maxFitErrorCent,
+    loaded,
+  });
+  return {
+    curves,
+    warnings: composition.warnings,
+    detail: { ir, composition, evidence, compiler: plan },
+  };
+}
+
+function compileEnvelopeScaleCurves({ input, loaded, techniques, baseline }) {
+  const grid = buildTechniqueGrid({
+    techniques,
+    mandatoryTimes: techniques.flatMap((technique) => [technique.span.fromSeconds, technique.span.toSeconds]),
+    baseline,
+    loaded,
+    maxPoints: input.constraints.maxTotalPoints,
+    vibratoRateHz: 0,
+  });
+  const runs = splitGridRuns(grid);
+  const curves = [];
+  for (const run of runs) {
+    const points = run.map(({ seconds }) => {
+      const blick = localBlickAtSeconds(seconds, loaded);
+      const factor = techniques.reduce((product, technique) => (
+        seconds >= technique.span.fromSeconds && seconds <= technique.span.toSeconds
+          ? product * technique.model.envelopeScale
+          : product
+      ), 1);
+      return { blick, value: quantize(evaluateCapturedAutomation(baseline, blick) * factor) };
+    });
+    const normalized = normalizePlannedPoints(points, "vibratoEnv");
+    if (normalized.every((point) => sameValue(point.value, evaluateCapturedAutomation(baseline, point.blick)))) {
       continue;
     }
-    const first = nonMelodic[0];
-    if (input.specialEventPolicy === "error") {
-      const error = codedError(
-        "NON_MELODIC_SPECIAL_EVENT_TARGETED",
-        `${gestureId} targets a non-melodic special lyric event`
-      );
-      error.details = {
-        gestureId,
-        noteIndex: first.note.indexInGroup,
-        semanticRole: first.semanticRole,
-        lyrics: first.classification.rawLyrics,
-        evidence: first.semanticEvidence,
-      };
-      throw error;
+    const mandatory = normalized.filter((point) => (
+      techniques.some((technique) => (
+        point.blick === localBlickAtSeconds(technique.span.fromSeconds, loaded)
+        || point.blick === localBlickAtSeconds(technique.span.toSeconds, loaded)
+      ))
+    ));
+    curves.push(attachOneHostInterpolation({
+      curve: encodeReplaceCurve("vibratoEnv", normalized),
+      baseline,
+      mandatoryPoints: mandatory,
+      maxFitErrorCent: input.constraints.maxFitErrorCent,
+    }));
+  }
+  return { curves, warnings: [] };
+}
+
+function compileExplicitVibratoSuppression({ input, loaded, techniques, baseline, gate }) {
+  if (!gate?.suppression) {
+    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "explicit pitchDelta vibrato has no confirmed safe vibratoEnv suppression", {
+      semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
+    });
+  }
+  const value = gate.suppression.value;
+  const grid = buildTechniqueGrid({
+    techniques,
+    mandatoryTimes: techniques.flatMap((technique) => [technique.span.fromSeconds, technique.span.toSeconds]),
+    baseline,
+    loaded,
+    maxPoints: input.constraints.maxTotalPoints,
+    vibratoRateHz: 0,
+  });
+  const curves = [];
+  for (const run of splitGridRuns(grid)) {
+    const points = normalizePlannedPoints(
+      run.map(({ seconds }) => ({ blick: localBlickAtSeconds(seconds, loaded), value })),
+      "vibratoEnv",
+    );
+    curves.push(attachOneHostInterpolation({
+      curve: encodeReplaceCurve("vibratoEnv", points),
+      baseline,
+      mandatoryPoints: [points[0], points.at(-1)],
+      maxFitErrorCent: input.constraints.maxFitErrorCent,
+    }));
+  }
+  return { curves };
+}
+
+function buildPitchDescriptors(ir, loaded, input) {
+  const descriptors = new Map();
+  for (const technique of ir.techniques) {
+    if (technique.kind === "portamento") {
+      const from = noteWithSeconds(requireLoadedNote(loaded, technique.anchors.fromNote), loaded);
+      const to = noteWithSeconds(requireLoadedNote(loaded, technique.anchors.toNote), loaded);
+      const compiled = compilePitchDeltaTransition({
+        fromNote: from,
+        toNote: to,
+        widthSeconds: technique.span.toSeconds - technique.span.fromSeconds,
+        curve: technique.model.family === "linear"
+          ? { family: "linear" }
+          : {
+              family: "richards",
+              inflectionRatio: technique.model.inflectionRatio,
+              sharpness: technique.model.sharpness,
+              asymmetryLogB: technique.model.asymmetryLogB,
+            },
+        maxAbsPitchDeltaCent: input.constraints.maxAbsPeakSemitone * 100,
+      });
+      descriptors.set(technique.canonicalKey, {
+        technique,
+        compiled,
+        evaluate: (seconds, side = "auto") => compiled.contributionCentAt(seconds, side),
+      });
+      continue;
     }
-    excluded.push({ gestureId, events: nonMelodic });
-    for (const event of nonMelodic) {
-      warnings.push({
-        code: "NON_MELODIC_SPECIAL_EVENT_SKIPPED",
-        gestureId,
-        noteIndex: event.note.indexInGroup,
-        semanticRole: event.semanticRole,
-        lyrics: event.classification.rawLyrics,
-        evidence: event.semanticEvidence,
-        message: "Skipped pitch planning for a non-melodic special lyric event.",
+    if (technique.kind === "transient") {
+      const compiled = compileFirstPeakTransient({
+        peakSemitone: technique.model.peakSemitone,
+        peakTimeSeconds: technique.model.peakTimeSeconds,
+        dampingRatio: technique.model.dampingRatio,
+        onsetSeconds: technique.model.onsetSeconds,
+        spanSeconds: technique.model.spanSeconds,
+        tailPolicy: technique.model.tailPolicy,
+        maxFitErrorCent: technique.model.maxFitErrorCent,
+        sampleIntervalSeconds: technique.model.sampleIntervalSeconds,
+      });
+      descriptors.set(technique.canonicalKey, {
+        technique,
+        compiled,
+        evaluate: (seconds) => compiled.valueAt(seconds) * 100,
+      });
+      continue;
+    }
+    const model = technique.model;
+    descriptors.set(technique.canonicalKey, {
+      technique,
+      evaluate: (seconds) => timeVaryingVibrato(seconds, {
+        startSeconds: model.startSeconds,
+        endSeconds: model.endSeconds,
+        rateStartHz: model.rateHz,
+        rateEndHz: model.endRateHz,
+        depthStartSemitone: model.depthSemitone,
+        depthEndSemitone: model.endDepthSemitone,
+        centerStartSemitone: 0,
+        centerEndSemitone: model.centerDriftSemitone,
+        phaseRad: model.phaseRad,
+        fadeInSeconds: model.fadeInSeconds,
+        fadeOutSeconds: model.fadeOutSeconds,
+      }) * 100,
+    });
+  }
+  return descriptors;
+}
+
+function buildPitchMandatoryAnchors({ descriptors, ir, baseline, loaded, input }) {
+  const anchors = [];
+  const totalAt = (seconds, current = null, side = "auto") => quantize(
+    Math.max(
+      -ir.composition.maxAbsCents,
+      Math.min(
+        ir.composition.maxAbsCents,
+        [...descriptors.values()].reduce(
+          (total, descriptor) => total + descriptor.evaluate(
+            seconds,
+            descriptor.technique.canonicalKey === current ? side : "auto",
+          ),
+          0,
+        ),
+      ),
+    ),
+  );
+  const push = (descriptor, role, seconds, side = "auto", localBlick = null) => {
+    const blick = localBlick ?? localBlickAtSeconds(seconds, loaded);
+    anchors.push({
+      canonicalKey: descriptor.technique.canonicalKey,
+      role,
+      timeSeconds: seconds,
+      contributionCents: totalAt(seconds, descriptor.technique.canonicalKey, side),
+      baselineCents: evaluateCapturedAutomation(baseline, blick),
+    });
+  };
+  for (const descriptor of descriptors.values()) {
+    const { technique } = descriptor;
+    if (technique.kind === "portamento") {
+      const boundaryLocalBlick = requireLoadedNote(loaded, technique.anchors.toNote).onsetBlick;
+      push(descriptor, "start", technique.span.fromSeconds);
+      push(descriptor, "boundary_before", descriptor.compiled.boundarySeconds, "before", boundaryLocalBlick - 1);
+      push(descriptor, "boundary_at", descriptor.compiled.boundarySeconds, "at", boundaryLocalBlick);
+      push(descriptor, "end", technique.span.toSeconds);
+      if (technique.model.family === "richards_segment_normalized") {
+        push(
+          descriptor,
+          "inflection",
+          technique.span.fromSeconds
+            + (technique.span.toSeconds - technique.span.fromSeconds) * technique.model.inflectionRatio,
+        );
+      }
+      continue;
+    }
+    push(descriptor, "start", technique.span.fromSeconds);
+    if (technique.kind === "transient") {
+      push(descriptor, "peak", technique.model.onsetSeconds + technique.model.peakTimeSeconds);
+      if (technique.model.tailPolicy === "continuous_taper") {
+        push(
+          descriptor,
+          "taper_start",
+          technique.model.onsetSeconds + technique.model.spanSeconds * (1 - TRANSIENT_TAPER_RATIO),
+        );
+      }
+    } else {
+      const duration = technique.span.toSeconds - technique.span.fromSeconds;
+      push(descriptor, "fade_in_end", Math.min(technique.span.toSeconds, technique.span.fromSeconds + technique.model.fadeInSeconds));
+      push(descriptor, "fade_out_start", Math.max(technique.span.fromSeconds, technique.span.toSeconds - technique.model.fadeOutSeconds));
+      const extrema = vibratoExtrema(descriptor, duration, input.constraints.maxTotalPoints);
+      extrema.forEach((seconds, index) => push(descriptor, `extremum_${alphabeticOrdinal(index)}`, seconds));
+    }
+    push(descriptor, "end", technique.span.toSeconds);
+  }
+  return anchors.sort((left, right) => (
+    left.timeSeconds - right.timeSeconds
+    || left.canonicalKey.localeCompare(right.canonicalKey)
+    || left.role.localeCompare(right.role)
+  ));
+}
+
+function vibratoExtrema(descriptor, duration, pointBudget) {
+  const rate = Math.max(descriptor.technique.model.rateHz, descriptor.technique.model.endRateHz);
+  const samples = Math.min(pointBudget, Math.max(8, Math.ceil(duration * rate * 24)));
+  const result = [];
+  let previous = descriptor.evaluate(descriptor.technique.span.fromSeconds);
+  let current = descriptor.evaluate(descriptor.technique.span.fromSeconds + duration / samples);
+  for (let index = 1; index < samples; index += 1) {
+    const seconds = descriptor.technique.span.fromSeconds + (duration * index) / samples;
+    const next = descriptor.evaluate(descriptor.technique.span.fromSeconds + (duration * (index + 1)) / samples);
+    if ((current >= previous && current > next) || (current <= previous && current < next)) result.push(seconds);
+    previous = current;
+    current = next;
+  }
+  return result;
+}
+
+function alphabeticOrdinal(index) {
+  let remaining = index;
+  let output = "";
+  do {
+    output = String.fromCharCode(97 + (remaining % 26)) + output;
+    remaining = Math.floor(remaining / 26) - 1;
+  } while (remaining >= 0);
+  return output;
+}
+
+function buildTechniqueGrid({ techniques, mandatoryTimes, baseline, loaded, maxPoints, vibratoRateHz }) {
+  const spans = mergeSpans(techniques.map((technique) => technique.span));
+  const step = vibratoRateHz > 0
+    ? Math.min(BASE_SAMPLE_INTERVAL_SECONDS, 1 / (vibratoRateHz * 24))
+    : BASE_SAMPLE_INTERVAL_SECONDS;
+  const samples = [];
+  for (const span of spans) {
+    const steps = Math.max(1, Math.ceil((span.toSeconds - span.fromSeconds) / step));
+    for (let index = 0; index <= steps; index += 1) {
+      samples.push({ seconds: span.fromSeconds + ((span.toSeconds - span.fromSeconds) * index) / steps, finite: true });
+    }
+    for (const seconds of mandatoryTimes) {
+      if (seconds >= span.fromSeconds && seconds <= span.toSeconds) samples.push({ seconds, finite: true });
+    }
+    for (const point of baseline.points) {
+      const seconds = secondsAtBlick(
+        loaded.tempoMarks,
+        loaded.quarterBlick,
+        point.blick + loaded.timeOffsetBlick,
+      );
+      if (Number.isFinite(seconds) && seconds >= span.fromSeconds && seconds <= span.toSeconds) {
+        samples.push({ seconds, finite: true });
+      }
+    }
+  }
+  for (let index = 1; index < spans.length; index += 1) {
+    samples.push({
+      seconds: (spans[index - 1].toSeconds + spans[index].fromSeconds) / 2,
+      finite: false,
+    });
+  }
+  const deduped = new Map();
+  for (const sample of samples) {
+    const seconds = quantizeSeconds(sample.seconds);
+    const existing = deduped.get(seconds);
+    if (existing === undefined || sample.finite) deduped.set(seconds, sample.finite);
+  }
+  const ordered = [...deduped.entries()].sort((left, right) => left[0] - right[0]);
+  const finiteCount = ordered.filter(([, finite]) => finite).length;
+  if (finiteCount > maxPoints) {
+    throw codedError("PITCH_DELTA_POINT_BUDGET_EXCEEDED", "technique sampling exceeds constraints.maxTotalPoints", {
+      maximum: maxPoints,
+      actual: finiteCount,
+    });
+  }
+  return {
+    seconds: ordered.map(([seconds]) => seconds),
+    finiteMask: ordered.map(([, finite]) => finite),
+  };
+}
+
+function splitGridRuns(grid) {
+  const runs = [];
+  let active = [];
+  for (let index = 0; index < grid.seconds.length; index += 1) {
+    if (!grid.finiteMask[index]) {
+      if (active.length > 0) runs.push(active);
+      active = [];
+      continue;
+    }
+    active.push({ seconds: grid.seconds[index] });
+  }
+  if (active.length > 0) runs.push(active);
+  return runs;
+}
+
+function attachHostInterpolation({ curves, baseline, mandatoryAnchors, maxFitErrorCent, loaded }) {
+  return curves.map((curve) => {
+    const points = decodeDense(curve.points);
+    const mandatoryPoints = mandatoryAnchors
+      .map((anchor) => ({
+        blick: anchorLocalBlick(anchor, loaded),
+        value: pointValueAt(points, anchorLocalBlick(anchor, loaded)),
+      }))
+      .filter((point) => point.blick >= curve.range.fromBlick && point.blick <= curve.range.toBlick);
+    return attachOneHostInterpolation({ curve, baseline, mandatoryPoints, maxFitErrorCent });
+  });
+}
+
+function attachOneHostInterpolation({ curve, baseline, mandatoryPoints, maxFitErrorCent }) {
+  const points = decodeDense(curve.points);
+  const range = curve.range;
+  const finalSupport = replaceAutomationPoints(baseline, range, points);
+  const mandatory = dedupePointSamples([
+    ...mandatoryPoints,
+    { blick: points[0].blick, value: points[0].value },
+    { blick: points.at(-1).blick, value: points.at(-1).value },
+  ], "mandatory");
+  const baselineBlicks = dedupeIntegers([
+    points[0].blick,
+    points.at(-1).blick,
+    ...baseline.points
+      .filter((point) => point.blick >= range.fromBlick && point.blick <= range.toBlick)
+      .map((point) => point.blick),
+  ]).slice(0, MAX_VERIFICATION_MANDATORY_SAMPLES);
+  const baselineSamples = baselineBlicks.map((blick) => ({
+    blick,
+    value: evaluateCapturedAutomation(baseline, blick),
+  }));
+  const adaptiveMidpoints = buildAdaptiveMidpoints({
+    points,
+    finalSupport,
+    method: baseline.method,
+    defaultValue: baseline.defaultValue,
+    excluded: new Set(mandatory.map((sample) => sample.blick)),
+  });
+  return {
+    ...curve,
+    hostInterpolation: buildHostInterpolationPostcondition({
+      interpolationEvidence: baseline.interpolationEvidence,
+      baselineSamples,
+      mandatorySamples: mandatory,
+      adaptiveMidpoints,
+      maxFitErrorCent,
+    }),
+  };
+}
+
+function buildAdaptiveMidpoints({ points, finalSupport, method, defaultValue, excluded }) {
+  const candidates = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const left = points[index - 1];
+    const right = points[index];
+    if (right.blick - left.blick < 2) continue;
+    const blick = left.blick + Math.floor((right.blick - left.blick) / 2);
+    if (excluded.has(blick)) continue;
+    candidates.push({
+      blick,
+      leftBlick: left.blick,
+      rightBlick: right.blick,
+      value: evaluateAutomationPoints({ method, defaultValue, points: finalSupport, blick }),
+    });
+  }
+  candidates.sort((left, right) => (
+    (right.rightBlick - right.leftBlick) - (left.rightBlick - left.leftBlick)
+    || left.blick - right.blick
+  ));
+  return candidates
+    .slice(0, MAX_VERIFICATION_ADAPTIVE_SAMPLES)
+    .sort((left, right) => left.blick - right.blick);
+}
+
+function encodeReplaceCurve(parameter, points) {
+  const normalized = normalizePlannedPoints(points, parameter);
+  return {
+    parameter,
+    mode: "replace",
+    range: {
+      fromBlick: normalized[0].blick,
+      toBlick: normalized.at(-1).blick,
+      coordinate: "local",
+    },
+    points: encodeDense(normalized, DENSE_POINT_PROFILE),
+  };
+}
+
+function normalizePlannedPoints(points, parameter) {
+  const byBlick = new Map();
+  for (const point of points) {
+    if (!Number.isSafeInteger(point.blick) || !Number.isFinite(point.value)) {
+      throw codedError("TIME_AXIS_MAPPING_UNAVAILABLE", `cannot map ${parameter} plan to local BLICK`);
+    }
+    const previous = byBlick.get(point.blick);
+    if (previous !== undefined && !sameValue(previous, point.value)) {
+      throw codedError("PITCH_DELTA_TIME_RESOLUTION_TOO_COARSE", "different values collapse to one BLICK", {
+        parameter,
+        blick: point.blick,
       });
     }
+    byBlick.set(point.blick, quantize(point.value));
   }
+  const normalized = [...byBlick.entries()]
+    .map(([blick, value]) => ({ blick, value }))
+    .sort((left, right) => left.blick - right.blick);
+  if (normalized.length < 2 || normalized.at(-1).blick <= normalized[0].blick) {
+    throw codedError("PITCH_DELTA_RUN_TOO_SHORT", `${parameter} needs two distinct local BLICK points`);
+  }
+  if (normalized.length > 2000) {
+    throw codedError("PITCH_DELTA_CURVE_POINT_BUDGET_EXCEEDED", `${parameter} exceeds 2000 points`);
+  }
+  return normalized;
+}
 
-  const uniqueEvents = new Map();
-  for (const item of excluded) {
-    for (const event of item.events) uniqueEvents.set(event.note, event);
-  }
-  const byRole = Object.create(null);
-  for (const event of uniqueEvents.values()) {
-    byRole[event.semanticRole] = (byRole[event.semanticRole] ?? 0) + 1;
-  }
-  return {
-    included,
-    skippedGestureCount: excluded.length,
-    excludedEvents: {
-      count: uniqueEvents.size,
-      byRole,
+function sealPlanResponse({ input, loaded, ir, compiled, warnings, artifactStore, sessionId }) {
+  if (!artifactStore || !sessionId) throw planSealError();
+  const expectedNotes = selectedExpectedNotes(ir, loaded);
+  const planId = `plan_${canonicalHashHex({
+    contextId: input.contextId,
+    occurrence: input.occurrence,
+    ir,
+    curves: compiled.curves,
+  }).slice(0, 16)}`;
+  const mutationRequest = {
+    target: {
+      contextId: input.contextId,
+      occurrence: input.occurrence,
+      ...(loaded.occurrence.targetGroupUuid
+        ? { expectedGroupUuid: loaded.occurrence.targetGroupUuid }
+        : {}),
+      expectedTimeOffsetBlick: loaded.timeOffsetBlick,
+      ...(expectedNotes.length > 0 ? { expectedNotes } : {}),
     },
+    curves: compiled.curves,
+    action: "dry_run",
+    atomic: true,
+    undoLabel: `sv_plan_pitch_gesture ${planId}`,
   };
-}
-
-// gesture 携带的 Note 引用（fingerprint 对象），用于语义策略判断。
-function gestureNotes(gesture) {
-  return ["note", "fromNote", "toNote"]
-    .map((key) => gesture[key])
-    .filter((value) => value !== undefined && value !== null);
-}
-
-// ---------- 时间量解析：秒 / 音符比例 / quarter，统一成整数 BLICK ----------
-
-// seconds → blick 走 TimeAxis（tempo map）。缺 tempo 即 TEMPO_MAP_MISSING（可改 quarter/noteRatio）。
-function secondsToBlick(loaded, seconds, label) {
-  const reference = loaded.notes[0] ? loaded.notes[0].localOnsetBlick + loaded.timeOffsetBlick : loaded.timeOffsetBlick;
-  const referenceSeconds = secondsAtBlick(loaded.tempoMarks, loaded.quarterBlick, reference);
-  if (referenceSeconds === null) {
-    throw codedError("TEMPO_MAP_MISSING", `${label}: seconds need a usable tempo map; use quarters or noteRatio`);
-  }
-  const blick = blickAtSeconds(loaded.tempoMarks, loaded.quarterBlick, referenceSeconds + seconds);
-  if (blick === null) {
-    throw codedError("TEMPO_MAP_MISSING", `${label}: seconds need a usable tempo map; use quarters or noteRatio`);
-  }
-  return Math.max(1, Math.round(blick - reference));
-}
-
-function quartersToBlick(quarters, quarterBlick) {
-  return Math.max(1, Math.round(quarters * quarterBlick));
-}
-
-// duration 解析：{seconds|quarters|noteRatio} 之一 → 整数 BLICK（按 note 比例时相对 note 时值）。
-function resolveDuration(loaded, duration, note, fallbackQuarters, label) {
-  if (duration === undefined || duration === null) return quartersToBlick(fallbackQuarters, loaded.quarterBlick);
-  const kinds = ["seconds", "quarters", "noteRatio"].filter((key) => duration[key] !== undefined);
-  if (kinds.length !== 1) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must specify exactly one of seconds/quarters/noteRatio`);
-  }
-  if (duration.seconds !== undefined) return secondsToBlick(loaded, duration.seconds, label);
-  if (duration.quarters !== undefined) return quartersToBlick(duration.quarters, loaded.quarterBlick);
-  const ratio = duration.noteRatio;
-  if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
-    throw codedError("INVALID_ARGUMENTS", `${label}.noteRatio must be in (0, 1]`);
-  }
-  return Math.max(1, Math.round(note.durationBlick * ratio));
-}
-
-// ---------- 音高变化构建（全部 group-local 坐标） ----------
-
-function instantiateGesture(gesture, loaded, input, warnings, index) {
-  const meta = { gestureId: `g${index}-${gesture.type}`, source: "explicit" };
-  switch (gesture.type) {
-    case "transition":
-      return instantiateTransition(gesture, loaded, input, meta);
-    case "attack":
-      return instantiateAttack(gesture, loaded, input, meta);
-    case "release":
-      return instantiateRelease(gesture, loaded, input, meta);
-    case "vibrato":
-      return instantiateVibrato(gesture, loaded, input, meta, warnings);
-    default:
-      throw codedError("INVALID_ARGUMENTS", `unknown gesture type: ${String(gesture.type)}`);
-  }
-}
-
-// 每种音高变化最终产出一个 anchor 相对坐标系下的采样曲线定义：
-// { anchorLocalBlick, anchorSemitone, spanFromBlick, spanToBlick, evaluate(blick)->semitoneOffset,
-//   samplePositions()->[blick] }。evaluate 的值被保证落在 [-depth, depth]（有界不超调）。
-
-function instantiateTransition(gesture, loaded, input, meta) {
-  const fromNote = requireNote(loaded, gesture.fromNote, `${meta.gestureId}.fromNote`);
-  const toNote = requireNote(loaded, gesture.toNote, `${meta.gestureId}.toNote`);
-  if (toNote.localOnsetBlick !== fromNote.localEndBlick) {
-    throw codedError(
-      "TRANSITION_NOT_ADJACENT",
-      `${meta.gestureId}: transition requires adjacent notes without a rest between them`
-    );
-  }
-  const interval = toNote.targetSemitone - fromNote.targetSemitone;
-  if (interval === 0) {
-    throw codedError("INVALID_ARGUMENTS", `${meta.gestureId}: transition between equal pitches has no effect`);
-  }
-  const widthBlick = resolveDuration(loaded, gesture.width, fromNote, 0.2, `${meta.gestureId}.width`);
-  const halfBefore = Math.min(Math.floor(widthBlick / 2), Math.floor(fromNote.durationBlick / 2));
-  const halfAfter = Math.min(widthBlick - halfBefore, Math.floor(toNote.durationBlick / 2));
-  const boundary = toNote.localOnsetBlick;
-  const from = boundary - halfBefore;
-  const to = boundary + halfAfter;
-  const shape = gesture.shape ?? "smoothstep";
-  // 深度 = 音程（默认）或显式 depthSemitone；按 constraints 上限 clamp 并记 warning。
-  const requestedDepth = gesture.depthSemitone ?? Math.abs(interval);
-  const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
-  const direction = Math.sign(interval);
-  return {
-    ...meta,
-    type: "transition",
-    notes: [fromNote.fingerprint, toNote.fingerprint],
-    anchorLocalBlick: boundary,
-    anchorSemitone: gesture.anchorSemitone ?? toNote.targetSemitone,
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: {
-      intervalSemitone: interval,
-      depthSemitone: depth,
-      widthBlick: halfBefore + halfAfter,
-      shape,
-      clamped: requestedDepth > depth,
-    },
-    evaluate: (blick) => {
-      // anchor 位于目标音：从 source 侧的 -/+depth 平滑收敛到目标音 0，绝不越过目标。
-      const u = clamp01((blick - from) / Math.max(1, to - from));
-      return direction * depth * (shapeCurve(shape, u) - 1);
-    },
-    samplePositions: () => linearPositions(from, to, sampleCount(halfBefore + halfAfter, loaded.quarterBlick, input.sampling)),
-  };
-}
-
-function instantiateAttack(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
-  const requestedDepth = gesture.depthSemitone ?? 0.3;
-  const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
-  const direction = gesture.direction ?? "up";
-  if (direction === "auto") {
-    throw codedError("INVALID_ARGUMENTS", `${meta.gestureId}.direction "auto" is only valid for release`);
-  }
-  const sign = direction === "up" ? -1 : 1; // 起音上滑 = 从下方滑入；下滑 = 从上方。
-  const lengthBlick = Math.min(
-    resolveDuration(loaded, gesture.length, note, 0.2, `${meta.gestureId}.length`),
-    note.durationBlick
-  );
-  const from = note.localOnsetBlick;
-  const to = note.localOnsetBlick + lengthBlick;
-  const shape = gesture.shape ?? "smoothstep";
-  return {
-    ...meta,
-    type: "attack",
-    notes: [note.fingerprint],
-    anchorLocalBlick: from,
-    anchorSemitone: gesture.anchorSemitone ?? note.targetSemitone,
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: { depthSemitone: depth, lengthBlick, direction, shape, clamped: requestedDepth > depth },
-    evaluate: (blick) => {
-      const u = clamp01((blick - from) / Math.max(1, to - from));
-      // 从 sign*depth 回到 0（u=0 时偏移最大，u=1 时归 0）。
-      return sign * depth * (1 - shapeCurve(shape, u));
-    },
-    samplePositions: () => linearPositions(from, to, sampleCount(lengthBlick, loaded.quarterBlick, input.sampling)),
-  };
-}
-
-function instantiateRelease(gesture, loaded, input, meta) {
-  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
-  const requestedDepth = gesture.depthSemitone ?? 0.4;
-  const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
-  let direction = gesture.direction ?? "down";
-  if (direction === "auto") {
-    // `br` 和无效 continuation 的名义 MIDI 不是旋律证据；遇到这类边界保持默认下坠。
-    const next = loaded.notes[loaded.notes.indexOf(note) + 1];
-    const nextEvent = next ? loaded.eventByNote.get(next) : null;
-    direction =
-      next && nextEvent?.melodicEligible && next.targetSemitone > note.targetSemitone
-        ? "up"
-        : "down";
-  }
-  const sign = direction === "down" ? -1 : 1;
-  const lengthBlick = Math.min(
-    resolveDuration(loaded, gesture.length, note, 0.3, `${meta.gestureId}.length`),
-    note.durationBlick
-  );
-  const from = note.localEndBlick - lengthBlick;
-  const to = note.localEndBlick;
-  const shape = gesture.shape ?? "smoothstep";
-  return {
-    ...meta,
-    type: "release",
-    notes: [note.fingerprint],
-    anchorLocalBlick: to,
-    anchorSemitone: gesture.anchorSemitone ?? note.targetSemitone,
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: { depthSemitone: depth, lengthBlick, direction, shape, clamped: requestedDepth > depth },
-    evaluate: (blick) => {
-      const u = clamp01((blick - from) / Math.max(1, to - from));
-      // 从 0 走到 sign*depth（句尾下坠/上扬）。
-      return sign * depth * shapeCurve(shape, u);
-    },
-    samplePositions: () => linearPositions(from, to, sampleCount(lengthBlick, loaded.quarterBlick, input.sampling)),
-  };
-}
-
-function instantiateVibrato(gesture, loaded, input, meta, warnings) {
-  const note = requireNote(loaded, gesture.note, `${meta.gestureId}.note`);
-  if (note.durationBlick < quartersToBlick(input.constraints.minVibratoQuarter, loaded.quarterBlick)) {
-    throw codedError(
-      "CONSTRAINT_VIOLATION",
-      `${meta.gestureId}: note is shorter than ${input.constraints.minVibratoQuarter} quarters; vibrato needs a longer sustain`
-    );
-  }
-  const requestedDepth = gesture.depthSemitone ?? 0.3;
-  const depth = clampDepth(requestedDepth, input.constraints, meta, gesture);
-  const rateHz = gesture.rateHz ?? 5.5;
-  const phase = gesture.phase ?? 0;
-  // start/fadeIn/fadeOut 以秒表达（经 tempo map）；这是颤音的自然参数域。
-  const absOnset = note.localOnsetBlick + loaded.timeOffsetBlick;
-  const absEnd = note.localEndBlick + loaded.timeOffsetBlick;
-  const onsetSeconds = secondsAtBlick(loaded.tempoMarks, loaded.quarterBlick, absOnset);
-  const endSeconds = secondsAtBlick(loaded.tempoMarks, loaded.quarterBlick, absEnd);
-  if (onsetSeconds === null || endSeconds === null) {
-    throw codedError("TEMPO_MAP_MISSING", `${meta.gestureId}: vibrato needs a usable tempo map for seconds`);
-  }
-  const startSeconds = onsetSeconds + (gesture.startSeconds ?? 0.3);
-  const fadeInSeconds = Math.max(0, gesture.fadeInSeconds ?? 0.3);
-  const fadeOutSeconds = Math.max(0, gesture.fadeOutSeconds ?? 0.2);
-  const spanSeconds = endSeconds - startSeconds;
-  const minSpanSeconds = Math.max(2 / rateHz, fadeInSeconds + fadeOutSeconds);
-  if (spanSeconds < minSpanSeconds) {
-    throw codedError(
-      "VIBRATO_SPAN_TOO_SHORT",
-      `${meta.gestureId}: the sustain after startSeconds is too short for ${rateHz} Hz vibrato (needs >= ${minSpanSeconds.toFixed(3)} s)`
-    );
-  }
-  const fromAbs = blickAtSeconds(loaded.tempoMarks, loaded.quarterBlick, startSeconds);
-  if (fromAbs === null) {
-    throw codedError("TEMPO_MAP_MISSING", `${meta.gestureId}: cannot map vibrato start to blicks`);
-  }
-  const from = Math.round(fromAbs) - loaded.timeOffsetBlick;
-  const to = note.localEndBlick;
-  const envelope = (seconds) => {
-    const sinceStart = seconds - startSeconds;
-    const untilEnd = endSeconds - seconds;
-    let value = 1;
-    if (fadeInSeconds > 0) value *= smoothstep(clamp01(sinceStart / fadeInSeconds));
-    if (fadeOutSeconds > 0) value *= smoothstep(clamp01(untilEnd / fadeOutSeconds));
-    return value;
-  };
-  return {
-    ...meta,
-    type: "vibrato",
-    notes: [note.fingerprint],
-    anchorLocalBlick: from,
-    anchorSemitone: gesture.anchorSemitone ?? note.targetSemitone,
-    spanFromBlick: from,
-    spanToBlick: to,
-    params: {
-      depthSemitone: depth,
-      rateHz,
-      phase,
-      startSeconds: gesture.startSeconds ?? 0.3,
-      fadeInSeconds,
-      fadeOutSeconds,
-      clamped: requestedDepth > depth,
-    },
-    evaluate: (blick) => {
-      const seconds = secondsAtBlick(loaded.tempoMarks, loaded.quarterBlick, blick + loaded.timeOffsetBlick);
-      if (seconds === null || seconds < startSeconds || seconds > endSeconds) return 0;
-      // 有界正弦：|value| <= depth * envelope <= depth，绝不超调。
-      return depth * envelope(seconds) * Math.sin(2 * Math.PI * rateHz * (seconds - startSeconds) + phase);
-    },
-    samplePositions: () => {
-      const step = 1 / (rateHz * input.sampling.vibratoPointsPerCycle);
-      const positions = [];
-      for (let seconds = startSeconds; seconds <= endSeconds; seconds += step) {
-        const blick = blickAtSeconds(loaded.tempoMarks, loaded.quarterBlick, seconds);
-        if (blick !== null) positions.push(Math.round(blick) - loaded.timeOffsetBlick);
-      }
-      positions.push(to);
-      return positions;
-    },
-  };
-}
-
-function clampDepth(requestedDepth, constraints, meta, gesture) {
-  void meta;
-  void gesture;
-  return Math.min(Math.abs(requestedDepth), constraints.maxAbsDepthSemitone);
-}
-
-// 有界形状曲线：u∈[0,1] → [0,1]，单调不超调。cosine 是 (1-cos(πu))/2 的 ease-in-out。
-function shapeCurve(shape, u) {
-  const x = clamp01(u);
-  switch (shape) {
-    case "linear":
-      return x;
-    case "cosine":
-      return (1 - Math.cos(Math.PI * x)) / 2;
-    case "smoothstep":
-    default:
-      return smoothstep(x);
-  }
-}
-
-// ---------- 编译：采样、组装 curve、clamp、预算 ----------
-
-function compileOperations(gestures, loaded, input, warnings) {
-  const operations = [];
-  let totalPoints = 0;
-  let clampedCount = 0;
-  for (const gesture of gestures) {
-    const positions = [...new Set(gesture.samplePositions())]
-      .filter((blick) => Number.isSafeInteger(blick))
-      .sort((left, right) => left - right);
-    if (positions.length < 2) {
+  let correctionTarget = null;
+  if (input.retainCorrectionTarget) {
+    if (ir.techniques.some((technique) => technique.kind === "vibrato")) {
       throw codedError(
-        "PLAN_TOO_SPARSE",
-        `${gesture.gestureId}: the gesture resolves to fewer than 2 sample points; widen its span`
+        "CORRECTION_TARGET_UNAVAILABLE",
+        "retainCorrectionTarget is unavailable for plans that touch vibratoEnv",
       );
     }
-    const points = positions.map((blick) => {
-      const value = gesture.evaluate(blick);
-      // 数值保险：包络理论上有界，这里仍按 constraints 硬 clamp 并计数，杜绝任何浮点越界。
-      const clamped = Math.max(
-        -input.constraints.maxAbsDepthSemitone,
-        Math.min(input.constraints.maxAbsDepthSemitone, value)
-      );
-      if (clamped !== value) clampedCount += 1;
-      return {
-        timeFromAnchorBlick: blick - gesture.anchorLocalBlick,
-        pitchFromAnchorSemitone: clamped,
-      };
-    });
-    // 去重（采样网格在 tempo 非线性处可能撞点）：anchor 相对时间必须严格递增。
-    const deduped = [];
-    for (const point of points) {
-      if (deduped.length === 0 || point.timeFromAnchorBlick > deduped[deduped.length - 1].timeFromAnchorBlick) {
-        deduped.push(point);
-      }
-    }
-    if (deduped.length > input.constraints.maxPointsPerCurve) {
-      const error = codedError(
-        "PLAN_TOO_DENSE",
-        `${gesture.gestureId}: one curve needs ${deduped.length} points, above constraints.maxPointsPerCurve ${input.constraints.maxPointsPerCurve}`
-      );
-      error.details = { points: deduped.length, maxPointsPerCurve: input.constraints.maxPointsPerCurve };
-      throw error;
-    }
-    totalPoints += deduped.length;
-    operations.push({
-      gestureId: gesture.gestureId,
-      type: gesture.type,
-      noteIndexes: gesture.notes.map((fingerprint) => fingerprint.indexInGroup),
-      control: {
-        kind: "curve",
-        anchorPositionBlick: gesture.anchorLocalBlick,
-        anchorPitchSemitone: gesture.anchorSemitone,
-        points: deduped,
-      },
-      params: gesture.params,
-      applyOperation: {
-        op: "add",
-        control: {
-          kind: "curve",
-          anchorPositionBlick: gesture.anchorLocalBlick,
-          anchorPitchSemitone: gesture.anchorSemitone,
-          points: deduped,
-          generator: "sv_plan_pitch_gesture",
-        },
-      },
-    });
-    if (gesture.params?.clamped) {
-      appendOnce(warnings, {
-        code: "CONSTRAINT_CLAMPED",
-        message: "one or more gesture depths were clamped to constraints.maxAbsDepthSemitone.",
-      });
-    }
+    correctionTarget = buildCorrectionTarget(compiled.detail, loaded);
   }
-  operations.sort(
-    (left, right) =>
-      left.control.anchorPositionBlick - right.control.anchorPositionBlick ||
-      left.gestureId.localeCompare(right.gestureId)
+  let artifact;
+  try {
+    const sealed = buildPlanArtifact({
+      targetTool: "sv_patch_parameter_curves",
+      mutationRequest,
+      targetGroupUuid: loaded.occurrence.targetGroupUuid,
+      occurrence: input.occurrence,
+      expectedTimeOffsetBlick: loaded.timeOffsetBlick,
+      fingerprints: { expectedNotes },
+      capsule: {
+        stored: loaded.stored,
+        occurrence: loaded.occurrence,
+        noteIndexes: expectedNotes.map((note) => note.indexInGroup),
+      },
+    });
+    sealed.payload.pitchTechniques = {
+      schemaVersion: 1,
+      planId,
+      provenance: PROVENANCE,
+      ir,
+      compiler: compiled.detail?.compiler
+        ? {
+            planHash: compiled.detail.compiler.planHash,
+            summary: compiled.detail.compiler.summary,
+          }
+        : null,
+      ...(correctionTarget ? { correctionTarget } : {}),
+    };
+    artifact = artifactStore.seal({
+      kind: "plan",
+      schemaVersion: "1",
+      sessionId,
+      sourceEpoch: loaded.stored.epoch,
+      payload: sealed.payload,
+    });
+  } catch (error) {
+    throw planSealError(error);
+  }
+  const apply = sealApplyEnvelope(
+    buildApplyEnvelope([
+      { tool: "sv_patch_parameter_curves", arguments: mutationRequest },
+    ], {
+      sharedTargetConfirmationRequired: (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1,
+    }),
+    planReference(artifact),
+    artifact.expiresAt,
   );
-  if (totalPoints > input.constraints.maxTotalPoints) {
-    const error = codedError(
-      "PLAN_TOO_DENSE",
-      `the plan needs ${totalPoints} points but constraints.maxTotalPoints is ${input.constraints.maxTotalPoints}; reduce gestures/sampling density`
+  const requiresSharedTargetConfirmation = (loaded.occurrence.sharedTargetOccurrences ?? []).length > 1;
+  const checklist = [
+    "Review the selected note anchors and technique parameters before applying the sealed Automation replacement.",
+    "The transaction replaces only its bounded ranges after validating the captured Automation baseline and host interpolation.",
+    "Submit apply.arguments with action dry_run before committing the identical arguments.",
+    "Musical quality is human_only: audition the result after the verified write.",
+  ];
+  if (requiresSharedTargetConfirmation) {
+    checklist.push(
+      "The target NoteGroup is shared by multiple occurrences; commit requires confirmations.allowSharedTargetMutation:true and affects every occurrence.",
     );
-    error.details = { totalPoints, maxTotalPoints: input.constraints.maxTotalPoints };
-    throw error;
   }
-  return { operations, totalPoints, clampedCount };
+  return {
+    ok: true,
+    status: "planned",
+    effects: "none",
+    planId,
+    data: {
+      techniques: ir.techniques.length,
+      curves: compiled.curves.length,
+      points: compiled.pointCount,
+      composition: "baseline_plus_contribution",
+      correctionTargetRetained: correctionTarget !== null,
+      requiresHumanAudition: true,
+    },
+    apply,
+    review: {
+      requiresHumanAudition: true,
+      requiresSharedTargetConfirmation,
+      replacesCapturedAutomationBaseline: true,
+      checklist,
+    },
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
 }
 
-// ---------- 响应组装 ----------
-
-function buildPlanResponse(loaded, input, gestures, compiled, selection, warnings, timings, artifactStore, sessionId) {
-  const sharedTargetOccurrences = loaded.occurrence.sharedTargetOccurrences ?? [];
-  const requiresSharedTargetConfirmation = sharedTargetOccurrences.length > 1;
-  const target = {
-    contextId: loaded.stored.contextId,
-    occurrence: loaded.scope.occurrenceOrdinal,
-    ...(loaded.occurrence.targetGroupUuid ? { expectedGroupUuid: loaded.occurrence.targetGroupUuid } : {}),
-    // 曲线是 group-local 坐标；整个 reference 被 setTimeOffset/setPitchOffset 移动时快照偏移即
-    // 过期——交给事务核锁住，偏移变化即 STALE_CONTEXT。
-    expectedTimeOffsetBlick: loaded.timeOffsetBlick,
-    ...(Number.isFinite(loaded.occurrence.pitchOffsetSemitone)
-      ? { expectedPitchOffsetSemitone: loaded.occurrence.pitchOffsetSemitone }
-      : {}),
+function buildCorrectionTarget(detail, loaded) {
+  const captured = loaded.stored.context.computedPitchByOccurrence?.[loaded.scope.occurrenceOrdinal];
+  if (!captured || !Array.isArray(captured.values) || !Number.isSafeInteger(captured.startBlick) || !Number.isSafeInteger(captured.intervalBlick)) {
+    throw codedError("CORRECTION_TARGET_UNAVAILABLE", "retainCorrectionTarget needs captured computedPitch sampling", {
+      remediation: {
+        include: ["notes", "automation", "computedPitch"],
+        automationParameters: ["pitchDelta"],
+      },
+    });
+  }
+  const composition = detail?.composition;
+  if (!composition) {
+    throw codedError("CORRECTION_TARGET_UNAVAILABLE", "the plan has no additive pitchDelta composition");
+  }
+  const rows = [];
+  for (let index = 0; index < captured.values.length; index += 1) {
+    const midi = captured.values[index];
+    if (!Number.isFinite(midi)) continue;
+    const absoluteBlick = captured.startBlick + index * captured.intervalBlick;
+    const seconds = secondsAtBlick(loaded.tempoMarks, loaded.quarterBlick, absoluteBlick);
+    if (!Number.isFinite(seconds)) continue;
+    const contribution = interpolateComposition(composition, seconds);
+    if (!Number.isFinite(contribution)) continue;
+    rows.push({ absoluteBlick, targetCent: quantize(midi * 100 + contribution) });
+  }
+  if (rows.length === 0) {
+    throw codedError("CORRECTION_TARGET_UNAVAILABLE", "captured computedPitch has no finite frames in the planned range");
+  }
+  return {
+    encoding: "dense-table-v1",
+    points: encodeDense(rows, CORRECTION_TARGET_PROFILE),
+    finiteFrames: rows.length,
   };
-  // 音高变化锚点音符的原始指纹：随 apply 交给事务核，写入前逐条 verifyAnchoredNote。
-  const fingerprintById = new Map(
-    (loaded.occurrence.noteFingerprints ?? []).map((fingerprint) => [fingerprint, fingerprint])
-  );
-  const anchorNotes = new Set();
-  for (const gesture of gestures) for (const fingerprint of gesture.notes) anchorNotes.add(fingerprint);
-  const expectedNotes = [...anchorNotes]
-    .map((fingerprint) => fingerprint)
-    .filter(Boolean)
+}
+
+function interpolateComposition(composition, seconds) {
+  const index = composition.seconds.findIndex((entry) => entry >= seconds);
+  if (index === -1 || composition.finiteMask[index] !== true) return null;
+  if (composition.seconds[index] === seconds) return composition.contributionCents[index];
+  if (index === 0 || composition.finiteMask[index - 1] !== true) return null;
+  const leftSeconds = composition.seconds[index - 1];
+  const rightSeconds = composition.seconds[index];
+  const ratio = (seconds - leftSeconds) / (rightSeconds - leftSeconds);
+  return (1 - ratio) * composition.contributionCents[index - 1]
+    + ratio * composition.contributionCents[index];
+}
+
+function noChangeResponse(input, warnings, { techniques = 0 } = {}) {
+  return {
+    ok: true,
+    status: "no_change",
+    effects: "none",
+    data: {
+      techniques,
+      curves: 0,
+      points: 0,
+      composition: "baseline_plus_contribution",
+      correctionTargetRetained: false,
+      requiresHumanAudition: true,
+    },
+    apply: null,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+}
+
+function selectedExpectedNotes(ir, loaded) {
+  const indexes = new Set();
+  for (const technique of ir.techniques) {
+    if (technique.kind === "portamento") {
+      indexes.add(technique.anchors.fromNote);
+      indexes.add(technique.anchors.toNote);
+    } else {
+      indexes.add(technique.anchors.note);
+    }
+  }
+  return [...indexes]
+    .map((index) => requireLoadedNote(loaded, index).fingerprint)
     .map((fingerprint) => ({
       indexInGroup: fingerprint.indexInGroup,
       onsetBlick: fingerprint.onsetBlick,
@@ -668,371 +1426,263 @@ function buildPlanResponse(loaded, input, gestures, compiled, selection, warning
       detuneCents: fingerprint.detuneCents,
     }))
     .sort((left, right) => left.indexInGroup - right.indexInGroup);
-
-  const hasOperations = compiled.operations.length > 0;
-  const applyArguments = hasOperations
-    ? {
-        contextId: loaded.stored.contextId,
-        occurrence: loaded.scope.occurrenceOrdinal,
-        target: {
-          expectedGroupUuid: target.expectedGroupUuid,
-          expectedTimeOffsetBlick: target.expectedTimeOffsetBlick,
-          ...(target.expectedPitchOffsetSemitone !== undefined
-            ? { expectedPitchOffsetSemitone: target.expectedPitchOffsetSemitone }
-            : {}),
-          ...(expectedNotes.length > 0 ? { expectedNotes } : {}),
-        },
-        operations: compiled.operations.map((operation) => operation.applyOperation),
-        action: "dry_run",
-        atomic: true,
-      }
-    : null;
-  const applyRequests = applyArguments
-    ? [{ tool: "sv_patch_pitch_controls", arguments: applyArguments }]
-    : [];
-  const planId = `plan_${canonicalHashHex({
-    occurrence: loaded.scope.occurrenceOrdinal,
-    targetGroupUuid: loaded.occurrence.targetGroupUuid,
-    specialEventPolicy: input.specialEventPolicy,
-    requestedGestures: input.gestures,
-    operations: compiled.operations.map((operation) => operation.control),
-  }).slice(0, 16)}`;
-
-  const publicGestures = gestures.map((gesture) => ({
-    gestureId: gesture.gestureId,
-    type: gesture.type,
-    noteIndexes: gesture.notes.map((fingerprint) => fingerprint.indexInGroup),
-    anchor: {
-      groupLocalBlick: gesture.anchorLocalBlick,
-      occurrenceAbsoluteBlick: gesture.anchorLocalBlick + loaded.timeOffsetBlick,
-      groupRelativeSemitone: gesture.anchorSemitone,
-    },
-    span: {
-      localFromBlick: gesture.spanFromBlick,
-      localToBlick: gesture.spanToBlick,
-      absoluteFromBlick: gesture.spanFromBlick + loaded.timeOffsetBlick,
-      absoluteToBlick: gesture.spanToBlick + loaded.timeOffsetBlick,
-    },
-    params: gesture.params,
-  }));
-  const operationsMeta = compiled.operations.map((operation) => ({
-    gestureId: operation.gestureId,
-    type: operation.type,
-    control: {
-      kind: "curve",
-      anchorPositionBlick: operation.control.anchorPositionBlick,
-      anchorPitchSemitone: operation.control.anchorPitchSemitone,
-      pointCount: operation.control.points.length,
-    },
-    pointCount: operation.control.points.length,
-  }));
-  const checklist = [
-    "Review every gesture's anchor pitch and depth before applying; the anchor defaults to the note target pitch (group-relative semitone).",
-    "This plan only ADDS new owned curves; it never deletes or overwrites existing pitch controls (that is a separate transaction needing explicit fingerprints).",
-    "Apply through apply.arguments (sv_patch_pitch_controls) with action dry_run first, then commit the identical arguments.",
-    "Pitch values are group-relative semitones, NOT cents; do not mix with pitchDelta automation.",
-    "Musical quality is human-only: audition the result; sv_compare_computed_pitch can verify objective pitch changes.",
-  ];
-  if (requiresSharedTargetConfirmation) {
-    checklist.push(
-      "The target NoteGroup is shared by multiple occurrences; commit requires target.allowSharedTargetMutation:true and affects every occurrence."
-    );
-  }
-
-  let planArtifactRef = null;
-  let planExpiresAt = null;
-  if (artifactStore && sessionId && hasOperations) {
-    try {
-      const { payload } = buildPlanArtifact({
-          targetTool: "sv_patch_pitch_controls",
-          mutationRequest: applyRequests[0].arguments,
-          targetGroupUuid: loaded.occurrence.targetGroupUuid,
-          occurrence: loaded.scope.occurrenceOrdinal,
-          expectedTimeOffsetBlick: loaded.timeOffsetBlick,
-          fingerprints: { expectedNotes: applyRequests[0].arguments.target?.expectedNotes ?? [] },
-          capsule: {
-            stored: loaded.stored,
-            occurrence: loaded.occurrence,
-            noteIndexes: (applyRequests[0].arguments.target?.expectedNotes ?? []).map(
-              (fingerprint) => fingerprint.indexInGroup
-            ),
-          },
-      });
-      const planArtifact = artifactStore.seal({
-        kind: "plan",
-        schemaVersion: "1",
-        sessionId,
-        sourceEpoch: loaded.stored.epoch,
-        payload,
-      });
-      planArtifactRef = planReference(planArtifact);
-      planExpiresAt = planArtifact.expiresAt;
-    } catch (error) {
-      // 有 actionable plan 却封不进 artifact：不降级成内联（§11 条目 7），如实失败。
-      throw planSealError(error);
-    }
-  }
-
-  const applyEnvelope = buildApplyEnvelope(hasOperations ? applyRequests : null, {
-    sharedTargetConfirmationRequired: requiresSharedTargetConfirmation,
-  });
-  const sealedEnvelope = sealApplyEnvelope(applyEnvelope, planArtifactRef, planExpiresAt);
-
-  return {
-    ok: true,
-    status: hasOperations ? "planned" : "no_change",
-    effects: "none",
-    planId,
-    contextId: loaded.stored.contextId,
-    occurrence: {
-      occurrence: loaded.scope.occurrenceOrdinal,
-      trackIndex: loaded.occurrence.trackIndex,
-      groupIndex: loaded.occurrence.groupIndex,
-      targetGroupUuid: loaded.occurrence.targetGroupUuid,
-      timeOffsetBlick: loaded.timeOffsetBlick,
-      pitchOffsetSemitone: loaded.occurrence.pitchOffsetSemitone ?? 0,
-      sharedTargetOccurrences,
-    },
-    summary: {
-      requestedGestureCount: input.gestures.length,
-      gestureCount: gestures.length,
-      skippedGestureCount: selection.skippedGestureCount,
-      excludedEvents: selection.excludedEvents,
-      operationCount: compiled.operations.length,
-      totalPoints: compiled.totalPoints,
-      applyCallCount: hasOperations ? 1 : 0,
-      expectedUserUndoSteps: hasOperations ? 1 : 0,
-      types: [...new Set(gestures.map((gesture) => gesture.type))],
-    },
-    gestures: publicGestures,
-    operations: operationsMeta,
-    apply: sealedEnvelope,
-    review: {
-      requiresHumanAudition: true,
-      requiresSharedTargetConfirmation,
-      onlyAddsOwnedControls: true,
-      checklist,
-    },
-    provenance: PROVENANCE,
-    warnings,
-    timings,
-  };
 }
 
-// ---------- 请求校验 ----------
-
-function normalizePlanRequest(request) {
-  if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
-  assertKnownKeys(
-    request,
-    [
-      "contextId",
-      "occurrence",
-      "gestures",
-      "specialEventPolicy",
-      "constraints",
-      "sampling",
-    ],
-    "request"
-  );
-  if (typeof request.contextId !== "string" || request.contextId.length === 0) {
-    throw codedError("INVALID_ARGUMENTS", "contextId must be a non-empty string");
+function requireVibratoGate(hostProfile, selected) {
+  const fact = hostProfile?.semantics?.["vibrato.hostEnvelopeWithExplicitPitchDelta"];
+  if (fact?.status !== "confirmed") {
+    throw codedError(
+      "HOST_SEMANTIC_UNCONFIRMED",
+      "vibrato planning is blocked until H2 confirms vibratoEnv and explicit pitchDelta interaction",
+      {
+        semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
+        status: fact?.status ?? "missing",
+      },
+    );
+  }
+  const value = fact.value;
+  const hostEnvelopeAllowed = value === "baseline_scale" || value?.hostEnvelope === "baseline_scale";
+  const suppression = value?.explicitPitchDelta?.vibratoEnv;
+  const needsHostEnvelope = selected.some(({ gesture }) => gesture.source === "host_envelope");
+  const needsExplicit = selected.some(({ gesture }) => gesture.source === "explicit_pitch_delta");
+  if (needsHostEnvelope && !hostEnvelopeAllowed) {
+    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "H2 has no confirmed host-envelope scale semantics", {
+      semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
+    });
   }
   if (
-    request.occurrence !== undefined &&
-    (!Number.isSafeInteger(request.occurrence) || request.occurrence < 0)
+    needsExplicit
+    && (!isRecord(suppression) || suppression.mode !== "replace" || !Number.isFinite(suppression.value))
   ) {
-    throw codedError("INVALID_ARGUMENTS", "occurrence must be a non-negative safe integer");
+    throw codedError("HOST_SEMANTIC_UNCONFIRMED", "H2 has no confirmed safe vibratoEnv suppression for explicit pitchDelta", {
+      semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
+    });
   }
-  if (!Array.isArray(request.gestures) || request.gestures.length === 0) {
-    throw codedError("INVALID_ARGUMENTS", "gestures must be a non-empty array");
-  }
-  if (request.gestures.length > MAX_GESTURES) {
-    throw codedError("INVALID_ARGUMENTS", `gestures must contain at most ${MAX_GESTURES} items`);
-  }
-  const specialEventPolicy =
-    request.specialEventPolicy ?? PITCH_GESTURE_DEFAULTS.specialEventPolicy;
-  if (!["warn_and_skip", "include", "error"].includes(specialEventPolicy)) {
-    throw codedError(
-      "INVALID_ARGUMENTS",
-      "specialEventPolicy must be warn_and_skip, include, or error"
-    );
-  }
-  const gestures = request.gestures.map((gesture, index) => normalizeGesture(gesture, index));
+  return { suppression: needsExplicit ? { value: suppression.value } : null };
+}
+
+function pitchOnlyTarget(target) {
   return {
-    contextId: request.contextId,
-    occurrence: request.occurrence,
-    gestures,
-    specialEventPolicy,
-    constraints: normalizeConstraints(request.constraints),
-    sampling: normalizeSampling(request.sampling),
+    surface: "pitchDelta",
+    compositionMode: "baseline_plus_contribution",
+    mutationMode: "replace",
+    referenceFrame: "pitch_delta_contribution_cents",
+    // 显式 vibrato 的 pitchDelta 编译仍依赖同一计划里的 vibratoEnv 抑制证据。
+    requiredInclude: target.requiredInclude,
+    baselineGuard: target.baselineGuard,
+    interpolationEvidence: target.interpolationEvidence,
+    hostProfileHash: target.hostProfileHash,
   };
 }
 
-function normalizeGesture(value, index) {
-  const label = `gestures[${index}]`;
-  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", `${label} must be an object`);
-  if (!PITCH_GESTURE_TYPES.includes(value.type)) {
-    throw codedError("INVALID_ARGUMENTS", `${label}.type must be one of ${PITCH_GESTURE_TYPES.join(", ")}`);
+function noteWithSeconds(note, loaded) {
+  const onsetSeconds = secondsAtBlick(
+    loaded.tempoMarks,
+    loaded.quarterBlick,
+    loaded.timeOffsetBlick + note.onsetBlick,
+  );
+  const endSeconds = secondsAtBlick(
+    loaded.tempoMarks,
+    loaded.quarterBlick,
+    loaded.timeOffsetBlick + note.endBlick,
+  );
+  if (!Number.isFinite(onsetSeconds) || !Number.isFinite(endSeconds) || endSeconds <= onsetSeconds) {
+    throw codedError("TIME_AXIS_MAPPING_UNAVAILABLE", "note anchors cannot map to a strictly increasing seconds span");
   }
-  switch (value.type) {
-    case "transition":
-      assertKnownKeys(value, ["type", "from", "to", "width", "depthSemitone", "shape", "anchorSemitone"], label);
-      requireNoteIndexField(value, "from", label);
-      requireNoteIndexField(value, "to", label);
-      normalizeDurationField(value.width, `${label}.width`);
-      checkNumber(value.depthSemitone, 0.01, 24, `${label}.depthSemitone`);
-      checkEnum(value.shape, PITCH_GESTURE_SHAPES, `${label}.shape`);
-      checkNumber(value.anchorSemitone, 0, 127, `${label}.anchorSemitone`);
-      return { ...value };
-    case "attack":
-    case "release":
-      assertKnownKeys(value, ["type", "note", "direction", "length", "depthSemitone", "shape", "anchorSemitone"], label);
-      requireNoteIndexField(value, "note", label);
-      checkEnum(value.direction, PITCH_GESTURE_DIRECTIONS, `${label}.direction`);
-      normalizeDurationField(value.length, `${label}.length`);
-      checkNumber(value.depthSemitone, 0.01, 24, `${label}.depthSemitone`);
-      checkEnum(value.shape, PITCH_GESTURE_SHAPES, `${label}.shape`);
-      checkNumber(value.anchorSemitone, 0, 127, `${label}.anchorSemitone`);
-      return { ...value };
-    case "vibrato":
-      assertKnownKeys(
-        value,
-        ["type", "note", "startSeconds", "fadeInSeconds", "fadeOutSeconds", "rateHz", "depthSemitone", "phase", "anchorSemitone"],
-        label
-      );
-      requireNoteIndexField(value, "note", label);
-      checkNumber(value.startSeconds, 0, 30, `${label}.startSeconds`);
-      checkNumber(value.fadeInSeconds, 0, 30, `${label}.fadeInSeconds`);
-      checkNumber(value.fadeOutSeconds, 0, 30, `${label}.fadeOutSeconds`);
-      checkNumber(value.rateHz, 0.5, 12, `${label}.rateHz`);
-      checkNumber(value.depthSemitone, 0.01, 24, `${label}.depthSemitone`);
-      checkNumber(value.phase, -Math.PI * 2, Math.PI * 2, `${label}.phase`);
-      checkNumber(value.anchorSemitone, 0, 127, `${label}.anchorSemitone`);
-      return { ...value };
-    default:
-      throw codedError("INVALID_ARGUMENTS", `${label}.type is unsupported`);
+  return { ...note, onsetSeconds, endSeconds };
+}
+
+function assertProjectSeconds(fromSeconds, toSeconds, loaded, label) {
+  if (!Number.isFinite(fromSeconds) || !Number.isFinite(toSeconds) || toSeconds <= fromSeconds) {
+    throw codedError("INVALID_ARGUMENTS", `${label} must have a strictly increasing seconds span`);
+  }
+  const fromBlick = blickAtSeconds(loaded.tempoMarks, loaded.quarterBlick, fromSeconds);
+  const toBlick = blickAtSeconds(loaded.tempoMarks, loaded.quarterBlick, toSeconds);
+  if (!Number.isFinite(fromBlick) || !Number.isFinite(toBlick) || fromBlick < 0 || toBlick < 0) {
+    throw codedError("TIME_AXIS_MAPPING_UNAVAILABLE", `${label} cannot map into project BLICK coordinates`);
   }
 }
 
-function normalizeDurationField(value, label) {
-  if (value === undefined) return;
-  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", `${label} must be an object`);
-  assertKnownKeys(value, ["seconds", "quarters", "noteRatio"], label);
-  const kinds = ["seconds", "quarters", "noteRatio"].filter((key) => value[key] !== undefined);
-  if (kinds.length !== 1) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must specify exactly one of seconds/quarters/noteRatio`);
+function evaluateBaselineAtSeconds(baseline, seconds, loaded) {
+  return evaluateCapturedAutomation(baseline, localBlickAtSeconds(seconds, loaded));
+}
+
+function localBlickAtSeconds(seconds, loaded) {
+  const absolute = blickAtSeconds(loaded.tempoMarks, loaded.quarterBlick, seconds);
+  const rounded = Math.round(absolute);
+  const local = rounded - loaded.timeOffsetBlick;
+  if (!Number.isFinite(absolute) || !Number.isSafeInteger(local)) {
+    throw codedError("TIME_AXIS_MAPPING_UNAVAILABLE", "seconds cannot map to local BLICK", { seconds });
   }
-  if (value.seconds !== undefined) checkNumber(value.seconds, 0.001, 30, `${label}.seconds`);
-  if (value.quarters !== undefined) checkNumber(value.quarters, 0.01, 16, `${label}.quarters`);
-  if (value.noteRatio !== undefined) checkNumber(value.noteRatio, 0.01, 1, `${label}.noteRatio`);
+  return local;
 }
 
-function normalizeConstraints(value) {
-  const defaults = PITCH_GESTURE_DEFAULTS.constraints;
-  if (value === undefined) return { ...defaults };
-  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "constraints must be an object");
-  assertKnownKeys(value, ["maxAbsDepthSemitone", "maxTotalPoints", "maxPointsPerCurve", "minVibratoQuarter"], "constraints");
-  return {
-    maxAbsDepthSemitone: checkedNumber(value.maxAbsDepthSemitone, 0.01, 24, defaults.maxAbsDepthSemitone, "constraints.maxAbsDepthSemitone"),
-    maxTotalPoints: checkedInteger(value.maxTotalPoints, 16, 4000, defaults.maxTotalPoints, "constraints.maxTotalPoints"),
-    maxPointsPerCurve: checkedInteger(value.maxPointsPerCurve, 2, 2000, defaults.maxPointsPerCurve, "constraints.maxPointsPerCurve"),
-    minVibratoQuarter: checkedNumber(value.minVibratoQuarter, 0.25, 8, defaults.minVibratoQuarter, "constraints.minVibratoQuarter"),
-  };
-}
-
-function normalizeSampling(value) {
-  const defaults = PITCH_GESTURE_DEFAULTS.sampling;
-  if (value === undefined) return { ...defaults };
-  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "sampling must be an object");
-  assertKnownKeys(value, ["pointsPerQuarter", "vibratoPointsPerCycle"], "sampling");
-  return {
-    pointsPerQuarter: checkedInteger(value.pointsPerQuarter, 2, 32, defaults.pointsPerQuarter, "sampling.pointsPerQuarter"),
-    vibratoPointsPerCycle: checkedInteger(value.vibratoPointsPerCycle, 4, 16, defaults.vibratoPointsPerCycle, "sampling.vibratoPointsPerCycle"),
-  };
-}
-
-// ---------- 小工具 ----------
-
-function sampleCount(lengthBlick, quarterBlick, sampling) {
-  return Math.max(4, Math.ceil((lengthBlick / quarterBlick) * sampling.pointsPerQuarter) + 1);
-}
-
-function linearPositions(fromBlick, toBlick, count) {
-  if (toBlick <= fromBlick) return [fromBlick];
-  const positions = [];
-  const steps = Math.max(1, count - 1);
-  for (let index = 0; index <= steps; index += 1) {
-    positions.push(Math.round(fromBlick + ((toBlick - fromBlick) * index) / steps));
+function anchorLocalBlick(anchor, loaded) {
+  if (anchor.role === "boundary_before" || anchor.role === "boundary_at") {
+    // compiler 已用 transition projector 固定边界侧；这里按同一秒映射时只用于读取封存点。
+    const canonical = anchor.role === "boundary_before" ? -1 : 0;
+    return localBlickAtSeconds(anchor.timeSeconds, loaded) + canonical;
   }
-  return positions;
+  return localBlickAtSeconds(anchor.timeSeconds, loaded);
 }
 
-function smoothstep(u) {
-  return u * u * (3 - 2 * u);
+function maximumVibratoRate(techniques) {
+  return techniques.reduce((maximum, technique) => (
+    technique.kind === "vibrato"
+      ? Math.max(maximum, technique.model.rateHz, technique.model.endRateHz)
+      : maximum
+  ), 0);
 }
 
-function clamp01(value) {
-  return Math.min(1, Math.max(0, value));
+function mergeSpans(spans) {
+  const sorted = spans
+    .map(({ fromSeconds, toSeconds }) => ({ fromSeconds, toSeconds }))
+    .sort((left, right) => left.fromSeconds - right.fromSeconds || left.toSeconds - right.toSeconds);
+  const merged = [];
+  for (const span of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || span.fromSeconds > previous.toSeconds + SECOND_QUANTUM) {
+      merged.push({ ...span });
+      continue;
+    }
+    previous.toSeconds = Math.max(previous.toSeconds, span.toSeconds);
+  }
+  return merged;
 }
 
-function appendOnce(warnings, warning) {
-  if (!warnings.some((item) => item.code === warning.code)) warnings.push(warning);
+function dedupePointSamples(points, label) {
+  const byBlick = new Map();
+  for (const point of points) {
+    const previous = byBlick.get(point.blick);
+    if (previous !== undefined && !sameValue(previous, point.value)) {
+      throw codedError("MANDATORY_ANCHOR_BLICK_COLLISION", `${label} samples disagree at one BLICK`, {
+        blick: point.blick,
+      });
+    }
+    byBlick.set(point.blick, point.value);
+  }
+  const output = [...byBlick.entries()]
+    .map(([blick, value]) => ({ blick, value }))
+    .sort((left, right) => left.blick - right.blick);
+  if (output.length > MAX_VERIFICATION_MANDATORY_SAMPLES) {
+    throw codedError("PLAN_VERIFICATION_SAMPLE_BUDGET_EXCEEDED", "mandatory interpolation samples exceed the verifier budget", {
+      maximum: MAX_VERIFICATION_MANDATORY_SAMPLES,
+      actual: output.length,
+    });
+  }
+  return output;
 }
 
-function requireNoteIndexField(value, field, label) {
-  if (!Number.isSafeInteger(value[field]) || value[field] < 0) {
-    throw codedError(
-      "INVALID_ARGUMENTS",
-      `${label}.${field} must be a non-negative note index in the group`
-    );
+function dedupeIntegers(values) {
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function pointValueAt(points, blick) {
+  const point = points.find((entry) => entry.blick === blick);
+  if (!point) {
+    throw codedError("INTERPOLATION_EXPECTED_VALUE_MISMATCH", "mandatory anchor is absent from the compiled curve", { blick });
+  }
+  return point.value;
+}
+
+function requireLoadedNote(loaded, index) {
+  const note = loaded.noteByIndex.get(index);
+  if (!note) throw codedError("INTERNAL_ERROR", "TechniqueIR anchor is absent from loaded notes", { index });
+  return note;
+}
+
+function captureEvidenceRequired(parameters, missing) {
+  const remediation = captureRemediation(parameters);
+  return codedError(
+    "CAPTURE_EVIDENCE_REQUIRED",
+    `Capture a range snapshot with sv_snapshot_range arguments ${JSON.stringify(remediation)}.`,
+    { remediation, missing },
+  );
+}
+
+function profileHash(profile) {
+  if (typeof profile?.profileHash === "string" && profile.profileHash.length > 0) return profile.profileHash;
+  if (typeof profile?.evidenceSha256 === "string" && profile.evidenceSha256.length > 0) {
+    return contentHash({ profileId: profile.profileId ?? null, evidenceSha256: profile.evidenceSha256 });
+  }
+  return contentHash({ kind: "unbound-host-profile", modelVersion: "pitch-techniques-v1" });
+}
+
+function assertKnownKeys(value, allowed, path) {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw codedError("INVALID_ARGUMENTS", `${path} contains unknown field: ${unknown.join(", ")}`, { path, unknown });
   }
 }
 
-function checkNumber(value, minimum, maximum, label) {
-  if (value === undefined) return;
-  if (!Number.isFinite(value) || value < minimum || value > maximum) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must be a number between ${minimum} and ${maximum}`);
+function requireNoteIndex(value, path) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw codedError("INVALID_ARGUMENTS", `${path} must be a non-negative safe integer`);
   }
 }
 
-function checkEnum(value, allowed, label) {
-  if (value === undefined) return;
-  if (!allowed.includes(value)) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must be one of ${allowed.join(", ")}`);
-  }
-}
-
-function checkedNumber(value, minimum, maximum, fallback, label) {
-  if (value === undefined) return fallback;
-  if (!Number.isFinite(value) || value < minimum || value > maximum) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must be a number between ${minimum} and ${maximum}`);
+function normalizePriority(value, path) {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || value < -100 || value > 100) {
+    throw codedError("INVALID_ARGUMENTS", `${path} must be an integer between -100 and 100`);
   }
   return value;
 }
 
-function checkedInteger(value, minimum, maximum, fallback, label) {
+function optionalNumber(value, minimum, maximum, fallback, path) {
+  if (value === undefined) return fallback;
+  requireNumber(value, minimum, maximum, path);
+  return value;
+}
+
+function optionalInteger(value, minimum, maximum, fallback, path) {
   if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw codedError("INVALID_ARGUMENTS", `${label} must be an integer between ${minimum} and ${maximum}`);
+    throw codedError("INVALID_ARGUMENTS", `${path} must be an integer between ${minimum} and ${maximum}`);
   }
   return value;
 }
 
-function assertKnownKeys(value, allowed, label) {
-  const allowedSet = new Set(allowed);
-  const unknown = Object.keys(value).filter((key) => !allowedSet.has(key));
-  if (unknown.length > 0) {
-    throw codedError("INVALID_ARGUMENTS", `${label} contains unknown field: ${unknown.join(", ")}`);
+function requireNumber(value, minimum, maximum, path) {
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw codedError("INVALID_ARGUMENTS", `${path} must be a number between ${minimum} and ${maximum}`);
   }
 }
 
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
+function assertStrictOrder(left, right, leftName, rightName, path) {
+  if (left < right) return;
+  throw codedError("INVALID_ARGUMENTS", `${path}.${leftName} must be less than ${rightName}`);
+}
+
+function quantize(value) {
+  const output = Math.round(value / CENT_QUANTUM) * CENT_QUANTUM;
+  return Object.is(output, -0) ? 0 : output;
+}
+
+function quantizeSeconds(value) {
+  const output = Math.round(value / SECOND_QUANTUM) * SECOND_QUANTUM;
+  return Object.is(output, -0) ? 0 : output;
+}
+
+function sameValue(left, right) {
+  return Math.abs(left - right) <= CENT_QUANTUM;
 }
 
 function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
+function codedError(code, message, details) {
+  const error = new Error(message);
+  error.code = code;
+  if (details !== undefined) error.details = details;
+  return error;
 }

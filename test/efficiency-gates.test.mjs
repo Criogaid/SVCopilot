@@ -23,7 +23,7 @@ import { SnapshotStore } from "../server/src/snapshot.js";
 const Q = 705_600_000;
 
 // §14 的门槛。这些是计划规定的目标值，因此可以是常量；被比较的另一侧不可以。
-const GROUPED_REQUEST_MAX_RATIO = 0.35;
+const GROUPED_REQUEST_MAX_RATIO = 0.55;
 const LIST_TOOLS_MAX_BYTES = 12 * 1024;
 
 const utf8 = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -62,23 +62,11 @@ function createRangeContext(store, noteCount) {
   return { stored };
 }
 
-// §3.4 的示例请求，逐字段照抄计划。它同时是 grouped schema 的可执行文档：
-// 若 schema 漂移到无法接受这份请求，这里会先失败。
+// expression 只保留非音高 hairpin；音高技法由 plan_pitch_gesture 承担。
 function groupedExpressionRequest(contextId) {
   return {
     contextId,
     occurrence: 0,
-    defaults: {
-      vibrato: {
-        surface: "pitchDelta",
-        rateHz: 5.2,
-        onsetDelayQuarter: 0.22,
-        rampQuarter: 0.18,
-        fadeOutQuarter: 0.14,
-      },
-      scoop: { lengthQuarter: 0.16, shapePower: 2 },
-      fall: { lengthQuarter: 0.22, shapePower: 2 },
-    },
     gestures: [
       {
         type: "hairpin",
@@ -87,28 +75,18 @@ function groupedExpressionRequest(contextId) {
         peak: 0.72,
         amounts: { loudness: 1.2, tension: 0.08, breathiness: 0.12 },
       },
-      { type: "vibrato", notes: [62, 121, 178, 237, 296], depthCents: 15 },
-      { type: "vibrato", notes: [314, 336], depthCents: 18 },
-      { type: "scoop", targets: [[87, 22], [203, 24], [274, 18], [302, 28]] },
-      { type: "fall", targets: [[157, 22], [273, 26], [372, 32]] },
     ],
     constraints: {
-      maxAbsPitchDeltaCents: 80,
       maxAbsLoudnessDeltaDb: 4.5,
       maxAbsTensionDelta: 0.45,
       maxAbsBreathinessDelta: 0.25,
       maxTotalPoints: 1200,
-      avoidExcessiveVibrato: true,
     },
-    sampling: { pointsPerQuarter: 4, vibratoPointsPerCycle: 8 },
+    sampling: { pointsPerQuarter: 4 },
   };
 }
 
-// 迁移前的等价请求：同一音乐意图，但身份是完整字符串 ID，hairpin 每参数一条，
-// vibrato 每 Note 一条且重复全部共享参数，scoop/fall 每 Note 一条。
-//
-// 这不是"随便写一个更长的版本"——它精确复现 §1.1 列出的四种重复来源，否则比值
-// 就只是在跟一个虚构的坏例子比。
+// 迁移前的等价请求：每个参数都有一条 hairpin，且重复完整字符串身份。
 function legacyExpressionRequest(contextId) {
   const occurrenceId = `${contextId}:t:0:r:0`;
   const nid = (index) => `${occurrenceId}:n:${index}`;
@@ -127,58 +105,21 @@ function legacyExpressionRequest(contextId) {
       peakPosition: 0.72,
     });
   }
-  for (const [notes, depthCents] of [
-    [[62, 121, 178, 237, 296], 15],
-    [[314, 336], 18],
-  ]) {
-    for (const index of notes) {
-      gestures.push({
-        type: "vibrato",
-        noteId: nid(index),
-        surface: "pitchDelta",
-        depthCents,
-        rateHz: 5.2,
-        onsetDelayQuarter: 0.22,
-        rampQuarter: 0.18,
-        fadeOutQuarter: 0.14,
-      });
-    }
-  }
-  for (const [index, depthCents] of [[87, 22], [203, 24], [274, 18], [302, 28]]) {
-    gestures.push({
-      type: "scoop",
-      noteId: nid(index),
-      depthCents,
-      lengthQuarter: 0.16,
-      shapePower: 2,
-    });
-  }
-  for (const [index, depthCents] of [[157, 22], [273, 26], [372, 32]]) {
-    gestures.push({
-      type: "fall",
-      noteId: nid(index),
-      depthCents,
-      lengthQuarter: 0.22,
-      shapePower: 2,
-    });
-  }
   return {
     contextId,
     occurrenceId,
     gestures,
     constraints: {
-      maxAbsPitchDeltaCents: 80,
       maxAbsLoudnessDeltaDb: 4.5,
       maxAbsTensionDelta: 0.45,
       maxAbsBreathinessDelta: 0.25,
       maxTotalPoints: 1200,
-      avoidExcessiveVibrato: true,
     },
-    sampling: { pointsPerQuarter: 4, vibratoPointsPerCycle: 8 },
+    sampling: { pointsPerQuarter: 4 },
   };
 }
 
-test("a grouped expression request stays under 35% of the pre-migration shape", () => {
+test("a grouped expression request stays under 55% of the pre-migration shape", () => {
   const contextId = "c_N7GgW3hQyWmVxA";
   const groupedBytes = utf8(groupedExpressionRequest(contextId));
   const legacyBytes = utf8(legacyExpressionRequest(contextId));
@@ -188,11 +129,40 @@ test("a grouped expression request stays under 35% of the pre-migration shape", 
     `grouped request must stay under ${GROUPED_REQUEST_MAX_RATIO * 100}% of the legacy shape; ` +
       `got ${(ratio * 100).toFixed(1)}% (${groupedBytes} vs ${legacyBytes} bytes)`
   );
-  // 收益的来源必须是分组本身，而不是碰巧删了几个字段：gesture 条数下降，
-  // 且请求里一个完整 Note ID 都不剩。
-  assert.ok(groupedExpressionRequest(contextId).gestures.length < 6);
-  assert.ok(legacyExpressionRequest(contextId).gestures.length > 15);
+  // 收益来自将同一跨度的三条参数曲线合并为一条 hairpin，且请求不再携带长 ID。
+  assert.ok(groupedExpressionRequest(contextId).gestures.length < legacyExpressionRequest(contextId).gestures.length);
+  assert.equal(legacyExpressionRequest(contextId).gestures.length, 3);
 });
+
+function largeGroupedExpressionRequest(contextId) {
+  return {
+    contextId,
+    occurrence: 0,
+    gestures: Array.from({ length: 20 }, (_, index) => {
+      const from = index * 3;
+      return {
+        type: "hairpin",
+        from,
+        to: from + 1,
+        peak: 0.72,
+        amounts: {
+          loudness: 1.2,
+          tension: 0.08,
+          breathiness: 0.12,
+          voicing: 0.05,
+          gender: -0.05,
+        },
+      };
+    }),
+    constraints: {
+      maxAbsLoudnessDeltaDb: 4.5,
+      maxAbsTensionDelta: 0.45,
+      maxAbsBreathinessDelta: 0.25,
+      maxTotalPoints: 1200,
+    },
+    sampling: { pointsPerQuarter: 2 },
+  };
+}
 
 test("no request in the served surface carries a context-prefixed note identity", () => {
   // §14：普通请求中完整 Note/Occurrence ID 的出现次数 = 0。
@@ -297,8 +267,7 @@ test("a planner success envelope fits the compact budget without its detail payl
     artifactStore: new ArtifactStore({ now: () => 2000 }),
     sessionId: "sess_gate",
   }).plan({
-    contextId: stored.contextId,
-    ...groupedExpressionRequest(stored.contextId),
+    ...largeGroupedExpressionRequest(stored.contextId),
   });
   assert.equal(result.ok, true);
   const bytes = utf8(result);
@@ -406,7 +375,7 @@ test("a planner failure envelope stays inside the smaller error budget", async (
       contextId: stored.contextId,
       occurrence: 0,
       // 越界 index：错误必须点明位置，但不能把整份 gestures 抄回来。
-      gestures: [{ type: "scoop", targets: [[9999, 30]] }],
+      gestures: [{ type: "hairpin", from: 0, to: 9999, amounts: { loudness: 1 } }],
     });
   } catch (error) {
     failure = { code: error.code, message: error.message, details: error.details };

@@ -48,6 +48,12 @@ import {
 import { PITCH_CONTROL_LIMITS } from "./pitch-control.js";
 import { PitchControlPatchService } from "./pitch-control-patch.js";
 import { PitchGesturePlanService } from "./pitch-gesture-plan.js";
+import {
+  HOST_INTERPOLATION_MAX_ADAPTIVE_MIDPOINTS,
+  HOST_INTERPOLATION_MAX_BASELINE_SAMPLES,
+  HOST_INTERPOLATION_MAX_MANDATORY_SAMPLES,
+  HOST_INTERPOLATION_POSTCONDITION_VERSION,
+} from "./pitch-techniques/host-interpolation.js";
 import { MAX_PROCESSING_EXPECTED_NOTES, ProcessingService } from "./processing.js";
 import {
   musicWorkflowGuideIndex,
@@ -369,21 +375,6 @@ const PITCH_CONTROL_SET_SCHEMA = {
     },
   },
 };
-// scoop 与 fall 的 targets 形状与语义都相同：[noteIndex, depthCents]。
-// 共享同一个对象而不是各写一份字面量——schema-defs 按对象身份提取 $defs，
-// 两份结构相同的独立字面量不会被合并（那是刻意的：结构相等不代表语义相同）。
-const GESTURE_DEPTH_TARGETS_SCHEMA = {
-  type: "array",
-  minItems: 1,
-  maxItems: 512,
-  items: {
-    type: "array",
-    minItems: 2,
-    maxItems: 2,
-    items: { type: "number" },
-    description: "[noteIndex, depthCents]",
-  },
-};
 const NOTE_ANCHOR_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -524,6 +515,97 @@ const CURVE_POINTS_INPUT_SCHEMA = {
   ],
   description:
     "Object points or a schema-described dense-table-v1 envelope whose decoded rows match the point schema.",
+};
+const HOST_INTERPOLATION_SAMPLE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    blick: {
+      type: "integer",
+      minimum: Number.MIN_SAFE_INTEGER,
+      maximum: Number.MAX_SAFE_INTEGER,
+    },
+    value: { type: "number" },
+  },
+  required: ["blick", "value"],
+};
+const HOST_INTERPOLATION_POSTCONDITION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  description:
+    "Sealed host interpolation postcondition emitted by sv_plan_pitch_gesture. It rechecks captured baseline samples before writing and final samples after writing.",
+  properties: {
+    schemaVersion: { const: HOST_INTERPOLATION_POSTCONDITION_VERSION },
+    kind: { const: "host_interpolation" },
+    interpolationEvidence: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        method: { enum: ["linear", "cosine", "cubic"] },
+        source: { const: "host_getInterpolationMethod" },
+        capturedAtContextId: { type: "string", minLength: 1 },
+        resolvedParameter: { type: "string", minLength: 1 },
+      },
+      required: ["method", "source", "capturedAtContextId", "resolvedParameter"],
+    },
+    baseline: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        samples: {
+          type: "array",
+          minItems: 1,
+          maxItems: HOST_INTERPOLATION_MAX_BASELINE_SAMPLES,
+          items: HOST_INTERPOLATION_SAMPLE_SCHEMA,
+        },
+        fingerprint: { type: "string", minLength: 1 },
+      },
+      required: ["samples", "fingerprint"],
+    },
+    final: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        mandatorySamples: {
+          type: "array",
+          minItems: 2,
+          maxItems: HOST_INTERPOLATION_MAX_MANDATORY_SAMPLES,
+          items: HOST_INTERPOLATION_SAMPLE_SCHEMA,
+        },
+        adaptiveMidpoints: {
+          type: "array",
+          minItems: 1,
+          maxItems: HOST_INTERPOLATION_MAX_ADAPTIVE_MIDPOINTS,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              blick: {
+                type: "integer",
+                minimum: Number.MIN_SAFE_INTEGER,
+                maximum: Number.MAX_SAFE_INTEGER,
+              },
+              value: { type: "number" },
+              leftBlick: {
+                type: "integer",
+                minimum: Number.MIN_SAFE_INTEGER,
+                maximum: Number.MAX_SAFE_INTEGER,
+              },
+              rightBlick: {
+                type: "integer",
+                minimum: Number.MIN_SAFE_INTEGER,
+                maximum: Number.MAX_SAFE_INTEGER,
+              },
+            },
+            required: ["blick", "value", "leftBlick", "rightBlick"],
+          },
+        },
+      },
+      required: ["mandatorySamples", "adaptiveMidpoints"],
+    },
+    maxFitErrorCent: { type: "number", minimum: 0.000001, maximum: 20 },
+  },
+  required: ["schemaVersion", "kind", "interpolationEvidence", "baseline", "final", "maxFitErrorCent"],
 };
 // PlanRef 是裸 artifactId 字符串（§4.3）。目标校验完全在服务端按 artifactId 完成：
 // kind、实例归属与 sealed targetTool 都不依赖调用方回传任何东西，因此以前那些
@@ -1240,7 +1322,7 @@ export const TOOLS = [
   {
     name: "sv_plan_expression",
     description:
-      'Dry-run expression planner: turns explicit gestures (scoop/fall/portamento/vibrato/hairpin) and/or a small heuristic intent vocabulary into a reviewable, deterministic automation plan over a range context (include ["notes"]). Pure in-memory read — never writes the host. Every operation is unit-explicit (pitchDelta=cents, loudness=dB, vibratoEnv=0..2 multiplier, tension/breathiness=±1, writeSurface=automation) and compiles into one sealed apply envelope: apply.arguments contains only planRef + action, while the full mutation remains server-side. All disjoint ranges, including repeated ranges of one Automation parameter, execute through sv_patch_parameter_curves as one verified-compensation transaction and one Undo step. Submit action dry_run first, then action commit. Each sealed apply target carries expectedNotes fingerprints of the gesture-anchored notes plus the snapshot-time expectedTimeOffsetBlick, so a note edit or a whole-reference setTimeOffset move after the snapshot fails the apply with STALE_CONTEXT instead of writing curves at stale positions — re-snapshot and re-plan on that error. intent.genre/technique seed gesture candidates; intent.section/emotion modify them, or seed baseline dynamic/color arcs when used alone. Intent-derived gestures never anchor on breath notes (lyrics "br", no singable pitch — their duration still separates phrases; explicit gestures may still target them deliberately). replace mode overwrites existing points inside each operation range and the planner does not check for them; natural vibrato presence is host-unobservable; intent mappings are engineering heuristics; whether it sounds better remains human-only.',
+      'Dry-run non-pitch expression planner for hairpin automation over a range context captured with include ["notes"]. It writes only loudness, tension, breathiness, voicing, and gender arcs through a sealed sv_patch_parameter_curves PlanRef. Pitch techniques, pitchDelta, and vibratoEnv are intentionally absent: plan transition, transient, or vibrato with sv_plan_pitch_gesture. Intent may derive non-pitch dynamics and color arcs; intent that previously implied pitch technique returns guidance to that planner instead. The planner is pure in-memory, deterministic, never touches the host, and uses expected note fingerprints plus expectedTimeOffsetBlick to make a later apply fail STALE_CONTEXT on drift. Submit action dry_run before commit, then audition the result.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1256,149 +1338,35 @@ export const TOOLS = [
           description:
             "0-based occurrence ordinal within the context. Optional when the context has exactly one occurrence.",
         },
-        defaults: {
-          type: "object",
-          additionalProperties: false,
-          description:
-            "Per-gesture-type defaults, so repeated gestures need not restate shared parameters. A gesture own field always wins. Only fields the gesture type declares are accepted, so a misspelled key is rejected rather than silently ignored.",
-          properties: {
-            vibrato: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                surface: { enum: ["pitchDelta", "vibratoEnv"] },
-                rateHz: { type: "number", minimum: 0.5, maximum: 12 },
-                onsetDelayQuarter: { type: "number", minimum: 0, maximum: 16 },
-                rampQuarter: { type: "number", minimum: 0, maximum: 16 },
-                fadeOutQuarter: { type: "number", minimum: 0, maximum: 16 },
-                level: { type: "number", minimum: 0, maximum: 2 },
-              },
-            },
-            scoop: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                lengthQuarter: { type: "number", minimum: 0.01, maximum: 16 },
-                shapePower: { type: "number", minimum: 0.5, maximum: 8 },
-              },
-            },
-            fall: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                lengthQuarter: { type: "number", minimum: 0.01, maximum: 16 },
-                shapePower: { type: "number", minimum: 0.5, maximum: 8 },
-              },
-            },
-            portamento: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                lengthQuarter: { type: "number", minimum: 0.01, maximum: 4 },
-                maxCents: { type: "number", minimum: 10, maximum: 1200 },
-              },
-            },
-          },
-        },
         gestures: {
           type: "array",
           maxItems: 32,
           description:
-            "Explicit gestures; deterministic assembly, user values win over intent. Notes are referenced by 0-based index within the NoteGroup. Repetition is grouped: one hairpin covers several parameters, one vibrato covers several notes, scoop/fall/portamento take tuple lists.",
+            "Explicit non-pitch gestures; deterministic assembly, user values win over intent. Notes are referenced by 0-based index within the NoteGroup. One hairpin can cover several dynamics and color parameters over one span.",
           items: {
             type: "object",
-            oneOf: [
-              {
+            additionalProperties: false,
+            properties: {
+              type: { const: "hairpin" },
+              from: { type: "integer", minimum: 0 },
+              to: { type: "integer", minimum: 0 },
+              amounts: {
+                type: "object",
                 additionalProperties: false,
+                minProperties: 1,
+                description:
+                  "Peak delta per parameter in that parameter own unit. One hairpin can drive several non-pitch parameters over the same span.",
                 properties: {
-                  type: { const: "scoop" },
-                  targets: GESTURE_DEPTH_TARGETS_SCHEMA,
-                  lengthQuarter: { type: "number", minimum: 0.01, maximum: 16, default: 0.2 },
-                  shapePower: { type: "number", minimum: 0.5, maximum: 8, default: 2 },
+                  loudness: { type: "number", minimum: -24, maximum: 24 },
+                  tension: { type: "number", minimum: -1, maximum: 1 },
+                  breathiness: { type: "number", minimum: -1, maximum: 1 },
+                  voicing: { type: "number", minimum: -1, maximum: 1 },
+                  gender: { type: "number", minimum: -1, maximum: 1 },
                 },
-                required: ["type", "targets"],
               },
-              {
-                additionalProperties: false,
-                properties: {
-                  type: { const: "fall" },
-                  targets: GESTURE_DEPTH_TARGETS_SCHEMA,
-                  lengthQuarter: { type: "number", minimum: 0.01, maximum: 16, default: 0.3 },
-                  shapePower: { type: "number", minimum: 0.5, maximum: 8, default: 2 },
-                },
-                required: ["type", "targets"],
-              },
-              {
-                additionalProperties: false,
-                properties: {
-                  type: { const: "portamento" },
-                  transitions: {
-                    type: "array",
-                    minItems: 1,
-                    maxItems: 512,
-                    items: {
-                      type: "array",
-                      minItems: 2,
-                      maxItems: 2,
-                      items: { type: "integer", minimum: 0 },
-                      description: "[fromNoteIndex, toNoteIndex]",
-                    },
-                  },
-                  lengthQuarter: { type: "number", minimum: 0.01, maximum: 4, default: 0.15 },
-                  maxCents: { type: "number", minimum: 10, maximum: 1200 },
-                },
-                required: ["type", "transitions"],
-                description: "Symmetric glide between adjacent notes (no rest between).",
-              },
-              {
-                additionalProperties: false,
-                properties: {
-                  type: { const: "vibrato" },
-                  notes: {
-                    type: "array",
-                    minItems: 1,
-                    maxItems: 512,
-                    items: { type: "integer", minimum: 0 },
-                    description: "Note indexes sharing this gesture parameters.",
-                  },
-                  surface: {
-                    enum: ["pitchDelta", "vibratoEnv"],
-                    default: "pitchDelta",
-                    description:
-                      "pitchDelta renders an explicit sine (may stack with unobservable natural vibrato); vibratoEnv shapes the host envelope (effect depends on natural vibrato).",
-                  },
-                  depthCents: { type: "number", minimum: 1, maximum: 600, default: 30 },
-                  rateHz: { type: "number", minimum: 0.5, maximum: 12, default: 5.5 },
-                  onsetDelayQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.3 },
-                  rampQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.3 },
-                  fadeOutQuarter: { type: "number", minimum: 0, maximum: 16, default: 0.2 },
-                  level: { type: "number", minimum: 0, maximum: 2, default: 1 },
-                },
-                required: ["type", "notes"],
-              },
-              {
-                additionalProperties: false,
-                properties: {
-                  type: { const: "hairpin" },
-                  from: { type: "integer", minimum: 0 },
-                  to: { type: "integer", minimum: 0 },
-                  amounts: {
-                    type: "object",
-                    additionalProperties: false,
-                    minProperties: 1,
-                    description:
-                      "Peak delta per parameter in that parameter own unit. One hairpin can drive several parameters over the same span.",
-                    properties: {
-                      loudness: { type: "number", minimum: -24, maximum: 24 },
-                      tension: { type: "number", minimum: -1, maximum: 1 },
-                      breathiness: { type: "number", minimum: -1, maximum: 1 },
-                    },
-                  },
-                  peak: { type: "number", minimum: 0.05, maximum: 0.95, default: 0.6 },
-                },
-                required: ["type", "from", "to", "amounts"],
-              },
-            ],
+              peak: { type: "number", minimum: 0.05, maximum: 0.95, default: 0.6 },
+            },
+            required: ["type", "from", "to", "amounts"],
           },
         },
         intent: {
@@ -1430,12 +1398,10 @@ export const TOOLS = [
           type: "object",
           additionalProperties: false,
           properties: {
-            maxAbsPitchDeltaCents: { type: "number", minimum: 10, maximum: 1200, default: 200 },
             maxAbsLoudnessDeltaDb: { type: "number", minimum: 0.5, maximum: 24, default: 6 },
             maxAbsTensionDelta: { type: "number", minimum: 0.05, maximum: 1, default: 0.5 },
             maxAbsBreathinessDelta: { type: "number", minimum: 0.05, maximum: 1, default: 0.5 },
             maxTotalPoints: { type: "integer", minimum: 16, maximum: 2000, default: 400 },
-            avoidExcessiveVibrato: { type: "boolean", default: true },
           },
         },
         sampling: {
@@ -1443,7 +1409,6 @@ export const TOOLS = [
           additionalProperties: false,
           properties: {
             pointsPerQuarter: { type: "integer", minimum: 2, maximum: 32, default: 8 },
-            vibratoPointsPerCycle: { type: "integer", minimum: 4, maximum: 16, default: 8 },
           },
         },
       },
@@ -1967,6 +1932,7 @@ export const TOOLS = [
               },
               amount: { type: "number", description: "add/scale mode only." },
               simplifyThreshold: { type: "number", minimum: 0 },
+              hostInterpolation: HOST_INTERPOLATION_POSTCONDITION_SCHEMA,
             },
             required: ["parameter", "mode", "range"],
           },
@@ -2125,125 +2091,156 @@ export const TOOLS = [
   {
     name: "sv_plan_pitch_gesture",
     description:
-      'Compile explicit pitch gestures (transition, attack, release, vibrato) anchored to snapshot notes into a reviewable apply envelope for sv_patch_pitch_controls. Pure in-memory and deterministic: it reads only the range context (notes/tempo/quarter) and never touches the host. Exact lowercase "br" is the officially documented non-melodic breath event: specialEventPolicy defaults to warn_and_skip, include is an explicit low-level opt-in, and error rejects the whole plan. Skips are structured and an all-skipped request returns no_change with no apply. Intent durations may be expressed in seconds (converted via the tempo map), quarters, or noteRatio; all output coordinates are group-local integer BLICK and group-relative semitones (NOT cents). Every generated curve is a new svcopilot-owned object with bounded, non-overshooting shapes and explicit clamp warnings; the planner only ADDS curves and never deletes or overwrites existing pitch controls. apply.arguments carries expectedNotes/expectedTimeOffsetBlick/expectedPitchOffsetSemitone drift guards — submit it verbatim to sv_patch_pitch_controls with action dry_run first. If a client collapses the nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
+      'Compile explicit pitch techniques into a deterministic Automation replacement plan. Capture the selected range with include ["notes", "automation"] and pitchDelta; either vibrato variant also requires vibratoEnv. transition writes a score-step-cancelling pitchDelta contribution, transient writes a bounded first-peak response, and vibrato selects either an explicit pitchDelta model or a host-envelope scale. The planner never touches the host: it composes captured Automation baseline plus contributions, seals an sv_patch_parameter_curves PlanRef, and includes interpolation read-back postconditions. Exact lowercase "br" and other non-melodic special events are skipped with structured warnings; an all-skipped request returns no_change. vibrato requires confirmed H2 host-profile semantics and otherwise returns HOST_SEMANTIC_UNCONFIRMED before any mutation exists. Submit apply.arguments unchanged with action dry_run first, then commit after human audition. No execution, surface, referenceFrame, or mode field is accepted because this MVP has one fixed write surface and transaction path. If a client collapses nested gesture types to unknown, read svcopilot://schemas/sv_plan_pitch_gesture for the exact validated input schema.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
+      required: ["contextId", "occurrence", "gestures"],
       properties: {
-        // 这里**没有** PLAN_EXECUTION_PROPERTIES：本工具是只读规划器
-        // （readOnlyHint:true），它产出 planRef 而不是消费 planRef。以前误把执行属性
-        // 展开进来，等于对外宣称可以拿 planRef 提交，而服务端从不读它——一个永远
-        // 不会被执行的入参比没有这个入参更糟。
         contextId: { type: "string", minLength: 1 },
         occurrence: {
           type: "integer",
           minimum: 0,
-          description:
-            "0-based occurrence ordinal indexing the full range-context array; optional when exactly one occurrence has notes.",
-        },
-        specialEventPolicy: {
-          enum: ["warn_and_skip", "include", "error"],
-          default: "warn_and_skip",
-          description:
-            'Policy for gestures that explicitly target a non-melodic special event such as exact lowercase "br".',
+          maximum: 9007199254740991,
+          description: "0-based occurrence ordinal within the captured range context.",
         },
         gestures: {
           type: "array",
           minItems: 1,
           maxItems: 32,
           items: {
-            discriminator: { propertyName: "type" },
             oneOf: [
-              {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  type: { const: "transition" },
-                  from: { type: "integer", minimum: 0 },
-                  to: { type: "integer", minimum: 0 },
-                  width: { $ref: "#/definitions/duration" },
-                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
-                  shape: { enum: ["linear", "smoothstep", "cosine"] },
-                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
-                },
-                required: ["type", "from", "to"],
-              },
-              {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  type: { const: "attack" },
-                  note: { type: "integer", minimum: 0 },
-                  direction: { enum: ["up", "down", "auto"] },
-                  length: { $ref: "#/definitions/duration" },
-                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
-                  shape: { enum: ["linear", "smoothstep", "cosine"] },
-                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
-                },
-                required: ["type", "note"],
-              },
-              {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  type: { const: "release" },
-                  note: { type: "integer", minimum: 0 },
-                  direction: { enum: ["up", "down", "auto"] },
-                  length: { $ref: "#/definitions/duration" },
-                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
-                  shape: { enum: ["linear", "smoothstep", "cosine"] },
-                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
-                },
-                required: ["type", "note"],
-              },
-              {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  type: { const: "vibrato" },
-                  note: { type: "integer", minimum: 0 },
-                  startSeconds: { type: "number", minimum: 0, maximum: 30 },
-                  fadeInSeconds: { type: "number", minimum: 0, maximum: 30 },
-                  fadeOutSeconds: { type: "number", minimum: 0, maximum: 30 },
-                  rateHz: { type: "number", minimum: 0.5, maximum: 12 },
-                  depthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
-                  phase: { type: "number", minimum: -6.2832, maximum: 6.2832 },
-                  anchorSemitone: { type: "number", minimum: 0, maximum: 127 },
-                },
-                required: ["type", "note"],
-              },
+              { $ref: "#/$defs/transition" },
+              { $ref: "#/$defs/transient" },
+              { $ref: "#/$defs/explicitVibrato" },
+              { $ref: "#/$defs/hostVibrato" },
             ],
           },
         },
+        retainCorrectionTarget: { type: "boolean", default: false },
         constraints: {
           type: "object",
           additionalProperties: false,
           properties: {
-            maxAbsDepthSemitone: { type: "number", minimum: 0.01, maximum: 24 },
-            maxTotalPoints: { type: "integer", minimum: 16, maximum: 4000 },
-            maxPointsPerCurve: { type: "integer", minimum: 2, maximum: 2000 },
-            minVibratoQuarter: { type: "number", minimum: 0.25, maximum: 8 },
-          },
-        },
-        sampling: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            pointsPerQuarter: { type: "integer", minimum: 2, maximum: 32 },
-            vibratoPointsPerCycle: { type: "integer", minimum: 4, maximum: 16 },
+            maxAbsPeakSemitone: { type: "number", minimum: 0.000001, maximum: 1.5, default: 1.5 },
+            maxTotalPoints: { type: "integer", minimum: 2, maximum: 4000, default: 1200 },
+            maxFitErrorCent: { type: "number", minimum: 0.000001, maximum: 20, default: 1 },
           },
         },
       },
-      required: ["contextId", "gestures"],
-      definitions: {
-        duration: {
+      $defs: {
+        noteIndex: { type: "integer", minimum: 0, maximum: 9007199254740991 },
+        priority: { type: "integer", minimum: -100, maximum: 100, default: 0 },
+        width: {
           type: "object",
           additionalProperties: false,
-          description: "Exactly one of seconds (converted via the tempo map), quarters, or noteRatio.",
+          required: ["seconds"],
           properties: {
-            seconds: { type: "number", minimum: 0.001, maximum: 30 },
-            quarters: { type: "number", minimum: 0.01, maximum: 16 },
-            noteRatio: { type: "number", minimum: 0.01, maximum: 1 },
+            seconds: { type: "number", minimum: 0.000000001, maximum: 2 },
+          },
+        },
+        linearCurve: {
+          type: "object",
+          additionalProperties: false,
+          required: ["family"],
+          properties: { family: { const: "linear" } },
+        },
+        richardsCurve: {
+          type: "object",
+          additionalProperties: false,
+          required: ["family"],
+          properties: {
+            family: { const: "richards" },
+            inflectionRatio: { type: "number", minimum: 0.05, maximum: 0.95, default: 0.5 },
+            sharpness: { type: "number", minimum: 1, maximum: 40, default: 6 },
+            asymmetryLogB: { type: "number", minimum: -3, maximum: 3, default: 0 },
+          },
+        },
+        transition: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "from", "to", "width", "curve"],
+          properties: {
+            type: { const: "transition" },
+            from: { $ref: "#/$defs/noteIndex" },
+            to: { $ref: "#/$defs/noteIndex" },
+            priority: { $ref: "#/$defs/priority" },
+            width: { $ref: "#/$defs/width" },
+            curve: {
+              oneOf: [
+                { $ref: "#/$defs/linearCurve" },
+                { $ref: "#/$defs/richardsCurve" },
+              ],
+            },
+          },
+        },
+        transient: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "note", "intent", "peakSemitone", "peakTimeSeconds", "spanSeconds"],
+          allOf: [
+            {
+              if: { properties: { intent: { const: "overshoot" } }, required: ["intent"] },
+              then: { properties: { dampingRatio: { default: 0.5422 } } },
+            },
+            {
+              if: { properties: { intent: { const: "preparation" } }, required: ["intent"] },
+              then: { properties: { dampingRatio: { default: 0.6681 } } },
+            },
+            {
+              if: { properties: { dampingRatio: { const: 0 } }, required: ["dampingRatio"] },
+              then: {
+                required: ["tailPolicy"],
+                properties: { tailPolicy: { const: "continuous_taper" } },
+              },
+            },
+          ],
+          properties: {
+            type: { const: "transient" },
+            note: { $ref: "#/$defs/noteIndex" },
+            intent: { enum: ["overshoot", "preparation"] },
+            priority: { $ref: "#/$defs/priority" },
+            peakSemitone: { type: "number", minimum: -1.5, maximum: 1.5 },
+            peakTimeSeconds: { type: "number", minimum: 0.005, maximum: 0.5 },
+            dampingRatio: { type: "number", minimum: 0, maximum: 1 },
+            onsetSeconds: { type: "number", minimum: -0.5, maximum: 0.5, default: 0 },
+            spanSeconds: { type: "number", minimum: 0.000000001, maximum: 2 },
+            tailPolicy: { enum: ["reject", "continuous_taper"], default: "reject" },
+          },
+        },
+        explicitVibrato: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "source", "note"],
+          properties: {
+            type: { const: "vibrato" },
+            source: { const: "explicit_pitch_delta" },
+            note: { $ref: "#/$defs/noteIndex" },
+            priority: { $ref: "#/$defs/priority" },
+            startRatio: { type: "number", minimum: 0, maximum: 1, default: 0 },
+            endRatio: { type: "number", minimum: 0, maximum: 1, default: 1 },
+            rateHz: { type: "number", minimum: 0.5, maximum: 12, default: 5.5 },
+            endRateHz: { type: "number", minimum: 0.5, maximum: 12 },
+            depthSemitone: { type: "number", minimum: 0.01, maximum: 2, default: 0.3 },
+            endDepthSemitone: { type: "number", minimum: 0.01, maximum: 2 },
+            centerDriftSemitone: { type: "number", minimum: -1, maximum: 1, default: 0 },
+            phaseRad: { type: "number", minimum: -6.283185307179, maximum: 6.283185307179, default: 0 },
+            fadeInSeconds: { type: "number", minimum: 0.000000001, maximum: 1, default: 0.3 },
+            fadeOutSeconds: { type: "number", minimum: 0.000000001, maximum: 1, default: 0.2 },
+          },
+        },
+        hostVibrato: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "source", "note"],
+          properties: {
+            type: { const: "vibrato" },
+            source: { const: "host_envelope" },
+            note: { $ref: "#/$defs/noteIndex" },
+            priority: { $ref: "#/$defs/priority" },
+            startRatio: { type: "number", minimum: 0, maximum: 1, default: 0 },
+            endRatio: { type: "number", minimum: 0, maximum: 1, default: 1 },
+            envelopeScale: { type: "number", minimum: 0, maximum: 2, default: 1 },
           },
         },
       },

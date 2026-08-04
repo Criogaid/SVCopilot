@@ -592,6 +592,7 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
       definition: item.definition,
       interpolationMethod: item.interpolationMethod,
       points: item.points,
+      supportPoints: item.supportPoints ?? [],
     });
     automationByOccurrence[item.occurrence] = list;
   }

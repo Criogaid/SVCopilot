@@ -69,6 +69,22 @@ function createStoredContext(store, notes) {
   return { stored };
 }
 
+function captureAutomation(stored, parameters = ["pitchDelta"]) {
+  stored.context.automationCaptured = true;
+  stored.context.automationByOccurrence = {
+    0: parameters.map((parameter) => ({
+      requestedParameter: parameter,
+      resolvedParameter: parameter,
+      definition: parameter === "vibratoEnv"
+        ? { typeName: "vibratoEnv", range: [0, 2], defaultValue: 1 }
+        : { typeName: "pitchDelta", range: [-1200, 1200], defaultValue: 0 },
+      interpolationMethod: "linear",
+      supportPoints: [],
+      points: [],
+    })),
+  };
+}
+
 let plannerFixtureSequence = 0;
 
 function createPlannerFixture(Service, store, label) {
@@ -583,6 +599,7 @@ async function buildPlans() {
     { onsetBlick: Q, durationBlick: Q, pitch: 62, lyrics: "i" },
     { onsetBlick: 2 * Q, durationBlick: 4 * Q, pitch: 64, lyrics: "u" },
   ]);
+  captureAutomation(gestureCtx.stored);
   const gestureFixture = createPlannerFixture(
     PitchGesturePlanService,
     gestureStore,
@@ -592,9 +609,15 @@ async function buildPlans() {
     planner: "sv_plan_pitch_gesture",
     plan: await gestureFixture.service.plan({
       contextId: gestureCtx.stored.contextId,
+      occurrence: 0,
       gestures: [
-        { type: "attack", note: 0, depthSemitone: 0.3 },
-        { type: "transition", from: 0, to: 1, width: { quarters: 0.5 } },
+        {
+          type: "transition",
+          from: 0,
+          to: 1,
+          width: { seconds: 0.2 },
+          curve: { family: "linear" },
+        },
       ],
     }),
     fixture: gestureFixture,
