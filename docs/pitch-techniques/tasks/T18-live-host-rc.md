@@ -29,10 +29,10 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 ## 当前进展
 
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
-- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、3、4、5、6、7、8、9、10、13
+- 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、2、3、4、5、6、7、8、9、10、13、14
   已完成可恢复
   真机闭环：[T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。场景 12 条件不适用，
-  另有 3 个 MVP 场景尚未完成，P2b 也明确保持未启动。
+  另有场景 11 尚未完成，P2b 也明确保持未启动。
 - 场景 5 的内容 token 已恢复，全部残留 Artifact lease 已在 TTL 后 prune；doctor 最终为
   `0 entries / 0 bytes`，cleanup 门禁闭合。
 - 场景 12 因 P4 已选进程内后端而标为 `not_applicable`；T16 的 timeout recovery 证据保留为
@@ -64,3 +64,10 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 - 场景 13 在一个双参数事务中让 `vibratoEnv` adaptive midpoint 产生 `0.25` 的受控误差，验证
   `POSTCONDITION_FAILED` 会触发 `vibratoEnv → pitchDelta` 逆序补偿。两条曲线均读回恢复，一个
   用户 Undo，最终双参数 token 精确 `no_change`；场景自身 Artifact 全部释放。
+- 场景 14 在 21 帧 null gap 两侧提交相反方向 transient；重启后验证 `48c723e` 修复的 float32
+  baseline fingerprint，175 点以单 Undo 提交，null frame 数前后不变，左右中心变化方向相反，
+  最终 token 精确 `no_change`，Artifact、handle 和 pending execution 均归零。
+- 场景 2 通过可逆延长音符获得足够的分析窗，在 Richards transition 边界与显式振音内部设置
+  `90 → 170 BPM` 阶跃。500 原始帧重采样为 551 个等秒有效帧，目标 `5.5 Hz` 实测 `5.46 Hz`，
+  `0.7273%` 偏差通过真机 1% 门禁。曲线、音符、tempo 与中断前残留均已恢复，原项目长范围 token
+  精确 `no_change`，资源计数归零。

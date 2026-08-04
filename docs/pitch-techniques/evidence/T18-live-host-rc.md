@@ -13,8 +13,8 @@
 `24.22554 cent`。这证明该写入路径和量测链路可工作，不对自然度作自动化结论。
 
 清理事务移除了全部 117 个临时 `vibratoEnv` 点，最终内容 token 与实验前精确一致；本场景
-创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 10 个 MVP 场景通过、
-1 个条件场景不适用、3 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
+创建的 Artifact lease 已释放。人工试听仍是 `pending_human`。当前有 12 个 MVP 场景通过、
+1 个条件场景不适用、1 个场景尚未完成，本文件不是 T18 通过声明。P2b 明确为未启动：H3a 仍为
 `unknown`，H3b 仅
 `partially_observed`，所以不启用 `PitchControlCurve`。
 
@@ -96,6 +96,22 @@ warning；部分覆盖夹具原始为 `7 / 32` 个有限帧，其中 2 帧落在
 `1.25`、宿主实测 `1`，误差 `0.25` 超过 `0.01` 门禁。事务因此返回
 `POSTCONDITION_FAILED / rolled_back / effects:reverted`，在同一个用户 Undo 中按
 `vibratoEnv → pitchDelta` 逆序补偿且两条曲线均验证恢复。最终双参数内容 token 精确
-`no_change`；本场景两份 Artifact 已释放，另有 1 份场景 11 跨重连 PlanRef 被有意保留。
+`no_change`；本场景两份 Artifact 已释放，当时保留的场景 11 跨重连 PlanRef 已在后续 MCP 重启时失效，
+场景 11 将重新采集。
+
+场景 14 在 300 帧 computed-pitch 快照中固定了连续 21 帧 null gap，并在两侧分别提交正向
+overshoot 与负向 preparation。重启加载 `48c723e` 后，原先被 `1.907e-6 cent` float32 微差
+阻断的 baseline fingerprint dry-run 通过；两条曲线共 175 点，以一个用户 Undo 提交，179 个
+宿主插值样本最大误差为 `8.24e-6 cent`。比较结果保持 before/after 各 21 个 null frame，左右
+目标音中心分别变化 `+5.876` 与 `-20.271 cent`，没有跨 gap 合成。恢复后完整 token 精确
+`no_change`，5 份 Artifact 全部释放。
+
+场景 2 使用后接长休止的音符构造可逆长窗：临时延长音符并改变音高，在 transition 边界加入
+90 BPM 标记、在振音内部加入 170 BPM 标记。计划包含 Richards transition 与 5.5 Hz 显式振音，
+两条曲线共 734 点；dry-run 零 setter/Undo，commit 一个用户 Undo，280 个宿主插值样本最大误差
+`1.38e-5 cent`。500 个原始帧经跨 tempo 的等秒网格得到 551 个有效帧，振音实测 `5.46 Hz`，
+相对偏差 `0.7273%`，通过 H1 后设定的真机 1% 门禁。曲线、音符、tempo 均恢复；长范围内容 token
+精确 `no_change`，旧场景 2 中断残留也恢复为原始 `pitchDelta 35 / vibratoEnv 0`，Artifact、
+handle 与 pending execution 全部归零。
 
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。

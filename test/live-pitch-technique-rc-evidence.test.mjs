@@ -26,6 +26,7 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(evidence.fixture.intermediateArtifactLeasesReleased, true);
   assert.deepEqual(evidence.completedMvpScenarioIds, [
     "mvp-01-richards-constant-tempo",
+    "mvp-02-tempo-change-transition-vibrato",
     "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
@@ -35,11 +36,12 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
     "mvp-13-interpolation-failure-and-rollback",
+    "mvp-14-null-gap-correction",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 3);
+  assert.deepEqual(evidence.pendingMvpScenarioIds, ["mvp-11-stale-context-and-reconnect"]);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 11);
+  assert.equal(evidence.scenarios.length, 13);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -52,6 +54,23 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(richardsScenario.workflow.cleanup.restorationTokenMatched, true);
   assert.equal(richardsScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(richardsScenario.id), false);
+
+  const tempoChangeScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-02-tempo-change-transition-vibrato",
+  );
+  assert.equal(tempoChangeScenario.status, "passed");
+  assert.equal(tempoChangeScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(tempoChangeScenario.workflow.dryRun.undoBoundaryCalls, 0);
+  assert.equal(tempoChangeScenario.workflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(tempoChangeScenario.workflow.compare.crossedTempoChange, true);
+  assert.ok(
+    tempoChangeScenario.workflow.compare.relativeRateError
+      <= tempoChangeScenario.workflow.compare.liveRateGate,
+  );
+  assert.equal(tempoChangeScenario.workflow.compare.liveRateGatePassed, true);
+  assert.equal(tempoChangeScenario.workflow.cleanup.originalProjectContentTokenMatched, true);
+  assert.equal(tempoChangeScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(tempoChangeScenario.id), false);
 
   const transientScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-03-overshoot-preparation",
@@ -220,6 +239,22 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(rollbackScenario.workflow.cleanup.contentTokenMatched, true);
   assert.equal(rollbackScenario.resourceCleanup.scenarioArtifactLeasesRemaining, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(rollbackScenario.id), false);
+  const nullGapScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-14-null-gap-correction",
+  );
+  assert.equal(nullGapScenario.status, "passed");
+  assert.equal(nullGapScenario.fixUnderTest.commit, "48c723e");
+  assert.equal(nullGapScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(nullGapScenario.workflow.dryRun.undoBoundaryCalls, 0);
+  assert.equal(nullGapScenario.workflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(nullGapScenario.workflow.compare.nullFramesBefore, 21);
+  assert.equal(nullGapScenario.workflow.compare.nullFramesAfter, 21);
+  assert.equal(nullGapScenario.workflow.compare.nullGapPreserved, true);
+  assert.equal(nullGapScenario.workflow.compare.oppositeDirectionsObserved, true);
+  assert.equal(nullGapScenario.workflow.compare.crossGapCouplingObserved, false);
+  assert.equal(nullGapScenario.workflow.cleanup.contentTokenMatched, true);
+  assert.equal(nullGapScenario.resourceCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(nullGapScenario.id), false);
   const notApplicableScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-12-worker-timeout-or-crash",
   );

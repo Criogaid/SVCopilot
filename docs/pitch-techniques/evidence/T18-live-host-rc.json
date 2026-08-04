@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T08:46:13.470-03:00",
+  "capturedAt": "2026-08-04T09:25:44.698-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -22,6 +22,7 @@
   },
   "completedMvpScenarioIds": [
     "mvp-01-richards-constant-tempo",
+    "mvp-02-tempo-change-transition-vibrato",
     "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
@@ -30,7 +31,8 @@
     "mvp-08-shared-target-two-occurrences",
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
-    "mvp-13-interpolation-failure-and-rollback"
+    "mvp-13-interpolation-failure-and-rollback",
+    "mvp-14-null-gap-correction"
   ],
   "notApplicableMvpScenarioIds": [
     "mvp-12-worker-timeout-or-crash"
@@ -1405,12 +1407,223 @@
         "knownHandleCountAfterCleanup": 0,
         "pendingExecutionsAfterCleanup": 0
       }
+    },
+    {
+      "id": "mvp-02-tempo-change-transition-vibrato",
+      "status": "passed",
+      "capturedAt": "2026-08-04T09:25:44.698-03:00",
+      "scope": "reversible_extended_note_with_step_tempo_transition_and_explicit_vibrato",
+      "fixture": {
+        "tempoMarksBpm": [
+          130,
+          90,
+          170
+        ],
+        "tempoChangeInsideVibrato": true,
+        "transitionBoundaryAtTempoMark": true,
+        "temporaryNoteChanges": [
+          "duration",
+          "pitch"
+        ],
+        "rawProjectDataWithheld": true
+      },
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "requestedComputedPitchFrames": 500,
+          "finiteComputedPitchFrames": 500,
+          "coverage": 1,
+          "baselinePointsInMutationRange": {
+            "pitchDelta": 10,
+            "vibratoEnv": 0
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 2,
+          "curveCount": 2,
+          "pointCount": 734,
+          "curvePointCounts": {
+            "pitchDelta": 394,
+            "vibratoEnv": 340
+          },
+          "requestedVibratoRateHz": 5.5
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "preflightPassedCurves": 2,
+          "hostWriteMs": 0
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "hostWriteMs": 5646,
+          "hostVerificationMs": 3504,
+          "operationMs": 10422,
+          "maxPointValueDeltaCent": 0.000010962890655719093,
+          "hostInterpolation": {
+            "sampleCount": 280,
+            "maxAbsErrorCent": 0.000013806640652092028,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "attempts": 2,
+          "elapsedMs": 219,
+          "coverage": 1
+        },
+        "compare": {
+          "status": "succeeded",
+          "timeGrid": "uniform_seconds",
+          "crossedTempoChange": true,
+          "sourceFrames": 500,
+          "uniformSecondsFrames": 551,
+          "sampleRateHz": 305.7600000002739,
+          "validFrames": 551,
+          "requestedRateHz": 5.5,
+          "observedRateHz": 5.460000000004891,
+          "absoluteRateErrorHz": 0.03999999999510906,
+          "relativeRateError": 0.007272727271837829,
+          "liveRateGate": 0.01,
+          "liveRateGatePassed": true,
+          "observedDepthCent": 22.51349219688973,
+          "regularity": 0.947722695105963
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "curveFixtureTokenMatched": true,
+          "originalProjectContentTokenMatched": true,
+          "restoredTempoMarksBpm": [
+            130
+          ],
+          "restoredPitchDeltaPointsInOriginalRange": 35,
+          "restoredVibratoEnvPointsInOriginalRange": 0,
+          "restoredPitchDeltaPointsInFixtureRange": 48,
+          "restoredVibratoEnvPointsInFixtureRange": 0,
+          "temporaryNoteFieldsRestored": true
+        }
+      },
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedArtifactLeases": 12,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
+    {
+      "id": "mvp-14-null-gap-correction",
+      "status": "passed",
+      "capturedAt": "2026-08-04T09:08:34.788-03:00",
+      "scope": "opposite_transients_on_independent_finite_runs_around_null_gap",
+      "fixUnderTest": {
+        "commit": "48c723e",
+        "failurePrevented": "float32_host_value_crossing_fingerprint_rounding_boundary",
+        "previousBaselineErrorCent": 0.0000019073486328125,
+        "dryRunAfterRestart": "passed"
+      },
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "requestedComputedPitchFrames": 300,
+          "finiteComputedPitchFrames": 279,
+          "nullFrames": 21,
+          "nullFrameStart": 140,
+          "nullFrameEnd": 160,
+          "coverage": 0.93
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 2,
+          "curveCount": 2,
+          "pointCount": 175,
+          "curvePointCounts": [
+            87,
+            88
+          ],
+          "correctionTargetRetained": true
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "preflightPassedCurves": 2,
+          "hostWriteMs": 0
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "hostWriteMs": 2123,
+          "hostVerificationMs": 2287,
+          "operationMs": 5696,
+          "hostInterpolation": {
+            "sampleCount": 179,
+            "maxAbsErrorCent": 0.000008242187504947651,
+            "callerEpsilonCent": 0.5
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "attempts": 2,
+          "elapsedMs": 221,
+          "coverage": 0.93
+        },
+        "compare": {
+          "status": "succeeded",
+          "timeGrid": "uniform_seconds",
+          "validFrames": 279,
+          "nullFramesBefore": 21,
+          "nullFramesAfter": 21,
+          "nullGapPreserved": true,
+          "leftFocusCenterDeltaCent": 5.876438434383857,
+          "rightFocusCenterDeltaCent": -20.270865304249952,
+          "oppositeDirectionsObserved": true,
+          "crossGapCouplingObserved": false
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "restorationStatus": "no_change",
+          "contentTokenMatched": true,
+          "restoredPointsInTargetRanges": [
+            9,
+            12
+          ]
+        }
+      },
+      "resourceCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedArtifactLeases": 5,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0,
+        "knownHandleCountAfterCleanup": 0,
+        "pendingExecutionsAfterCleanup": 0
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
     }
   ],
   "pendingMvpScenarioIds": [
-    "mvp-02-tempo-change-transition-vibrato",
-    "mvp-11-stale-context-and-reconnect",
-    "mvp-14-null-gap-correction"
+    "mvp-11-stale-context-and-reconnect"
   ],
   "p2b": {
     "status": "not_started",
