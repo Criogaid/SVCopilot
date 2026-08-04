@@ -23,6 +23,9 @@
   "completedMvpScenarioIds": [
     "mvp-04-host-envelope-vibrato"
   ],
+  "notApplicableMvpScenarioIds": [
+    "mvp-12-worker-timeout-or-crash"
+  ],
   "scenarios": [
     {
       "id": "mvp-04-host-envelope-vibrato",
@@ -210,6 +213,22 @@
         "status": "pending_human",
         "perception": "human_only"
       }
+    },
+    {
+      "id": "mvp-12-worker-timeout-or-crash",
+      "status": "not_applicable",
+      "gate": {
+        "condition": "only when P4 selects an external worker",
+        "result": "P4 selected the in-process node-bounded-richards backend"
+      },
+      "evidence": {
+        "source": "T16-fit-worker-benchmark.json",
+        "selectionStatus": "selected",
+        "selectedCandidateId": "node-bounded-richards",
+        "crashIsolation": "not_applicable_in_process",
+        "timeoutRecovery": "converged_after_timeout"
+      },
+      "hostMutation": false
     }
   ],
   "pendingMvpScenarioIds": [
@@ -223,7 +242,6 @@
     "mvp-09-short-and-long-groups",
     "mvp-10-computed-pitch-coverage-matrix",
     "mvp-11-stale-context-and-reconnect",
-    "mvp-12-worker-timeout-or-crash",
     "mvp-13-interpolation-failure-and-rollback",
     "mvp-14-null-gap-correction"
   ],

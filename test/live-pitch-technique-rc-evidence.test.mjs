@@ -25,9 +25,10 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(evidence.fixture.originalContentTokenRestored, true);
   assert.equal(evidence.fixture.intermediateArtifactLeasesReleased, true);
   assert.deepEqual(evidence.completedMvpScenarioIds, ["mvp-04-host-envelope-vibrato"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 13);
+  assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 12);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 2);
+  assert.equal(evidence.scenarios.length, 3);
 
   const scenario = evidence.scenarios[0];
   assert.equal(scenario.id, "mvp-04-host-envelope-vibrato");
@@ -45,6 +46,10 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(partialScenario.workflow.cleanup.restorationTokenMatched, true);
   assert.equal(partialScenario.artifactLeaseCleanup.status, "partial");
   assert.ok(evidence.pendingMvpScenarioIds.includes(partialScenario.id));
+  const notApplicableScenario = evidence.scenarios[2];
+  assert.equal(notApplicableScenario.id, "mvp-12-worker-timeout-or-crash");
+  assert.equal(notApplicableScenario.status, "not_applicable");
+  assert.equal(notApplicableScenario.hostMutation, false);
   assert.equal(JSON.stringify(evidence).includes("contextId"), false);
   assert.equal(JSON.stringify(evidence).includes("groupUuid"), false);
 });

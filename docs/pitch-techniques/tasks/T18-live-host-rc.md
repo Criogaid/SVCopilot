@@ -31,6 +31,8 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
 - 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 4 已完成一次可恢复真机闭环：
   [T18-live-host-rc.json](../evidence/T18-live-host-rc.json)。该记录只通过场景 4，另有
-  13 个 MVP 场景尚未完成，P2b 也明确保持未启动。
+  12 个 MVP 场景尚未完成，P2b 也明确保持未启动。
 - 场景 5 已证明写入、比较和内容恢复，但 Artifact descriptor 无法完全枚举，清理门禁仍开着；
   它在证据中保持 `in_progress`，不计入通过场景。
+- 场景 12 因 P4 已选进程内后端而标为 `not_applicable`；T16 的 timeout recovery 证据保留为
+  该条件裁定的依据。
