@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T05:25:18.4196724-03:00",
+  "capturedAt": "2026-08-04T06:36:31.859-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -21,6 +21,7 @@
     "intermediateArtifactLeasesReleased": true
   },
   "completedMvpScenarioIds": [
+    "mvp-01-richards-constant-tempo",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato"
   ],
@@ -28,6 +29,133 @@
     "mvp-12-worker-timeout-or-crash"
   ],
   "scenarios": [
+    {
+      "id": "mvp-01-richards-constant-tempo",
+      "status": "passed",
+      "capturedAt": "2026-08-04T06:34:11.253-03:00",
+      "fixUnderTest": {
+        "commit": "2ac7187",
+        "failurePrevented": [
+          "canonical_seconds_endpoint_outside_transition_oracle",
+          "disjoint_curve_anchor_lookup_before_range_filter"
+        ],
+        "offlineRegression": {
+          "status": "passed",
+          "plannerTests": 11,
+          "fullTests": 846,
+          "mcpSmoke": "passed"
+        }
+      },
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "tempoMarks": 1,
+          "constantTempoBpm": 130,
+          "transitionPairs": 2,
+          "directions": [
+            "down_one_semitone",
+            "up_one_semitone"
+          ],
+          "baselinePitchDeltaPoints": 67,
+          "computedPitch": {
+            "requestedFrames": 768,
+            "finiteFrames": 519,
+            "nullFrames": 249,
+            "coverage": 0.67578125
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 2,
+          "curveCount": 2,
+          "pointCount": 117,
+          "curvePointCounts": [
+            55,
+            62
+          ]
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 117,
+          "readbackPoints": 117,
+          "hostWriteMs": 287,
+          "hostVerificationMs": 270,
+          "maxPointValueDeltaCent": 0.00000633886719469956,
+          "hostInterpolation": {
+            "sampleCount": 122,
+            "maxAbsErrorCent": 0.000008040912291562563,
+            "callerEpsilonCent": 1
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "stablePolls": 2,
+          "attempts": 2,
+          "elapsedMs": 107,
+          "coverage": 0.67578125
+        },
+        "compare": {
+          "status": "succeeded",
+          "comparedFrames": 519,
+          "nullFramesBefore": 249,
+          "nullFramesAfter": 249,
+          "overall": {
+            "meanCent": -0.8675746145965046,
+            "medianCent": 0,
+            "maeCent": 2.9350185210534834,
+            "rmseCent": 9.579498183498323,
+            "p95AbsCent": 25.536346435546875,
+            "maxAbsCent": 55.65834045410156
+          },
+          "changedTransitionRegions": 2,
+          "unmatchedNotes": 0
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "dryRunEffects": "none",
+          "dryRunUndoBoundaryCalls": 0,
+          "pitchDeltaPoints": {
+            "before": [
+              55,
+              62
+            ],
+            "after": [
+              0,
+              7
+            ]
+          },
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "restorationTokenMatched": true
+        }
+      },
+      "artifactLeaseCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedLeases": 4,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0
+      },
+      "transportMetrics": {
+        "status": "partial",
+        "reason": "Facade timings and Artifact bytes were observed; aggregate PIPE and MCP byte percentiles remain pending."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
     {
       "id": "mvp-04-host-envelope-vibrato",
       "status": "passed",
@@ -236,7 +364,6 @@
     }
   ],
   "pendingMvpScenarioIds": [
-    "mvp-01-richards-constant-tempo",
     "mvp-02-tempo-change-transition-vibrato",
     "mvp-03-overshoot-preparation",
     "mvp-06-overlap-composition-permutation",

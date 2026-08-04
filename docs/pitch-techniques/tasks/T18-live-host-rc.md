@@ -36,3 +36,7 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
   `0 entries / 0 bytes`，cleanup 门禁闭合。
 - 场景 12 因 P4 已选进程内后端而标为 `not_applicable`；T16 的 timeout recovery 证据保留为
   该条件裁定的依据。
+- 场景 1 的首次零写入 RC 暴露 130 BPM 规范化端点与多曲线锚点过滤缺陷；修复提交
+  `2ac7187` 经 `846 / 846` 完整测试和 MCP smoke 后，在重启进程上完成两条上下行 Richards
+  transition 的 plan、dry-run、单 Undo commit、computed-pitch compare、精确 token 恢复与
+  Artifact `0 entries / 0 bytes` 清理门禁。当前还剩 10 个 MVP 场景未完成。

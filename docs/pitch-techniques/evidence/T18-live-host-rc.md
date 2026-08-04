@@ -29,4 +29,14 @@
 的 worker crash。T16 已验证该后端的 timeout 后恢复；本场景标为 `not_applicable`，不把它伪装成
 一次真机 crash 通过。
 
+场景 1（130 BPM 恒速 Richards）在首次 RC 中先以零写入失败，暴露了纳秒规范化端点越过
+transition oracle 和多条不相交曲线先查锚点后过滤范围的两个规划器缺陷。修复提交 `2ac7187`
+加入了同形离线回归，完整测试为 `846 / 846`，MCP smoke 通过；重启后同一真实结构成功规划两条
+上下行 Richards curve，共 `117` 点。dry-run 为零写入、零 Undo，commit 为一个用户 Undo；
+宿主插值 `122` 个样本的最大误差为 `8.04e-6 cent`。稳定后的 `519 / 768` 个有效 computed-pitch
+frame 中，before/after 的 MAE 为 `2.935 cent`，P95 为 `25.536 cent`，变化集中在两个 transition
+区域。恢复事务把两段范围从 `55 / 62` 点还原到 `0 / 7` 个基线点，最终 `sinceToken` 返回
+`no_change`；4 个 lease 全部显式释放，doctor 为 Artifact `0 entries / 0 bytes`。人工试听仍为
+`pending_human`。
+
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。
