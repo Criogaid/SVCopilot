@@ -1,6 +1,6 @@
 # T18 — 全链路真机 RC
 
-- 状态：`blocked`
+- 状态：`in_progress`
 - 权威：[实施计划](../implementation-plan.md) §13、§16.5、§17 提交 18
 - 依赖：T13、T15、T17；T14 仅在启用 P2b 时加入
 - 解锁：T19、T20
@@ -25,3 +25,9 @@
 ## 完成条件
 
 MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
+
+## 当前进展
+
+- 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
+- 旧 MCP 进程在这两次提交前启动；一次纯 `plan_pitch_gesture` 返回
+  `HOST_SEMANTIC_UNCONFIRMED`，没有 setter 或 Undo。必须重启该单一进程后继续真机场景。
