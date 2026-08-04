@@ -2,7 +2,7 @@
   "kind": "svcopilot-live-host-rc",
   "schemaVersion": "1.0.0",
   "status": "in_progress",
-  "capturedAt": "2026-08-04T06:36:31.859-03:00",
+  "capturedAt": "2026-08-04T06:41:46.648-03:00",
   "host": {
     "product": "Synthesizer V Studio 2 Pro",
     "version": "2.2.1",
@@ -22,6 +22,7 @@
   },
   "completedMvpScenarioIds": [
     "mvp-01-richards-constant-tempo",
+    "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato"
   ],
@@ -134,6 +135,135 @@
             "after": [
               0,
               7
+            ]
+          },
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "restorationTokenMatched": true
+        }
+      },
+      "artifactLeaseCleanup": {
+        "status": "succeeded",
+        "explicitlyReleasedLeases": 4,
+        "sessionArtifactEntriesAfterCleanup": 0,
+        "sessionArtifactBytesAfterCleanup": 0
+      },
+      "transportMetrics": {
+        "status": "partial",
+        "reason": "Facade timings and Artifact bytes were observed; aggregate PIPE and MCP byte percentiles remain pending."
+      },
+      "humanAudition": {
+        "status": "pending_human",
+        "perception": "human_only"
+      }
+    },
+    {
+      "id": "mvp-03-overshoot-preparation",
+      "status": "passed",
+      "capturedAt": "2026-08-04T06:40:00.454-03:00",
+      "workflow": {
+        "snapshot": {
+          "status": "succeeded",
+          "baselinePitchDeltaPoints": 67,
+          "computedPitch": {
+            "requestedFrames": 768,
+            "finiteFrames": 519,
+            "nullFrames": 249,
+            "coverage": 0.67578125
+          }
+        },
+        "plan": {
+          "status": "planned",
+          "techniqueCount": 2,
+          "curveCount": 2,
+          "pointCount": 134,
+          "curvePointCounts": [
+            72,
+            62
+          ],
+          "techniques": [
+            {
+              "intent": "overshoot",
+              "peakSemitone": 0.2,
+              "peakTimeSeconds": 0.05,
+              "spanSeconds": 0.24,
+              "dampingRatio": 0.5422,
+              "tailPolicy": "continuous_taper"
+            },
+            {
+              "intent": "preparation",
+              "peakSemitone": -0.15,
+              "peakTimeSeconds": 0.05,
+              "spanSeconds": 0.24,
+              "dampingRatio": 0.6681,
+              "tailPolicy": "continuous_taper"
+            }
+          ]
+        },
+        "dryRun": {
+          "status": "dry_run",
+          "effects": "none",
+          "setterCalls": 0,
+          "undoBoundaryCalls": 0,
+          "hostWriteMs": 0
+        },
+        "commit": {
+          "status": "succeeded",
+          "effects": "verified",
+          "expectedUserUndoSteps": 1,
+          "undoBoundaryCalls": 2,
+          "undoRecords": 1,
+          "plannedPoints": 134,
+          "readbackPoints": 134,
+          "hostWriteMs": 276,
+          "hostVerificationMs": 298,
+          "maxPointValueDeltaCent": 0.0000030708007727753284,
+          "hostInterpolation": {
+            "sampleCount": 140,
+            "maxAbsErrorCent": 0.00000403417968186659,
+            "callerEpsilonCent": 1
+          }
+        },
+        "wait": {
+          "status": "succeeded",
+          "state": "ready",
+          "stablePolls": 2,
+          "attempts": 2,
+          "elapsedMs": 107,
+          "coverage": 0.67578125
+        },
+        "compare": {
+          "status": "succeeded",
+          "comparedFrames": 519,
+          "nullFramesBefore": 249,
+          "nullFramesAfter": 249,
+          "overall": {
+            "meanCent": 0.09241416504847062,
+            "medianCent": 0,
+            "maeCent": 1.3679225091070568,
+            "rmseCent": 4.219890196341283,
+            "p95AbsCent": 12.902069091796875,
+            "maxAbsCent": 19.92645263671875
+          },
+          "focusNoteCenterDeltaCent": {
+            "overshoot": 16.72719319661482,
+            "preparation": -12.777964274088305
+          },
+          "requestedDirectionObserved": true,
+          "unmatchedNotes": 0
+        },
+        "cleanup": {
+          "status": "succeeded",
+          "dryRunEffects": "none",
+          "dryRunUndoBoundaryCalls": 0,
+          "pitchDeltaPoints": {
+            "before": [
+              72,
+              62
+            ],
+            "after": [
+              11,
+              0
             ]
           },
           "expectedUserUndoSteps": 1,
@@ -365,7 +495,6 @@
   ],
   "pendingMvpScenarioIds": [
     "mvp-02-tempo-change-transition-vibrato",
-    "mvp-03-overshoot-preparation",
     "mvp-06-overlap-composition-permutation",
     "mvp-07-pitch-delta-surface",
     "mvp-08-shared-target-two-occurrences",

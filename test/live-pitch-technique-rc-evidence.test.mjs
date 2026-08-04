@@ -26,13 +26,14 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(evidence.fixture.intermediateArtifactLeasesReleased, true);
   assert.deepEqual(evidence.completedMvpScenarioIds, [
     "mvp-01-richards-constant-tempo",
+    "mvp-03-overshoot-preparation",
     "mvp-04-host-envelope-vibrato",
     "mvp-05-explicit-pitch-delta-vibrato",
   ]);
   assert.deepEqual(evidence.notApplicableMvpScenarioIds, ["mvp-12-worker-timeout-or-crash"]);
-  assert.equal(evidence.pendingMvpScenarioIds.length, 10);
+  assert.equal(evidence.pendingMvpScenarioIds.length, 9);
   assert.equal(evidence.p2b.status, "not_started");
-  assert.equal(evidence.scenarios.length, 4);
+  assert.equal(evidence.scenarios.length, 5);
 
   const richardsScenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-01-richards-constant-tempo",
@@ -45,6 +46,21 @@ test("T18 live RC evidence records only completed scenarios and preserves its ga
   assert.equal(richardsScenario.workflow.cleanup.restorationTokenMatched, true);
   assert.equal(richardsScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
   assert.equal(evidence.pendingMvpScenarioIds.includes(richardsScenario.id), false);
+
+  const transientScenario = evidence.scenarios.find(
+    (candidate) => candidate.id === "mvp-03-overshoot-preparation",
+  );
+  assert.equal(transientScenario.status, "passed");
+  assert.deepEqual(
+    transientScenario.workflow.plan.techniques.map((technique) => technique.dampingRatio),
+    [0.5422, 0.6681],
+  );
+  assert.equal(transientScenario.workflow.dryRun.setterCalls, 0);
+  assert.equal(transientScenario.workflow.commit.expectedUserUndoSteps, 1);
+  assert.equal(transientScenario.workflow.compare.requestedDirectionObserved, true);
+  assert.equal(transientScenario.workflow.cleanup.restorationTokenMatched, true);
+  assert.equal(transientScenario.artifactLeaseCleanup.sessionArtifactEntriesAfterCleanup, 0);
+  assert.equal(evidence.pendingMvpScenarioIds.includes(transientScenario.id), false);
 
   const scenario = evidence.scenarios.find(
     (candidate) => candidate.id === "mvp-04-host-envelope-vibrato",

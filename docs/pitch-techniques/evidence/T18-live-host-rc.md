@@ -39,4 +39,12 @@ frame 中，before/after 的 MAE 为 `2.935 cent`，P95 为 `25.536 cent`，变�
 `no_change`；4 个 lease 全部显式释放，doctor 为 Artifact `0 entries / 0 bytes`。人工试听仍为
 `pending_human`。
 
+场景 3 在两个不重叠范围分别编译 overshoot 与 preparation，使用权威默认阻尼 `0.5422`、
+`0.6681` 和连续 C1 taper。两条曲线共 `134` 点；dry-run 零写入、零 Undo，commit 一个用户
+Undo，宿主插值 `140` 个样本的最大误差为 `4.03e-6 cent`。`519 / 768` 个有效帧的 before/after
+比较中，整体 MAE 为 `1.368 cent`、P95 为 `12.902 cent`，两个目标音符中心分别变化
+`+16.727 cent` 与 `-12.778 cent`，方向与请求一致；这些数值只证明模型写入和观测链路，不替代
+人工听感。恢复事务把两段范围从 `72 / 62` 点还原到 `11 / 0` 个基线点，最终 token 精确匹配；
+4 个 lease 全部显式释放，doctor 再次为 Artifact `0 entries / 0 bytes`。
+
 完整机器可读记录见 [T18-live-host-rc.json](T18-live-host-rc.json)。
