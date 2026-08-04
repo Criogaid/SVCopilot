@@ -35,4 +35,4 @@
   门禁，且未增加生产运行时依赖或 NOTICE 条目。
 - 生产边界：SciPy adapter 仅为 benchmark 对照，未加入 `server/package.json`；Rust/WASM 没有已固定的
   实现或可分发构件，未被 benchmark。T16 不新增 MCP surface 或 host/PIPE 写入路径。
-- 宿主：未接触；零 host call、零 setter、零 Undo。T17 仍被 T08/H1 阻塞，不能据此开始。
+- 宿主：未接触；零 host call、零 setter、零 Undo。T08/H1 已完成后，T17 可按其自身任务定义开始。

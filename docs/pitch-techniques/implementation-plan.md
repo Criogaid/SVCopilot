@@ -491,8 +491,10 @@ cents 中心统计可用原始 frame，但 provenance 必须区分。
 **必须与 P0.5 的 H1 结果一起看**：若 Node 换算与宿主有偏差，重采样会把一个错误的
 秒轴"精确地"均匀化，误差反而更难发现。因此 H1 是本项的前置。
 
-现状缺口：`computed-pitch-compare.js:1026 frameRateAt()` 只在单个 BLICK 位置算标量
-局部帧率，整条序列仍非均匀秒网格；`fs` 被当作整窗采样率用于自相关与 Hz 换算。
+T08 已在 `server/src/pitch-techniques/time-grid.js` 落地该路径：恒速时保留原始 frame 对齐，变速时
+在连续 finite run 内重采样到恒定秒间隔；`sampling` 仅公开摘要化 provenance。`compare_contexts`
+分别建立双方秒轴，任何 raw sampling 或时间轴不兼容都在统计前拒绝；不再以单个 BLICK 位置的标量
+帧率替代整窗 Hz 分析。
 
 ### 4.5 F5 — TechniqueIR v1（内部）
 

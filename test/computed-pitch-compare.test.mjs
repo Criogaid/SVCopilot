@@ -23,6 +23,7 @@ function createStoredContext(store, options) {
     intervalBlick = Q / 10,
     notes = [],
     bpm = 120,
+    tempoMarks = null,
     timeOffsetBlick = 0,
     pitchOffsetSemitone = 0,
     withComputedPitch = true,
@@ -86,7 +87,7 @@ function createStoredContext(store, options) {
   stored.context.computedPitchByOccurrence = map;
   stored.context.quarterBlick = Q;
   stored.context.meterMarks = [{ position: 0, positionBlick: 0, numerator: 4, denominator: 4 }];
-  stored.context.tempoMarks = [{ positionBlick: 0, positionSeconds: 0, bpm }];
+  stored.context.tempoMarks = tempoMarks ?? [{ positionBlick: 0, positionSeconds: 0, bpm }];
   stored.snapshotToken = `snap_${stored.contextId}`;
   return { stored };
 }
@@ -704,34 +705,46 @@ test("compare_contexts rejects mismatched sampling grids before any analysis", a
   );
 });
 
-test("compare_contexts warns when tempo maps differ but still pairs by score position", async () => {
+test("compare_contexts rejects tempo maps with incompatible uniform-seconds axes", async () => {
   const store = createStore();
   const { before, after } = createContextsPair(store, [60, 60], [60, 60], {
     after: { bpm: 90 },
   });
-  const result = await createService(store).compare({
-    mode: "compare_contexts",
-    before: { contextId: before.stored.contextId },
-    after: { contextId: after.stored.contextId },
-  });
-  assert.equal(result.ok, true);
-  assert.ok(result.warnings.some((warning) => warning.code === "TEMPO_MAP_DIFFERS"));
+  await assert.rejects(
+    createService(store).compare({
+      mode: "compare_contexts",
+      before: { contextId: before.stored.contextId },
+      after: { contextId: after.stored.contextId },
+    }),
+    (error) => {
+      assert.equal(error.code, "ALIGNMENT_UNSUPPORTED");
+      assert.equal(error.details.reason, "sample_interval_differs");
+      assert.equal(error.details.before.timeGrid, "uniform_seconds");
+      assert.equal(error.details.after.timeGrid, "uniform_seconds");
+      return true;
+    }
+  );
 });
 
-test("compare_contexts measures vibrato Hz per side when tempo differs (before-side fs is its own)", async () => {
+test("compare_contexts preserves uniform-seconds coverage and vibrato through a shared tempo step", async () => {
   const store = createStore();
-  const interval = Q / 40; // fs = bpm*2/3 → after(60)=40 Hz, before(120)=80 Hz
-  const frames = 200;
-  // 同一帧域颤音（10 帧/周期）：物理 Hz 只由各侧帧率决定 → before 应≈2×after，而非共用 after 的 fs。
+  const interval = Q / 40;
+  const frames = 160;
+  const marks = [
+    { positionBlick: 0, positionSeconds: 0, bpm: 120 },
+    { positionBlick: Q, positionSeconds: 0.5, bpm: 60 },
+  ];
   const vibrato = Array.from(
     { length: frames },
-    (_, index) => 60 + 0.3 * Math.sin((2 * Math.PI * index) / 10)
+    (_, index) => {
+      const blick = index * interval;
+      const seconds = blick < Q ? blick / Q / 2 : 0.5 + (blick - Q) / Q;
+      return 60 + 0.3 * Math.sin(2 * Math.PI * 4 * seconds);
+    }
   );
   const noteSpec = { onsetBlick: 0, durationBlick: frames * interval, pitch: 60 };
   const { before, after } = createContextsPair(store, vibrato, vibrato, {
-    shared: { intervalBlick: interval, notes: [noteSpec] },
-    before: { bpm: 120 },
-    after: { bpm: 60 },
+    shared: { intervalBlick: interval, notes: [noteSpec], tempoMarks: marks },
   });
   const result = await createService(store).compare({
     mode: "compare_contexts",
@@ -741,9 +754,17 @@ test("compare_contexts measures vibrato Hz per side when tempo differs (before-s
   const item = result.perNote.items[0];
   assert.equal(item.after.vibrato.status, "ok");
   assert.equal(item.before.vibrato.status, "ok");
-  approx(item.after.vibrato.rateHz, 4, 0.7); // 40/10
-  approx(item.before.vibrato.rateHz, 8, 1.0); // 80/10, 修复前会被误报成 4
-  assert.ok(item.before.vibrato.rateHz > item.after.vibrato.rateHz * 1.5);
+  approx(item.after.vibrato.rateHz, 4, 0.5);
+  approx(item.before.vibrato.rateHz, 4, 0.5);
+  assert.equal(result.sampling.timeGrid, "uniform_seconds");
+  assert.equal(result.sampling.resampling.crossedTempoChange, true);
+  assert.ok(result.sampling.frames > result.sampling.sourceFrames);
+  assert.equal(result.summary.frameCount, result.sampling.frames);
+  assert.equal(result.summary.coverage, 1);
+  assert.equal(Object.hasOwn(result.sampling, "timeSeconds"), false);
+  assert.equal(Object.hasOwn(result.sampling, "values"), false);
+  assert.equal(Object.hasOwn(result.sampling, "mask"), false);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 8 * 1024);
 });
 
 test("compare_contexts flags inserted/shifted notes as unmatched instead of a cross-note delta", async () => {

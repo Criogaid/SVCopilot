@@ -313,9 +313,8 @@ overshoot、preparation 与跨音符转换可以合法跨越音符边界。强�
 > journal+读回+补偿、computed pitch 捕获与稳定轮询、人类试听编排、
 > 秒/BLICK 分段换算、现有 transition/attack/release/vibrato 前向规划）。
 >
-> **未完成**：研究模型层（端点归一 Richards、拆分后的二阶瞬态、统一颤音语义）、
-> **宿主组合语义证据**（双颤音、双写面、插值后置、重算延迟）、
-> 逆向拟合层、等秒分析网格。
+> **未完成**：宿主组合语义证据（双颤音、双写面、插值后置、重算延迟）、
+> `pitchDelta` 编译与事务后置验证、单步修正、只读技法分析、真机 RC 与发布证据。
 
 ### 3.2 经四轮共同确认的官方事实（`confirmed`）
 
@@ -448,6 +447,14 @@ T04 用克隆临时 track、新 library group 和两个 reference 进行可恢�
 occurrence offset 映射为 `partially_observed`，因为缺少 computed-pitch 往返；H7 没有人工 Ctrl+Z
 证据。0.2/1.8 `vibratoEnv` 写入在 strict double equality 下暴露 float32 回读差异，返回 `partial`
 后没有重试，而是删除夹具并验证恢复。
+
+### 5.4 2026-08-04 等秒 analysis grid
+
+T08 以 H1 已确认的 `musical-time.js` 生产路径建立 `uniform_seconds` 网格。恒速输入保持原始
+frame 对齐；tempo step 时只在连续 finite run 内线性插值，null gap 保留为 null。computed-pitch
+compare 的 coverage、transition、vibrato 和 context delta 都改为该时间基准；两侧轴不兼容时在统计前
+返回 `ALIGNMENT_UNSUPPORTED`，不再按共享 BLICK 强行配对。完整离线证据见
+[T08-uniform-seconds-grid.md](evidence/T08-uniform-seconds-grid.md)。
 
 ## 6. 终版能力判定矩阵
 

@@ -1,5 +1,9 @@
 import { getStoredComputedPitch } from "./musical-range.js";
 import { secondsAtBlick } from "./musical-time.js";
+import {
+  buildUniformSecondsGrid,
+  compareUniformSecondsGridAxes,
+} from "./pitch-techniques/time-grid.js";
 import { ServiceTiming } from "./service-timing.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import {
@@ -49,6 +53,7 @@ const DEFAULT_TRANSITION_ITEMS = 20;
 const MAX_TRANSITION_ITEMS = 2_000;
 const SEMITONE_DELTA_THRESHOLDS = Object.freeze(["0.01", "0.05", "0.10"]);
 const ANOMALY_SORT_MODES = Object.freeze(["startBlick", "severity"]);
+const TIME_GRID_BOUNDARY_EPSILON_SECONDS = 1e-9;
 
 const PROVENANCE = Object.freeze({
   pitchSource: "computedPitch",
@@ -57,6 +62,7 @@ const PROVENANCE = Object.freeze({
   derivedMetrics: Object.freeze(["summary", "center", "vibrato", "transitions", "anomalySegments"]),
   thresholdBasis: "engineering_heuristic_requires_host_calibration",
   noteVibratoAttributes: "not_used_version1_only_fields",
+  timeGrid: "uniform_seconds_linear_within_finite_run",
   perception: "human_only",
 });
 
@@ -79,7 +85,7 @@ export class ComputedPitchCompareService {
     const loaded = await timer.measure("loadMs", async () =>
       input.mode === "compare_to_target"
         ? loadTargetSource(this.store, input)
-        : loadContextsSources(this.store, input, warnings)
+        : loadContextsSources(this.store, input)
     );
     const result =
       input.mode === "compare_to_target"
@@ -101,7 +107,7 @@ function loadTargetSource(store, input) {
   return { ...source };
 }
 
-function loadContextsSources(store, input, warnings) {
+function loadContextsSources(store, input) {
   const before = resolveCompareSource(
     store,
     input.before.contextId,
@@ -131,15 +137,6 @@ function loadContextsSources(store, input, warnings) {
       "ALIGNMENT_UNSUPPORTED",
       "before/after contexts use different SV.QUARTER timebases and cannot be compared"
     );
-  }
-  // blick 是乐谱位置：等栅格逐帧配对即按乐谱位置对齐。tempo 图不同只影响 Hz 类
-  // 指标（各侧用各自 tempo 换算），不影响配对本身。
-  if (!tempoMarksEqual(before.stored.context.tempoMarks, after.stored.context.tempoMarks)) {
-    warnings.push({
-      code: "TEMPO_MAP_DIFFERS",
-      message:
-        "Tempo maps differ between contexts; frames are paired by score position (blick) and Hz-based metrics use each side's own tempo map.",
-    });
   }
   return { before, after };
 }
@@ -189,7 +186,8 @@ function resolveCompareSource(store, contextId, requestedOrdinal, label) {
 async function runTargetAnalysis(loaded, input, warnings, timer) {
   const { stored, occurrence, ordinal, series } = loaded;
   const context = stored.context;
-  const partition = buildNoteSpanPartition(occurrence);
+  const grid = buildAnalysisGrid(series, context, "request");
+  const partition = buildNoteSpanPartition(occurrence, context);
   if (partition.inputNoteCount === 0) {
     throw codedError(
       "NOTES_NOT_CAPTURED",
@@ -201,15 +199,15 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
   }
   const spans = partition.melodicSpans;
   const params = input.analysis;
-  const sampling = buildSamplingBlock(series, context, params, warnings);
+  const sampling = buildSamplingBlock(series, grid, params, warnings);
 
   const base = await timer.measure("statsMs", async () => {
-    const frameData = buildTargetFrameData(series, spans, partition.excludedSpans);
+    const frameData = buildTargetFrameData(grid, spans, partition.excludedSpans);
     const cents = frameData.frameCents.filter(Boolean).map((frame) => frame.cents);
     if (cents.length === 0) {
-      throw insufficientComputedPitch(series, frameData);
+      throw insufficientComputedPitch(grid, frameData);
     }
-    return { frameData, summary: buildTargetSummary(series, frameData, cents) };
+    return { frameData, summary: buildTargetSummary(grid, frameData, cents) };
   });
   warnLowCoverage(base.summary.coverage, params, warnings);
 
@@ -218,7 +216,7 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
       ? collectAnomalySegments(base.frameData.frameCents, params.anomalyThresholdCent)
       : null;
     const perNote = input.metrics.perNote
-      ? buildPerNoteItems(spans, base.frameData.perSpan, params, context, series, {
+      ? buildPerNoteItems(spans, base.frameData.perSpan, params, grid, {
           vibrato: input.metrics.vibrato,
           warnings,
         })
@@ -228,7 +226,6 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
           spans,
           base.frameData.perSpan,
           params,
-          context,
           input.metrics.maxTransitions
         )
       : null;
@@ -261,25 +258,31 @@ async function runTargetAnalysis(loaded, input, warnings, timer) {
   };
 }
 
-function buildNoteSpans(occurrence) {
+function buildNoteSpans(occurrence, context) {
   const timeOffset = occurrence.timeOffsetBlick ?? 0;
   const pitchOffset = occurrence.pitchOffsetSemitone ?? 0;
   return (occurrence.noteFingerprints ?? [])
-    .map((fingerprint) => ({
-      indexInGroup: fingerprint.indexInGroup,
-      lyrics: fingerprint.lyrics,
-      // 目标音高 = note MIDI + detune(cent→半音) + reference pitchOffset（官方 getPitchOffset 语义）。
-      targetSemitone:
-        fingerprint.pitch + (fingerprint.detuneCents ?? 0) / 100 + pitchOffset,
-      absOnsetBlick: timeOffset + fingerprint.onsetBlick,
-      absEndBlick: timeOffset + fingerprint.onsetBlick + fingerprint.durationBlick,
-      durationBlick: fingerprint.durationBlick,
-    }))
+    .map((fingerprint) => {
+      const absOnsetBlick = timeOffset + fingerprint.onsetBlick;
+      const absEndBlick = absOnsetBlick + fingerprint.durationBlick;
+      return {
+        indexInGroup: fingerprint.indexInGroup,
+        lyrics: fingerprint.lyrics,
+        // 目标音高 = note MIDI + detune(cent→半音) + reference pitchOffset（官方 getPitchOffset 语义）。
+        targetSemitone:
+          fingerprint.pitch + (fingerprint.detuneCents ?? 0) / 100 + pitchOffset,
+        absOnsetBlick,
+        absEndBlick,
+        onsetSeconds: secondsAtBlick(context.tempoMarks, context.quarterBlick, absOnsetBlick),
+        endSeconds: secondsAtBlick(context.tempoMarks, context.quarterBlick, absEndBlick),
+        durationBlick: fingerprint.durationBlick,
+      };
+    })
     .sort((left, right) => left.absOnsetBlick - right.absOnsetBlick);
 }
 
-function buildNoteSpanPartition(occurrence) {
-  const inputSpans = buildNoteSpans(occurrence);
+function buildNoteSpanPartition(occurrence, context) {
+  const inputSpans = buildNoteSpans(occurrence, context);
   const sequence = analyzeVocalEventSequence(inputSpans);
   const melodicSpans = sequence.events
     .filter((event) => event.melodicEligible)
@@ -295,18 +298,25 @@ function buildNoteSpanPartition(occurrence) {
   };
 }
 
-function buildExcludedFrameMask(series, spans) {
-  const frameCount = series.frames ?? series.values?.length ?? 0;
+function buildExcludedFrameMask(grid, spans) {
+  const frameCount = grid.frames;
   const mask = new Uint8Array(frameCount);
   let count = 0;
   for (const span of spans) {
+    if (!Number.isFinite(span.onsetSeconds) || !Number.isFinite(span.endSeconds)) continue;
     const start = Math.max(
       0,
-      Math.ceil((span.absOnsetBlick - series.startBlick) / series.intervalBlick)
+      Math.ceil(
+        (span.onsetSeconds - grid.timeSeconds[0]) / grid.sampleIntervalSeconds -
+          TIME_GRID_BOUNDARY_EPSILON_SECONDS
+      )
     );
     const end = Math.min(
       frameCount,
-      Math.ceil((span.absEndBlick - series.startBlick) / series.intervalBlick)
+      Math.ceil(
+        (span.endSeconds - grid.timeSeconds[0]) / grid.sampleIntervalSeconds -
+          TIME_GRID_BOUNDARY_EPSILON_SECONDS
+      )
     );
     for (let index = start; index < end; index += 1) {
       if (mask[index] === 1) continue;
@@ -317,9 +327,9 @@ function buildExcludedFrameMask(series, spans) {
   return { mask, count };
 }
 
-function buildTargetFrameData(series, spans, excludedSpans = []) {
+function buildTargetFrameData(grid, spans, excludedSpans = []) {
   const perSpan = spans.map(() => []);
-  const frameCents = new Array(series.values.length).fill(null);
+  const frameCents = new Array(grid.values.length).fill(null);
   let finiteFrames = 0;
   let excludedFiniteFrameCount = 0;
   let framesOutsideNotes = 0;
@@ -327,29 +337,37 @@ function buildTargetFrameData(series, spans, excludedSpans = []) {
   // 帧与 span 都按时间单调，单指针扫描；组内音符不重叠（官方编辑器语义）。
   let cursor = 0;
   let excludedCursor = 0;
-  for (let index = 0; index < series.values.length; index += 1) {
-    const blick = series.startBlick + index * series.intervalBlick;
-    const value = series.values[index];
+  for (let index = 0; index < grid.values.length; index += 1) {
+    const seconds = grid.timeSeconds[index];
+    const blick = Math.round(grid.blicks[index]);
+    const value = grid.values[index];
     const finite = Number.isFinite(value);
     while (
       excludedCursor < excludedSpans.length &&
-      blick >= excludedSpans[excludedCursor].absEndBlick
+      seconds >= excludedSpans[excludedCursor].endSeconds - TIME_GRID_BOUNDARY_EPSILON_SECONDS
     ) {
       excludedCursor += 1;
     }
     if (
       excludedCursor < excludedSpans.length &&
-      blick >= excludedSpans[excludedCursor].absOnsetBlick
+      seconds >= excludedSpans[excludedCursor].onsetSeconds - TIME_GRID_BOUNDARY_EPSILON_SECONDS
     ) {
       excludedFrameCount += 1;
       if (finite) excludedFiniteFrameCount += 1;
       continue;
     }
     if (finite) finiteFrames += 1;
-    while (cursor < spans.length && blick >= spans[cursor].absEndBlick) cursor += 1;
-    const inSpan = cursor < spans.length && blick >= spans[cursor].absOnsetBlick;
+    while (
+      cursor < spans.length &&
+      seconds >= spans[cursor].endSeconds - TIME_GRID_BOUNDARY_EPSILON_SECONDS
+    ) {
+      cursor += 1;
+    }
+    const inSpan =
+      cursor < spans.length &&
+      seconds >= spans[cursor].onsetSeconds - TIME_GRID_BOUNDARY_EPSILON_SECONDS;
     if (inSpan) {
-      perSpan[cursor].push({ frameIndex: index, blick, value });
+      perSpan[cursor].push({ frameIndex: index, blick, seconds, value });
       if (finite) {
         frameCents[index] = { blick, cents: (value - spans[cursor].targetSemitone) * 100 };
       }
@@ -364,13 +382,13 @@ function buildTargetFrameData(series, spans, excludedSpans = []) {
     excludedFiniteFrameCount,
     framesOutsideNotes,
     excludedFrameCount,
-    eligibleFrameCount: Math.max(0, series.values.length - excludedFrameCount),
+    eligibleFrameCount: Math.max(0, grid.values.length - excludedFrameCount),
   };
 }
 
-function buildTargetSummary(series, frameData, cents) {
+function buildTargetSummary(grid, frameData, cents) {
   return {
-    frameCount: series.values.length,
+    frameCount: grid.values.length,
     eligibleFrameCount: frameData.eligibleFrameCount,
     excludedFrameCount: frameData.excludedFrameCount,
     excludedFiniteFrameCount: frameData.excludedFiniteFrameCount,
@@ -384,23 +402,19 @@ function buildTargetSummary(series, frameData, cents) {
   };
 }
 
-function buildPerNoteItems(spans, perSpan, params, context, series, { vibrato, warnings }) {
+function buildPerNoteItems(spans, perSpan, params, grid, { vibrato, warnings }) {
   const items = [];
   const total = spans.length;
   for (let index = 0; index < spans.length && items.length < MAX_PER_NOTE_ITEMS; index += 1) {
     const span = spans[index];
-    const fs = frameRateAt(
-      context.tempoMarks,
-      context.quarterBlick,
-      Math.floor((span.absOnsetBlick + span.absEndBlick) / 2),
-      series.intervalBlick
-    );
     items.push({
       note: span.indexInGroup,
       indexInGroup: span.indexInGroup,
       lyrics: span.lyrics,
       targetSemitone: span.targetSemitone,
-      ...analyzeNoteSeries(perSpan[index], span.targetSemitone, params, fs, { vibrato }),
+      ...analyzeNoteSeries(perSpan[index], span.targetSemitone, params, grid.sampleRateHz, {
+        vibrato,
+      }),
     });
   }
   const truncated = total > items.length;
@@ -460,7 +474,7 @@ function analyzeNoteSeries(noteFrames, targetSemitone, params, fs, { vibrato }) 
   return result;
 }
 
-function buildTransitions(spans, perSpan, params, context, limit) {
+function buildTransitions(spans, perSpan, params, limit) {
   const transitions = [];
   const count = Math.max(0, spans.length - 1);
   for (let index = 0; index < count && transitions.length < limit; index += 1) {
@@ -480,7 +494,7 @@ function buildTransitions(spans, perSpan, params, context, limit) {
     transitions.push({
       ...item,
       direction: direction > 0 ? "up" : "down",
-      ...analyzeTransition(to, perSpan[index + 1], direction, params.transition, context),
+      ...analyzeTransition(to, perSpan[index + 1], direction, params.transition),
     });
   }
   return {
@@ -493,20 +507,16 @@ function buildTransitions(spans, perSpan, params, context, limit) {
 
 // 转换分析只看进入新音符后的窗口：overshoot（越过目标的最大有向偏差）、
 // arrival（首次进入到达带）与 settling（连续 holdFrames 帧维持在稳定带内）。
-function analyzeTransition(toSpan, toFrames, direction, params, context) {
-  const boundarySeconds = secondsAtBlick(
-    context.tempoMarks,
-    context.quarterBlick,
-    toSpan.absOnsetBlick
-  );
-  if (boundarySeconds === null) return { status: "insufficient_data", reason: "tempo_unavailable" };
+function analyzeTransition(toSpan, toFrames, direction, params) {
+  const boundarySeconds = toSpan.onsetSeconds;
+  if (!Number.isFinite(boundarySeconds)) {
+    return { status: "insufficient_data", reason: "tempo_unavailable" };
+  }
   const windowSeconds = params.windowMs / 1000;
   const windowFrames = [];
   for (const frame of toFrames) {
-    const seconds = secondsAtBlick(context.tempoMarks, context.quarterBlick, frame.blick);
-    if (seconds === null) break;
-    const offsetMs = (seconds - boundarySeconds) * 1000;
-    if (seconds - boundarySeconds > windowSeconds) break;
+    const offsetMs = (frame.seconds - boundarySeconds) * 1000;
+    if (frame.seconds - boundarySeconds > windowSeconds) break;
     windowFrames.push({ ...frame, offsetMs });
   }
   const finite = windowFrames.filter((frame) => Number.isFinite(frame.value));
@@ -549,11 +559,13 @@ function analyzeTransition(toSpan, toFrames, direction, params, context) {
 
 async function runContextsAnalysis(loaded, input, warnings, timer) {
   const { before, after } = loaded;
-  const context = after.stored.context;
-  const series = after.series;
+  const beforeGrid = buildAnalysisGrid(before.series, before.stored.context, "before");
+  const afterGrid = buildAnalysisGrid(after.series, after.stored.context, "after");
+  assertCompatibleTimeGrids(beforeGrid, afterGrid);
+  const series = afterGrid;
   const params = input.analysis;
-  const beforePartition = buildNoteSpanPartition(before.occurrence);
-  const afterPartition = buildNoteSpanPartition(after.occurrence);
+  const beforePartition = buildNoteSpanPartition(before.occurrence, before.stored.context);
+  const afterPartition = buildNoteSpanPartition(after.occurrence, after.stored.context);
   if (beforePartition.inputNoteCount > 0 && beforePartition.melodicSpans.length === 0) {
     throw noMelodicEvidence(beforePartition, "before");
   }
@@ -565,8 +577,12 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     ...afterPartition.excludedSpans,
   ]);
   const sampling = {
-    ...buildSamplingBlock(series, context, params, warnings),
+    ...buildSamplingBlock(after.series, afterGrid, params, warnings),
     nullFrames: {
+      before: beforeGrid.values.filter((value) => !Number.isFinite(value)).length,
+      after: afterGrid.values.filter((value) => !Number.isFinite(value)).length,
+    },
+    sourceNullFrames: {
       before: before.series.evidence?.nullFrameIndices?.length ?? null,
       after: after.series.evidence?.nullFrameIndices?.length ?? null,
     },
@@ -577,13 +593,13 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
     const deltasSemitone = [];
     for (let index = 0; index < series.frames; index += 1) {
       if (excludedFrameMask.mask[index] === 1) continue;
-      const beforeValue = before.series.values[index];
-      const afterValue = after.series.values[index];
+      const beforeValue = beforeGrid.values[index];
+      const afterValue = afterGrid.values[index];
       if (!Number.isFinite(beforeValue) || !Number.isFinite(afterValue)) continue;
       const delta = afterValue - beforeValue;
       deltasSemitone.push(delta);
       frameCents[index] = {
-        blick: series.startBlick + index * series.intervalBlick,
+        blick: Math.round(series.blicks[index]),
         cents: delta * 100,
       };
     }
@@ -607,7 +623,9 @@ async function runContextsAnalysis(loaded, input, warnings, timer) {
           params,
           input.metrics.vibrato,
           warnings,
-          afterPartition.melodicSpans
+          afterPartition.melodicSpans,
+          beforeGrid,
+          afterGrid
         )
       : null;
     return { anomalies, perNote };
@@ -676,8 +694,18 @@ function buildSemitoneDelta(deltas) {
   };
 }
 
-function buildContextsPerNote(before, after, params, wantVibrato, warnings, melodicSpans = null) {
-  const spans = melodicSpans ?? buildNoteSpanPartition(after.occurrence).melodicSpans;
+function buildContextsPerNote(
+  before,
+  after,
+  params,
+  wantVibrato,
+  warnings,
+  melodicSpans = null,
+  beforeGrid,
+  afterGrid
+) {
+  const spans =
+    melodicSpans ?? buildNoteSpanPartition(after.occurrence, after.stored.context).melodicSpans;
   if (spans.length === 0) {
     warnings.push({
       code: "NOTES_NOT_CAPTURED",
@@ -709,11 +737,12 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings, melo
     beforeByOnset.size !== afterOnsets.length ||
     afterOnsets.some((onset) => !beforeByOnset.has(onset));
   const beforePitchOffset = before.occurrence.pitchOffsetSemitone ?? 0;
-  const afterFrames = buildTargetFrameData(after.series, spans).perSpan;
+  const afterFrames = buildTargetFrameData(afterGrid, spans).perSpan;
   const beforeFrames = spans.map((span, index) =>
     afterFrames[index].map((frame) => ({
       ...frame,
-      value: before.series.values[frame.frameIndex],
+      blick: Math.round(beforeGrid.blicks[frame.frameIndex]),
+      value: beforeGrid.values[frame.frameIndex],
     }))
   );
   // 先对全量 span 做廉价的指纹分类：matched/unmatched/edited 与告警必须统计全量，
@@ -734,17 +763,13 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings, melo
   const items = [];
   for (let index = 0; index < classified.length && items.length < MAX_PER_NOTE_ITEMS; index += 1) {
     const { span, beforeFingerprint, changedFields, comparable } = classified[index];
-    const midBlick = Math.floor((span.absOnsetBlick + span.absEndBlick) / 2);
-    // Hz 类指标（颤音）需按各侧自己的 tempo 图换算帧率：tempo 不同则 before/after 采样率不同，不能共用一个 fs。
-    const fsAfter = frameRateAt(
-      after.stored.context.tempoMarks,
-      after.stored.context.quarterBlick,
-      midBlick,
-      after.series.intervalBlick
+    const afterResult = analyzeNoteSeries(
+      afterFrames[index],
+      span.targetSemitone,
+      params,
+      afterGrid.sampleRateHz,
+      { vibrato: wantVibrato }
     );
-    const afterResult = analyzeNoteSeries(afterFrames[index], span.targetSemitone, params, fsAfter, {
-      vibrato: wantVibrato,
-    });
     if (!comparable) {
       items.push({
         note: span.indexInGroup,
@@ -756,17 +781,15 @@ function buildContextsPerNote(before, after, params, wantVibrato, warnings, melo
       });
       continue;
     }
-    const fsBefore = frameRateAt(
-      before.stored.context.tempoMarks,
-      before.stored.context.quarterBlick,
-      midBlick,
-      before.series.intervalBlick
-    );
     const beforeTarget =
       beforeFingerprint.pitch + (beforeFingerprint.detuneCents ?? 0) / 100 + beforePitchOffset;
-    const beforeResult = analyzeNoteSeries(beforeFrames[index], beforeTarget, params, fsBefore, {
-      vibrato: wantVibrato,
-    });
+    const beforeResult = analyzeNoteSeries(
+      beforeFrames[index],
+      beforeTarget,
+      params,
+      beforeGrid.sampleRateHz,
+      { vibrato: wantVibrato }
+    );
     items.push({
       note: span.indexInGroup,
       indexInGroup: span.indexInGroup,
@@ -1023,36 +1046,56 @@ function emitAnomalies(segments, sortBy) {
 }
 
 // tempoMarks 换算已提升到 musical-time.js（secondsAtBlick），compare 与 expression-plan 共享。
-function frameRateAt(tempoMarks, quarterBlick, blick, intervalBlick) {
-  const start = secondsAtBlick(tempoMarks, quarterBlick, blick);
-  const end = secondsAtBlick(tempoMarks, quarterBlick, blick + intervalBlick);
-  if (start === null || end === null || end <= start) return null;
-  return 1 / (end - start);
+function buildAnalysisGrid(series, context, label) {
+  const grid = buildUniformSecondsGrid({
+    startBlick: series.startBlick,
+    intervalBlick: series.intervalBlick,
+    values: series.values,
+    tempoMarks: context.tempoMarks,
+    quarterBlick: context.quarterBlick,
+  });
+  if (grid.status === "ready") return grid;
+  const error = codedError(
+    "TIME_GRID_UNAVAILABLE",
+    `${label} computed-pitch series cannot be mapped to a verified uniform-seconds grid`
+  );
+  error.details = { label, reason: grid.reason, source: grid.source };
+  throw error;
 }
 
-function buildSamplingBlock(series, context, params, warnings) {
-  const fs = frameRateAt(
-    context.tempoMarks,
-    context.quarterBlick,
-    series.startBlick,
-    series.intervalBlick
+function assertCompatibleTimeGrids(before, after) {
+  const comparison = compareUniformSecondsGridAxes(before, after);
+  if (comparison.compatible) return;
+  const error = codedError(
+    "ALIGNMENT_UNSUPPORTED",
+    "before/after computed-pitch uniform-seconds grids differ; re-snapshot with identical sampling and tempo maps"
   );
+  error.details = {
+    reason: comparison.reason,
+    ...(comparison.frameIndex === undefined ? {} : { frameIndex: comparison.frameIndex }),
+    before: gridAxisSummary(before),
+    after: gridAxisSummary(after),
+  };
+  throw error;
+}
+
+function gridAxisSummary(grid) {
+  return {
+    timeGrid: grid.timeGrid,
+    frames: grid.frames,
+    sampleIntervalSeconds: grid.sampleIntervalSeconds,
+    startSeconds: grid.timeSeconds[0],
+    endSeconds: grid.timeSeconds[grid.timeSeconds.length - 1],
+  };
+}
+
+function buildSamplingBlock(sourceSeries, grid, params, warnings) {
+  const fs = grid.sampleRateHz;
   const hzMax = params.vibrato.hzRange[1];
-  const framesPerCycle = fs === null ? null : fs / hzMax;
+  const framesPerCycle = fs / hzMax;
   const samplingAssessment =
-    fs === null
-      ? "unknown"
-      : framesPerCycle >= 4
-        ? "ok"
-        : framesPerCycle >= 2
-          ? "borderline"
-          : "too_coarse";
-  if (samplingAssessment === "unknown") {
-    warnings.push({
-      code: "TEMPO_MAP_MISSING",
-      message: "No usable tempo map in the context; Hz-based metrics are unavailable.",
-    });
-  } else if (samplingAssessment === "borderline") {
+    framesPerCycle >= 4 ? "ok" : framesPerCycle >= 2 ? "borderline" : "too_coarse";
+  if (samplingAssessment === "borderline") {
     warnings.push({
       code: "SAMPLING_BORDERLINE_FOR_VIBRATO",
       message:
@@ -1066,13 +1109,19 @@ function buildSamplingBlock(series, context, params, warnings) {
     });
   }
   return {
-    startBlick: series.startBlick,
-    intervalBlick: series.intervalBlick,
-    frames: series.frames,
+    startBlick: sourceSeries.startBlick,
+    intervalBlick: sourceSeries.intervalBlick,
+    sourceFrames: sourceSeries.frames,
+    frames: grid.frames,
+    timeGrid: grid.timeGrid,
+    sampleRateHz: fs,
+    sampleIntervalSeconds: grid.sampleIntervalSeconds,
     frameRateHz: fs,
     framesPerCycleAtHzMax: framesPerCycle,
     samplingAssessment,
-    nullFrames: series.evidence?.nullFrameIndices?.length ?? null,
+    nullFrames: grid.values.filter((value) => !Number.isFinite(value)).length,
+    sourceNullFrames: sourceSeries.evidence?.nullFrameIndices?.length ?? null,
+    resampling: grid.resampling,
   };
 }
 
@@ -1088,7 +1137,7 @@ function warnLowCoverage(coverage, params, warnings) {
 }
 
 function insufficientComputedPitch(series, frameData) {
-  const observed = series.evidence?.observedFrames ?? frameData.finiteFrames;
+  const observed = series.evidence?.observedFrames ?? series.source?.finiteFrames ?? frameData.finiteFrames;
   const error = codedError(
     "INSUFFICIENT_COMPUTED_PITCH",
     observed === 0
@@ -1426,14 +1475,6 @@ function checkedNumber(value, minimum, maximum, fallback, label) {
     );
   }
   return value;
-}
-
-function tempoMarksEqual(left, right) {
-  const normalize = (marks) =>
-    JSON.stringify(
-      (Array.isArray(marks) ? marks : []).map((mark) => [mark.positionBlick, mark.bpm])
-    );
-  return normalize(left) === normalize(right);
 }
 
 function pickGrid(series) {

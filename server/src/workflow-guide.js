@@ -910,7 +910,7 @@ const RECIPES = [
     }),
     preconditions: [
       "The before-state must have been snapshotted BEFORE the edit with include:[\"notes\",\"computedPitch\"]. The comparer is pure in-memory and cannot reconstruct a past state.",
-      "Both sides must use the SAME sampling grid, otherwise the frame-by-frame diff is meaningless.",
+      "Both sides must use the SAME raw sampling and compatible tempo maps, otherwise the derived uniform-seconds grids cannot be compared.",
     ],
     steps: [
       {
@@ -945,7 +945,7 @@ const RECIPES = [
       {
         n: 3,
         tool: "sv_compare_computed_pitch",
-        purpose: "Diff before against after on the identical grid by score position.",
+        purpose: "Diff before against after on the compatible uniform-seconds grid.",
         arguments: {
           mode: "compare_contexts",
           before: { contextId: EXAMPLE.beforeContextId, occurrence: EXAMPLE.occurrence },
@@ -954,6 +954,7 @@ const RECIPES = [
         acceptable: ["ok", "insufficient_data"],
         readingRules: [
           "PER_NOTE_UNMATCHED means a structural edit removed the positional counterpart. Report unmatched, never compare across different notes.",
+          "ALIGNMENT_UNSUPPORTED means the raw sampling or derived seconds axes differ; re-snapshot both sides with the same sampling and tempo map.",
           "LOW_COMPUTED_PITCH_COVERAGE caps how much the summary can support.",
           "Deltas are after minus before. State the unit (cents) explicitly.",
         ],

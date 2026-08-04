@@ -1,6 +1,6 @@
 # T08 — 等秒网格与 Computed Pitch Compare
 
-- 状态：`blocked`
+- 状态：`done`
 - 权威：[实施计划](../implementation-plan.md) F4、§8、§17 提交 8
 - 依赖：T02；若需要宿主批量换算则再依赖 T03
 - 解锁：T11、T15、T17
@@ -25,3 +25,16 @@
 ## 完成条件
 
 分析与修正链路共享一个已由宿主证据校准的秒域时间轴。
+
+## 完成记录
+
+- 证据：[T08-uniform-seconds-grid.md](../evidence/T08-uniform-seconds-grid.md)。
+- 交付：新增纯函数 `server/src/pitch-techniques/time-grid.js`，并将 compare 的 frame 配对、coverage、
+  transition 和 vibrato 迁移到 `uniform_seconds`。同一 raw BLICK 栅格但不同 tempo map 会在统计前返回
+  `ALIGNMENT_UNSUPPORTED`，不再生成误导性 delta。
+- 验证：专用 compare/time-grid 测试 36/36；受影响 API、schema、workflow 与效率测试 78/78；完整
+  `npm test` 855/855；reference oracle 83/83。
+- 序列化：没有内联网格数组；代表性 160→279 frame shared-tempo-step 响应为 4,255 UTF-8 bytes，测试
+  上限为 8 KiB。输入 schema 未变；MCP 描述与 guide 同批更新。
+- 宿主：未接触；零 host call、零 setter、零 Undo。
+- 提交：本任务的独立提交见 Git history。

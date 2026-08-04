@@ -1,6 +1,6 @@
 # T11 — `pitchDelta` 编译器
 
-- 状态：`blocked`
+- 状态：`ready`
 - 权威：[实施计划](../implementation-plan.md) F1b、F5a、§9.3、§17 提交 11
 - 依赖：T08、T10
 - 解锁：T12、T13、T15
