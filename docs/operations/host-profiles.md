@@ -148,6 +148,12 @@ all-null 等独立测试场景。
 探针只调用 `get*`/`is*`/`has*`，零参试调前还要过一层 denylist（排除对话框、剪贴板、播放控制）；
 `SV:create()` 出来的对象是临时的，绝不加入工程。它不写工程、不建 Undo、不碰 selection。
 
+探针 v2 使用 capture schema `1.1.0`。成功的零参试调会额外记录受深度、字段数、数组样本数和
+总节点数约束的返回值 `shape`；只保留字段名、容器形状与 Lua 类型，不保留字符串、数字或布尔值。
+它还会扫描工程中的声乐 group 与 mixer，按相同 shape 聚合 `NoteGroupReference.getVoice`、
+`NoteGroup.getScale` 和 `TrackMixer.getFxParams` 的结果。聚合记录只有实例数，没有轨道名、group
+编号、UUID、歌词、音素或任何标量值。
+
 ### 比对（在仓库内）
 
 ```powershell
@@ -158,9 +164,11 @@ npm run api-surface:diff -- --input "<上面那个文件>"
 输出两份：
 
 - `tools/out/api-surface-<ts>.json` 与 `api-surface-latest.json` —— 完整明细，已 gitignore。
+  这里会保留 `semanticProbes`，用于本机分析实际返回结构。
 - 加 `--evidence` 时另写一份精简、脱敏、**可提交**的证据到
   `docs/operations/evidence/api-surface-synthv-<version>-<platform>.json`，含 `conclusion` 块。
-  已存在的文件不加 `--force` 不覆盖。
+  已存在的文件不加 `--force` 不覆盖。可提交 evidence 会剥离 value shape 与
+  `semanticProbes`，避免动态 voice mode 等字段名进入仓库。
 
 ### 怎么读结果
 
@@ -169,9 +177,15 @@ npm run api-surface:diff -- --input "<上面那个文件>"
 | `undocumented` | 实机有、文档无 | **最值得看**。`classDocumented:false` 表示整个类都不在文档里；`true` 表示类在但少这个方法。可考虑补 manifest 或开能力闸门。 |
 | `missing` | 文档有、实机未观测 | 若 `CLASS_NOT_OBSERVED`，通常只是本次没覆盖到；若 `MEMBER_NOT_OBSERVED`，说明 manifest 对该版本过时。 |
 | `unavailable` | 探针拿不到实例 | **不算差异**。`CREATE_FAILED` 只说明该类不能凭空 `SV:create()`，需要活工程里的实例。 |
+| `semanticProbes` | 三个重点 getter 的跨实例返回 shape | 看字段集合、嵌套类型、成功率与 distinct shape 数；不能从中读取实际参数值。 |
 
 `resultCode` 为 `API_SURFACE_PARITY_CONFIRMED` 或 `API_SURFACE_PARITY_DIVERGED`。差异存在不算
 工具失败——那正是要找的东西，退出码仍为 0。
+
+`getVoice` 目前可见的 `singers`、`spacing` 与 `vocalModeParams` 是演唱/Unison 参数，不是歌手或
+声库身份。当前脚本 API 仍未发现歌手目录、声库标识或歌手分配接口，不能据此声称能选择声库。
+若成功试调没有 shape，或三个重点 getter 全部调用失败，`captureHealth.warnings` 会分别出现
+`VALUE_SHAPE_MISSING_FOR_SUCCESSFUL_TRIAL` 或 `SEMANTIC_PROBES_ALL_FAILED`。
 
 证据文件目前**不写入** `server/host-profiles/`：改 profile 会连带 `evidenceSha256` 与 T20 发布
 证据一起重算，而 profile 的值域校验也装不下几百个方法名。`conclusion` 只声明它将来会支持
@@ -187,12 +201,18 @@ npm run api-surface:diff -- --input "<上面那个文件>"
 
 | 成员 | 观测 | 为什么重要 |
 | --- | --- | --- |
-| `PitchControlPoint.isTemporary` | 试调 → `boolean` | H3a/H3b 把「同 anchor 排序与临时态不可观测」列为闸门原因；这个字段可读，可能正是缺失的观测点。**但只证明字段存在，不证明语义**，仍需专项 H3 探针验证 add/clone/remove 前后的变化。 |
-| `PitchControlPoint.type` / `PitchControlCurve.type` / `TrackMixer.type` | `luaType=string` | 是**类型标签常量**，不是方法。宿主自带运行时类型判别，可用于缓解未登记方法导致的 `handleTypes` 断链。 |
-| `NoteGroup.getScale` / `setScale` | `getScale` 试调 → `table` | 我们现在用 Krumhansl-Schmuckler **推断**调性；宿主可能直接提供。 |
-| `TrackMixer.getFxParams` / `setFxParams` | `getFxParams` 试调 → `table` | 效果器参数，此前完全在视野外。 |
-| `SV.scaleTypes` / `scaleNotes` | 需参数，未试调 | 宿主自带音阶目录，对照我们自维护的 14 类。 |
+| `PitchControlPoint.isTemporary` | 试调 → `boolean` | 已进入 PitchControl Point 读模型；旧宿主为 `null`。临时对象的 create/add/read-back/clone 链均实测为 `false`，因此当前只作诊断，不进 fingerprint、不自动过滤。 |
+| `PitchControlPoint.type` / `PitchControlCurve.type` / `TrackMixer.type` | `luaType=string` | Lua marshal 现在优先把合法运行时类型写入 handle envelope；manifest 已知类可恢复 `handleTypes`，无标签对象仍回退 `object`。 |
+| `NoteGroup.getScale` / `setScale` | `getScale` → `{root,type}` | notes capture 会保存 `hostDeclaredScale`；乐理分析只与 K-S 首选候选比较，不允许默认宿主元数据覆盖推断。未开放 `setScale`。 |
+| `TrackMixer.getFxParams` / `setFxParams` | 完整 FX 参数树 | `include:["mixer"]` 已返回只读 `fxParameters`。setter 会静默钳位或忽略字段，当前未开放写入。 |
+| `SV.scaleTypes` / `scaleNotes` | 零参只读目录 | 实机返回 15 种 scale type 与 12 个升号拼写音名；当前仅用于验证 `getScale` 值域，没有新增 MCP 工具。 |
 | `MainEditorView.setCurrentGroup` / `setCurrentTrack` | 写方法，未试调 | 编辑器导航。 |
+
+临时 `TrackMixer` 写入/读回还确认了部分宿主钳位：compressor attack `0..0.5`、ratio
+`1..40`、threshold `-70..12`，room reflectionGain `-15..15`、size `5..30`，
+reverb preDelay `0..0.2`、decay `0.1..10`。`dryWetRatio`、`postRoomEq` 与无效
+reverb type 会被静默忽略，`positionX/Y` 至少到正负十亿仍原样接受。因此 setter 返回成功
+不是写入证据；未来若开放写入必须逐字段读回，且不能把未观察到边界当作无界。
 
 另一条硬证据：官方文档写 `SV.pitch2freq`（小写 f），**实机只有 `pitch2Freq`**（大写 F），
 `freq2Pitch` 两边一致。我们从未调用过它，因此没有实际故障；但照文档拼写会通过

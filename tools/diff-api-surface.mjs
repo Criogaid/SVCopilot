@@ -52,6 +52,7 @@ function main(argv = process.argv.slice(2)) {
     tool: "api-surface-diff",
     generatedAt: new Date().toISOString(),
     capture: {
+      schemaVersion: capture.schemaVersion,
       capturedAt: capture.capturedAt,
       host: capture.host,
       probe: capture.probe,
@@ -65,6 +66,7 @@ function main(argv = process.argv.slice(2)) {
     undocumented: diff.undocumented,
     missing: diff.missing,
     unavailable: diff.unavailable,
+    ...(diff.semanticProbes ? { semanticProbes: diff.semanticProbes } : {}),
   };
 
   mkdirSync(OUT_DIR, { recursive: true });
@@ -124,6 +126,19 @@ function printHumanSummary({ summary, diff, stamped, evidencePath }) {
     console.error("[api-surface] classes the probe could not instantiate:");
     for (const item of diff.unavailable) {
       console.error(`  ? ${item.name} (${item.origin}) ${item.reason}`);
+    }
+  }
+  if (diff.semanticProbes) {
+    const scan = diff.semanticProbes.scan;
+    console.error(
+      `[api-surface] semantic shapes: tracks=${scan.tracksVisited} ` +
+        `vocalGroups=${scan.vocalGroupsVisited} truncated=${scan.truncated}`
+    );
+    for (const method of diff.semanticProbes.methods) {
+      console.error(
+        `  ~ ${method.className}.${method.method} attempted=${method.attempted} ` +
+          `succeeded=${method.succeeded} shapes=${method.distinctShapes}`
+      );
     }
   }
   console.error(`[api-surface] report: ${stamped}`);

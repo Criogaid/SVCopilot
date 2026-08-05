@@ -129,6 +129,7 @@ export class HostSession {
     resultShape,
     resultLength,
     inferredType,
+    runtimeConfirmed = false,
   }) {
     if (typeof method !== "string" || !method) {
       throw codedError("INVALID_METHOD", "method must be a non-empty string");
@@ -148,9 +149,13 @@ export class HostSession {
       if (FATAL_VALIDATION_CODES.has(validation.code)) {
         throw codedError(validation.code, validation.message);
       }
-      this.logger.error(
-        `[sv-copilot] pre-check advisory (${validation.code}) for ${targetType ?? "SV"}.${method}; deferring to host.`
-      );
+      // 实机探针确认但官方 manifest 缺失的方法仍由宿主最终裁决；标记只消除重复
+      // UNKNOWN_METHOD advisory，不允许参数或版本预检静默失效。
+      if (!(runtimeConfirmed === true && validation.code === "UNKNOWN_METHOD")) {
+        this.logger.error(
+          `[sv-copilot] pre-check advisory (${validation.code}) for ${targetType ?? "SV"}.${method}; deferring to host.`
+        );
+      }
     }
 
     const cmd = { op: "call", method, args };

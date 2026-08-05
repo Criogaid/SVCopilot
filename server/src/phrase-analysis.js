@@ -65,6 +65,7 @@ const PROVENANCE = Object.freeze({
   specialLyrics: "official_v2_manual_enter_notes",
   melodicEligibility: "shared_vocal_event_sequence_semantics",
   pitchBasis: "sounding_midi_with_occurrence_pitch_offset",
+  hostDeclaredScale: "NoteGroup.getScale_metadata_never_overrides_inference",
   basis: "derived_not_host_fact",
   perception: "human_only",
 });
@@ -206,6 +207,7 @@ function resolveAnalysisSource(store, input) {
     excludedEvents,
     quarterBlick,
     meterMarks,
+    hostDeclaredScale: normalizeStoredHostDeclaredScale(occurrence.hostDeclaredScale),
   };
 }
 
@@ -265,6 +267,16 @@ function runAnalysis(loaded, input, warnings) {
     input.include.has("tensionResolution");
   if (needsKey) {
     keyResult = analyzeKey(loaded.notes, warnings);
+    if (keyResult) {
+      keyResult = {
+        ...keyResult,
+        hostDeclaredScale: loaded.hostDeclaredScale,
+        hostScaleComparison: compareHostDeclaredScale(
+          loaded.hostDeclaredScale,
+          keyResult.bestCandidate
+        ),
+      };
+    }
     bestKey = keyResult?.bestCandidate ?? null;
     if (input.include.has("key")) result.key = keyResult;
   }
@@ -304,6 +316,50 @@ function runAnalysis(loaded, input, warnings) {
     result.tensionResolution = analyzeTensionResolution(loaded, keyResult, harmonicOptions, warnings);
   }
   return result;
+}
+
+function normalizeStoredHostDeclaredScale(value) {
+  if (
+    value?.status === "observed" &&
+    typeof value.root === "string" &&
+    typeof value.type === "string"
+  ) {
+    return { status: "observed", root: value.root, type: value.type };
+  }
+  if (["unavailable", "invalid"].includes(value?.status)) {
+    return { status: value.status };
+  }
+  return { status: "not_captured" };
+}
+
+function compareHostDeclaredScale(hostScale, inferred) {
+  if (hostScale.status !== "observed") {
+    return { status: "not_comparable", reason: hostScale.status };
+  }
+  const tonicPitchClass = PITCH_CLASS_NAMES.indexOf(hostScale.root);
+  const mode = hostScale.type === "Major"
+    ? "major"
+    : hostScale.type === "NaturalMinor"
+      ? "minor"
+      : null;
+  if (tonicPitchClass < 0) {
+    return { status: "not_comparable", reason: "unsupported_root" };
+  }
+  if (mode === null) {
+    return { status: "not_comparable", reason: "unsupported_mode" };
+  }
+  return {
+    status:
+      tonicPitchClass === inferred.tonicPitchClass && mode === inferred.mode
+        ? "matched"
+        : "different",
+    host: { tonicPitchClass, tonic: hostScale.root, mode },
+    inferred: {
+      tonicPitchClass: inferred.tonicPitchClass,
+      tonic: inferred.tonic,
+      mode: inferred.mode,
+    },
+  };
 }
 
 // K-K 调性排序器：style-profile 复用（导出）。输入音符需带 pitch/durationBlick。

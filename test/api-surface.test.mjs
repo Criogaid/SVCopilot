@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  API_SURFACE_CAPTURE_SCHEMA_VERSION,
   API_SURFACE_CAPTURE_KIND,
   API_SURFACE_EVIDENCE_KIND,
   API_SURFACE_RESULT_CODES,
@@ -19,6 +20,25 @@ import {
   normalizeApiSurfaceCapture,
   summarizeApiSurface,
 } from "../tools/lib/api-surface.mjs";
+
+const NUMBER_SHAPE = Object.freeze({ type: "number" });
+
+function voiceShape() {
+  return {
+    type: "table",
+    kind: "map",
+    fieldCount: 3,
+    fields: [
+      { name: "singers", keyType: "string", shape: { type: "number" } },
+      { name: "spacing", keyType: "string", shape: { type: "number" } },
+      {
+        name: "vocalModeParams",
+        keyType: "string",
+        shape: { type: "table", kind: "map", fieldCount: 0, fields: [] },
+      },
+    ],
+  };
+}
 
 // 一份最小 manifest：Note 有两个方法，PitchControlCurve 有一个。
 // 刻意不含 SecretClass，用来验证"整个类都不在文档里"这一分支。
@@ -58,6 +78,64 @@ function captureFixture(overrides = {}) {
     ],
     ...overrides,
   };
+}
+
+function shapeCaptureFixture(overrides = {}) {
+  return captureFixture({
+    schemaVersion: API_SURFACE_CAPTURE_SCHEMA_VERSION,
+    probe: {
+      name: "SVApiSurfaceProbe",
+      version: "2",
+      readOnly: true,
+      trialCalls: true,
+      valueShapes: true,
+    },
+    classes: [
+      {
+        name: "Note",
+        origin: "created",
+        available: true,
+        members: [
+          {
+            name: "getPitch",
+            kind: "function",
+            scope: "own",
+            luaType: "userdata",
+            trial: {
+              status: "ok",
+              returnedType: "number",
+              shape: { ...NUMBER_SHAPE },
+            },
+          },
+        ],
+      },
+    ],
+    semanticProbes: {
+      enabled: true,
+      valuePolicy: "shape_only_no_scalar_values",
+      limits: {
+        maxDepth: 4,
+        maxFields: 64,
+        maxArrayItems: 4,
+        maxNodes: 256,
+        maxTracks: 128,
+        maxVocalGroups: 1024,
+      },
+      scan: { tracksVisited: 1, vocalGroupsVisited: 2, truncated: false },
+      methods: [
+        {
+          className: "NoteGroupReference",
+          method: "getVoice",
+          attempted: 2,
+          succeeded: 2,
+          failed: 0,
+          distinctShapes: 1,
+          shapes: [{ observedInstances: 2, shape: voiceShape() }],
+        },
+      ],
+    },
+    ...overrides,
+  });
 }
 
 test("diff separates undocumented, missing and matched members", () => {
@@ -244,6 +322,130 @@ test("a failed trial keeps only an error class, never the host message", () => {
   const leaky = captureFixture();
   leaky.classes[0].members[0].trial = { status: "failed", errorKind: "cannot open C:/Songs/secret.svp" };
   assert.throws(() => normalizeApiSurfaceCapture(leaky), /underscore\/alphanumeric code/);
+});
+
+test("capture schema 1.1 preserves bounded value shapes and semantic probe aggregates", () => {
+  const capture = normalizeApiSurfaceCapture(shapeCaptureFixture());
+  assert.equal(capture.schemaVersion, API_SURFACE_CAPTURE_SCHEMA_VERSION);
+  assert.deepEqual(capture.classes[0].members[0].trial.shape, NUMBER_SHAPE);
+  assert.deepEqual(
+    capture.semanticProbes.methods[0].shapes[0].shape.fields.map((field) => [
+      field.name,
+      field.shape.type,
+    ]),
+    [
+      ["singers", "number"],
+      ["spacing", "number"],
+      ["vocalModeParams", "table"],
+    ]
+  );
+
+  const diff = diffApiSurface(capture, manifestFixture());
+  assert.equal(diff.captureSchemaVersion, API_SURFACE_CAPTURE_SCHEMA_VERSION);
+  assert.equal(diff.semanticProbes.scan.vocalGroupsVisited, 2);
+  assert.equal(diff.captureHealth.valueShapeCount, 1);
+  assert.equal(diff.captureHealth.semanticSuccesses, 2);
+  assert.deepEqual(diff.captureHealth.warnings, []);
+});
+
+test("value shapes stay out of evidence and undocumented member detail", () => {
+  const capture = shapeCaptureFixture({
+    classes: [
+      {
+        name: "SecretClass",
+        origin: "live_instance",
+        available: true,
+        members: [
+          {
+            name: "getSecret",
+            kind: "function",
+            scope: "own",
+            luaType: "userdata",
+            trial: {
+              status: "ok",
+              returnedType: "table",
+              shape: voiceShape(),
+            },
+          },
+        ],
+      },
+    ],
+  });
+  const diff = diffApiSurface(capture, manifestFixture());
+  assert.equal(diff.undocumented[0].trial.shape, undefined);
+  assert.ok(diff.semanticProbes);
+
+  const evidence = buildApiSurfaceEvidence({ diff, summary: summarizeApiSurface(diff) });
+  assert.equal(evidence.semanticProbes, undefined);
+  assert.equal(evidence.undocumented[0].trial.shape, undefined);
+  assertEvidenceIsSanitized(evidence);
+});
+
+test("shape capture health reports missing successful shapes and failed semantic probes", () => {
+  const capture = shapeCaptureFixture();
+  delete capture.classes[0].members[0].trial.shape;
+  capture.semanticProbes.methods[0] = {
+    ...capture.semanticProbes.methods[0],
+    succeeded: 0,
+    failed: 2,
+    distinctShapes: 0,
+    shapes: [],
+  };
+  const health = diffApiSurface(capture, manifestFixture()).captureHealth;
+  assert.deepEqual(health.warnings, [
+    "VALUE_SHAPE_MISSING_FOR_SUCCESSFUL_TRIAL",
+    "SEMANTIC_PROBES_ALL_FAILED",
+  ]);
+});
+
+test("shape capture health reports semantic probes that were never exercised", () => {
+  const capture = shapeCaptureFixture();
+  capture.semanticProbes.methods[0] = {
+    ...capture.semanticProbes.methods[0],
+    attempted: 0,
+    succeeded: 0,
+    failed: 0,
+    distinctShapes: 0,
+    shapes: [],
+  };
+  const health = diffApiSurface(capture, manifestFixture()).captureHealth;
+  assert.deepEqual(health.warnings, ["SEMANTIC_PROBES_NOT_EXERCISED"]);
+});
+
+test("capture schema 1.1 rejects malformed or value-bearing shape records", () => {
+  const unknown = shapeCaptureFixture();
+  unknown.classes[0].members[0].trial.shape.value = 60;
+  assert.throws(() => normalizeApiSurfaceCapture(unknown), /unknown field: value/);
+
+  const typeMismatch = shapeCaptureFixture();
+  typeMismatch.classes[0].members[0].trial.shape.type = "string";
+  assert.throws(() => normalizeApiSurfaceCapture(typeMismatch), /must match returnedType/);
+
+  const mismatched = shapeCaptureFixture();
+  mismatched.semanticProbes.methods[0].shapes[0].observedInstances = 1;
+  assert.throws(() => normalizeApiSurfaceCapture(mismatched), /must sum to succeeded/);
+
+  const legacyWithSemanticData = captureFixture({
+    semanticProbes: shapeCaptureFixture().semanticProbes,
+  });
+  assert.throws(
+    () => normalizeApiSurfaceCapture(legacyWithSemanticData),
+    /requires capture schema 1\.1\.0/
+  );
+
+  const legacyWithShapeFlag = captureFixture();
+  legacyWithShapeFlag.probe.valueShapes = true;
+  assert.throws(
+    () => normalizeApiSurfaceCapture(legacyWithShapeFlag),
+    /valueShapes requires capture schema 1\.1\.0/
+  );
+
+  const legacyWithTrialShape = captureFixture();
+  legacyWithTrialShape.classes[0].members[0].trial.shape = { type: "number" };
+  assert.throws(
+    () => normalizeApiSurfaceCapture(legacyWithTrialShape),
+    /trial shapes require capture schema 1\.1\.0/
+  );
 });
 
 test("evidence carries a conclusion and refuses project content", () => {

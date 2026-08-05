@@ -11,7 +11,11 @@ function createStore() {
 }
 
 function createStoredContext(store, options = {}) {
-  const { notes = [], extraOccurrenceWithNotes = false } = options;
+  const {
+    notes = [],
+    extraOccurrenceWithNotes = false,
+    hostDeclaredScale,
+  } = options;
   const stored = store.create({
     epoch: 1,
     scope: { kind: "range" },
@@ -37,6 +41,7 @@ function createStoredContext(store, options = {}) {
     pitchOffsetSemitone: 0,
     sharedTargetOccurrences: [0],
     noteFingerprints,
+    ...(hostDeclaredScale ? { hostDeclaredScale } : {}),
   });
   if (extraOccurrenceWithNotes) {
     stored.context.occurrences.push({
@@ -113,6 +118,55 @@ test("fixture melody ranks F# major first once the breath note stops padding the
     result.provenance.breathNotes,
     "excluded_from_all_musical_statistics_reported_as_breathEvents"
   );
+});
+
+test("key analysis compares host-declared scale without overriding inferred candidates", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: fixtureNotes(),
+    hostDeclaredScale: { status: "observed", root: "F#", type: "Major" },
+  });
+  const matched = await createService(store).analyze({
+    contextId: stored.contextId,
+    include: ["key"],
+  });
+  assert.deepEqual(matched.key.hostDeclaredScale, {
+    status: "observed",
+    root: "F#",
+    type: "Major",
+  });
+  assert.equal(matched.key.hostScaleComparison.status, "matched");
+  assert.equal(
+    matched.provenance.hostDeclaredScale,
+    "NoteGroup.getScale_metadata_never_overrides_inference"
+  );
+
+  stored.context.occurrences[0].hostDeclaredScale = {
+    status: "observed",
+    root: "C",
+    type: "Major",
+  };
+  const different = await createService(store).analyze({
+    contextId: stored.contextId,
+    include: ["key"],
+  });
+  assert.equal(different.key.bestCandidate.tonic, "F#");
+  assert.equal(different.key.hostScaleComparison.status, "different");
+
+  stored.context.occurrences[0].hostDeclaredScale = {
+    status: "observed",
+    root: "C",
+    type: "Dorian",
+  };
+  const modal = await createService(store).analyze({
+    contextId: stored.contextId,
+    include: ["key"],
+  });
+  assert.equal(modal.key.bestCandidate.tonic, "F#");
+  assert.deepEqual(modal.key.hostScaleComparison, {
+    status: "not_comparable",
+    reason: "unsupported_mode",
+  });
 });
 
 test("scale degrees cover melodic notes only and expose the E natural against F# major", async () => {

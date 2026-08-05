@@ -103,6 +103,7 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
   assert.equal(sparse.length, 4);
 
   const note = await relay.call({ op: "call", method: "create", args: ["Note"] });
+  assert.equal(note.__type__, "object");
   await relay.call({ op: "call", method: "boxSet", args: [note] });
   const roundTripped = await relay.call({ op: "call", method: "boxGet", args: [] });
   assert.equal(
@@ -172,6 +173,19 @@ test("real Lua bridge dispatches SV calls over Windows IO PIPE", { timeout: 1000
     method: "getGroupReference",
     args: [1],
   });
+  const track = await relay.call({
+    op: "call",
+    handle: projectHandle,
+    method: "getTrack",
+    args: [1],
+  });
+  const mixer = await relay.call({
+    op: "call",
+    handle: handleOf(track),
+    method: "getMixer",
+    args: [],
+  });
+  assert.equal(mixer.__type__, "TrackMixer");
   const target = await relay.call({
     op: "call",
     handle: handleOf(groupReference),

@@ -186,6 +186,15 @@ local function register(obj)
   return id
 end
 
+local function runtimeObjectType(v)
+  local explicitType = rawget(v, 'type')
+  if type(explicitType) == 'string'
+    and explicitType:match('^[A-Za-z_][A-Za-z0-9_]*$') then
+    return explicitType
+  end
+  return 'object'
+end
+
 local function marshal(v)
   local t = type(v)
   if v == nil then
@@ -200,7 +209,7 @@ local function marshal(v)
     -- SV API objects are tables with a __ptr__ / metatable: opaque handle, do
     -- NOT recurse. Plain data tables ({bpm=..,position=..}) recurse to inline.
     if getmetatable(v) ~= nil or rawget(v, '__ptr__') ~= nil then
-      return { __handle__ = register(v), __type__ = 'object' }
+      return { __handle__ = register(v), __type__ = runtimeObjectType(v) }
     end
     local out = {}
     local n = 0
@@ -242,7 +251,7 @@ local function marshalTyped(v, shapeHint, lengthHint, seen, depth)
   end
 
   if getmetatable(v) ~= nil or rawget(v, '__ptr__') ~= nil then
-    return { ['$sv'] = 'handle', id = register(v), type = 'object' }
+    return { ['$sv'] = 'handle', id = register(v), type = runtimeObjectType(v) }
   end
   if seen[v] then
     return { ['$sv'] = 'unsupported', luaType = 'table', reason = 'cycle detected' }

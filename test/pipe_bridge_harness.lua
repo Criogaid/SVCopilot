@@ -154,6 +154,7 @@ local groupReference = makeObject({
 })
 local mixerState = { gain = 0, pan = 0, muted = false, solo = false }
 local mixer = makeObject({
+  type = "TrackMixer",
   getGainDecibel = function() return mixerState.gain end,
   getPan = function() return mixerState.pan end,
   isMuted = function() return mixerState.muted end,

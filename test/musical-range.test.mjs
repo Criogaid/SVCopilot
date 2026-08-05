@@ -14,6 +14,32 @@ import { blickToMusical, musicalToBlick, normalizeMusicalPoint } from "../server
 
 const Q = 705600000;
 const BAR_4_4 = 4 * Q;
+const FX_PARAMS = Object.freeze({
+  compressor: { enabled: true, attack: 0.1, ratio: 4, threshold: -12 },
+  room: {
+    enabled: false,
+    positionX: 0,
+    positionY: 0,
+    reflectionGain: 0,
+    size: 15,
+  },
+  reverb: {
+    enabled: true,
+    type: "clean",
+    preDelay: 0.05,
+    decay: 1,
+    dryWetRatio: 0.5,
+  },
+  postRoomEq: {
+    enabled: false,
+    lowShelf: { freq: 25, gain: 0 },
+    filters: [
+      { freq: 100, gain: 0, q: 0.71 },
+      { freq: 1000, gain: 0, q: 0.71 },
+      { freq: 10000, gain: 0, q: 0.71 },
+    ],
+  },
+});
 
 // 两轨模型：track0 一个跨小节 vocal group + 一个范围外 group；track1 instrumental。
 // 小节 0-7 为 4/4，第 8 小节起 3/4；测试跨拍号换算。
@@ -96,6 +122,9 @@ function createRangeModel() {
         if (method === "getPan") return 0;
         if (method === "isMuted") return false;
         if (method === "isSolo") return mixerIndex === 0;
+        if (method === "getFxParams") {
+          return { ...structuredClone(FX_PARAMS), ignoredHostField: "not projected" };
+        }
       }
       if (id === h.refs[0].__handle__) {
         // 官方语义：getOnset = timeOffset + 首音符组内 onset（此处首音符 onset 为 0）。
@@ -142,6 +171,7 @@ function createRangeModel() {
         if (method === "getName") return "Verse";
         if (method === "getUUID") return "uuid-verse";
         if (method === "getNumNotes") return noteState.length;
+        if (method === "getScale") return { root: "F#", type: "Major" };
         if (method === "getNote") return h.notes[args[0] - 1];
         if (method === "getParameter") return h.automations[args[0]];
       }
@@ -323,6 +353,11 @@ test("range snapshot filters by range, skips out-of-range groups, and honors tra
   assert.equal(result.data.tracks.length, 1);
   assert.equal(model.fetchedNotesOfOutOfRangeGroup, false);
   assert.equal(result.data.tracks[0].groups.length, 1);
+  assert.deepEqual(result.data.tracks[0].groups[0].hostDeclaredScale, {
+    status: "observed",
+    root: "F#",
+    type: "Major",
+  });
 });
 
 test("range snapshot includes mixer state and reports unsupported includes", async () => {
@@ -338,6 +373,7 @@ test("range snapshot includes mixer state and reports unsupported includes", asy
     pan: 0,
     muted: false,
     solo: true,
+    fxParameters: { status: "observed", ...FX_PARAMS },
   });
   const codes = result.warnings.filter((warning) => warning.code === "UNSUPPORTED_INCLUDE");
   assert.equal(codes.length, 1);
@@ -352,8 +388,55 @@ test("range snapshot includes mixer state and reports unsupported includes", asy
     pan: 0,
     muted: false,
     solo: false,
+    fxParameters: { status: "observed", ...FX_PARAMS },
   });
   assert.ok(result.data.tracks[1].groups[0].instrumental);
+});
+
+test("optional scale and FX getters degrade on hosts that do not expose them", async () => {
+  const model = createRangeModel();
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "getScale" || request.method === "getFxParams") {
+      const error = new Error(`no such method: ${request.method}`);
+      error.code = "UNKNOWN_METHOD";
+      throw error;
+    }
+    return originalCall(request);
+  };
+  const result = await createService(model).snapshot({
+    scope: { kind: "range", from: { bar: 1 }, to: { bar: 3 } },
+    include: ["notes", "mixer"],
+  });
+  assert.deepEqual(result.data.tracks[0].groups[0].hostDeclaredScale, {
+    status: "unavailable",
+  });
+  assert.deepEqual(result.data.tracks[0].mixer.fxParameters, {
+    status: "unavailable",
+  });
+});
+
+test("invalid optional scale and FX data is isolated with stable warnings", async () => {
+  const model = createRangeModel();
+  const originalCall = model.host.call;
+  model.host.call = async (request) => {
+    if (request.method === "getScale") return { root: 60, type: "Major" };
+    if (request.method === "getFxParams") return { compressor: {} };
+    return originalCall(request);
+  };
+  const result = await createService(model).snapshot({
+    scope: { kind: "range", from: { bar: 1 }, to: { bar: 3 } },
+    include: ["notes", "mixer"],
+  });
+  assert.deepEqual(result.data.tracks[0].groups[0].hostDeclaredScale, {
+    status: "invalid",
+  });
+  assert.deepEqual(result.data.tracks[0].mixer.fxParameters, {
+    status: "invalid",
+  });
+  const warningCodes = new Set(result.warnings.map((warning) => warning.code));
+  assert.ok(warningCodes.has("HOST_DECLARED_SCALE_INVALID"));
+  assert.ok(warningCodes.has("HOST_FX_PARAMETERS_INVALID"));
 });
 
 test("range snapshot token is stable and sinceToken returns no_change", async () => {

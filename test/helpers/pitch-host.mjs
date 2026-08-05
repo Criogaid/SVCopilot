@@ -129,6 +129,7 @@ export function createPitchHostModel(options = {}) {
   let seq = 0;
   const makeControlState = (spec) => ({
     kind: spec.kind,
+    isTemporary: spec.isTemporary === undefined ? false : spec.isTemporary,
     position: spec.position ?? 0,
     pitch: spec.pitch ?? 60,
     points:
@@ -165,6 +166,11 @@ export function createPitchHostModel(options = {}) {
     const isCurve = state.kind === "curve";
     if (method === "getPosition") return state.position;
     if (method === "getPitch") return state.pitch;
+    if (method === "isTemporary") {
+      if (isCurve) unknownMethod(method);
+      if (state.isTemporary === null) unknownMethod(method);
+      return state.isTemporary;
+    }
     if (method === "getIndexInParent") {
       const idx = model.controls.indexOf(floating);
       return idx < 0
@@ -407,6 +413,7 @@ export function createPitchHostModel(options = {}) {
       if (id === h.group.__handle__) {
         if (method === "getName") return "Group";
         if (method === "getUUID") return uuid;
+        if (method === "getScale") return { root: "C", type: "Major" };
         if (method === "getNumNotes") return noteList.length;
         if (method === "getNote") return noteList[args[0] - 1].handle;
         if (method === "getNumPitchControls") return model.controls.length;

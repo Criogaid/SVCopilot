@@ -1368,6 +1368,43 @@ test("host scopes release epoch-bound handles after a reconnect", async () => {
   assert.equal(session.getStatus().knownHandleCount, 0);
 });
 
+test("runtime-confirmed undocumented calls suppress only their manifest advisory", async () => {
+  const advisories = [];
+  const bridge = {
+    getStatus: () => ({ state: "attached", epoch: 1 }),
+    on() {},
+    async call(command) {
+      if (command.op === "root") {
+        return { project: { __handle__: 1, __type__: "Project" } };
+      }
+      if (command.op === "call" && command.method === "getHostInfo") {
+        return { hostVersion: "2.2.1" };
+      }
+      if (command.op === "call" && command.method === "create") {
+        return { __handle__: 2, __type__: "TrackMixer" };
+      }
+      if (command.op === "call" && command.method === "getFxParams") return {};
+      throw new Error(`unsupported command: ${command.op}.${command.method ?? ""}`);
+    },
+  };
+  const session = new HostSession(bridge, {
+    logger: { error: (message) => advisories.push(message) },
+  });
+  await session.roots();
+  const mixer = await session.call({ method: "create", args: ["TrackMixer"] });
+
+  await session.call({
+    handle: mixer,
+    method: "getFxParams",
+    runtimeConfirmed: true,
+  });
+  assert.deepEqual(advisories, []);
+
+  await session.call({ handle: mixer, method: "getFxParams" });
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /UNKNOWN_METHOD/);
+});
+
 test("typed-v2 decoding caps aggregate declared array allocation", () => {
   // 单帧 ≤64KiB，但多个兄弟 length 声明可把分配放大到 GB；聚合预算必须拦截。
   const bomb = {

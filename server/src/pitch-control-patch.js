@@ -11,6 +11,7 @@ import {
   normalizeCurvePoints,
   parseContextControlId,
   pitchEquals,
+  readPitchControlShape,
 } from "./pitch-control.js";
 import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
@@ -422,18 +423,7 @@ async function readLivePitchControls(scope, group, groupUuid) {
 async function readLivePitchControl(scope, handle, groupUuid, indexInGroup) {
   const positionBlick = await scope.call(handle, "getPosition");
   const pitchSemitone = await scope.call(handle, "getPitch");
-  let kind = "point";
-  let points = null;
-  try {
-    const rawPoints = await scope.call(handle, "getPoints", [], {
-      resultFormat: "typed-v2",
-      resultShape: "array",
-    });
-    kind = "curve";
-    points = normalizeCurvePoints(rawPoints);
-  } catch (error) {
-    if (error?.code !== "UNKNOWN_METHOD") throw error;
-  }
+  const { kind, points } = await readPitchControlShape(scope, handle);
   const scriptDataKeys = normalizeKeyList(
     await scope.call(handle, "getScriptDataKeys", [], {
       resultFormat: "typed-v2",

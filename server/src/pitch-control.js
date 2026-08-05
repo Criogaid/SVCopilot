@@ -80,6 +80,41 @@ export function normalizeCurvePoints(raw, { errorFactory = hostDataError } = {})
   return points;
 }
 
+export async function readPitchControlShape(capture, handle) {
+  if (handle?.__type__ === "PitchControlPoint") {
+    return { kind: "point", points: null };
+  }
+  if (handle?.__type__ === "PitchControlCurve") {
+    return {
+      kind: "curve",
+      points: normalizeCurvePoints(
+        await capture.call(handle, "getPoints", [], {
+          resultFormat: "typed-v2",
+          resultShape: "array",
+        })
+      ),
+    };
+  }
+
+  // 旧 bridge 只返回 object，继续用 Curve 独有方法兼容判型。
+  try {
+    return {
+      kind: "curve",
+      points: normalizeCurvePoints(
+        await capture.call(handle, "getPoints", [], {
+          resultFormat: "typed-v2",
+          resultShape: "array",
+        })
+      ),
+    };
+  } catch (error) {
+    if (error?.code === "UNKNOWN_METHOD") {
+      return { kind: "point", points: null };
+    }
+    throw error;
+  }
+}
+
 // 读取一个 group 的全部 PitchControl，返回规范化对象（不含最终 controlId——
 // occurrence ordinal 要在 prepareStoredRange 才确定）与 group fingerprint。
 // groupCtx: { group, groupUuid, timeOffsetBlick, pitchOffsetSemitone }
@@ -100,8 +135,7 @@ export async function readPitchControlsForGroup(
   }
   const controls = [];
   for (let index = 0; index < count; index += 1) {
-    // getPitchControl 用 1-based 索引（Lua 约定），返回 Point 或 Curve——宿主只报
-    // type:'object'，必须探测 getPoints 才能判别（Curve 独有；Point 抛 no such method）。
+    // getPitchControl 用 1-based 索引（Lua 约定），返回 Point 或 Curve。
     const handle = await capture.call(groupCtx.group, "getPitchControl", [index + 1]);
     if (!handle?.__handle__) {
       throw hostDataError(`getPitchControl(${index + 1}) returned no object`);
@@ -124,28 +158,12 @@ async function readOnePitchControl(capture, handle, groupCtx, indexInGroup, { ma
     throw hostDataError("PitchControl.getPitch returned a non-finite semitone");
   }
 
-  let kind = "point";
-  let points = null;
-  try {
-    const rawPoints = await capture.call(handle, "getPoints", [], {
-      resultFormat: "typed-v2",
-      resultShape: "array",
-    });
-    kind = "curve";
-    points = normalizeCurvePoints(rawPoints);
-    if (points.length > maxCurvePoints) {
-      throw codedError(
-        "SNAPSHOT_PITCH_CONTROL_LIMIT_REACHED",
-        `a pitch curve holds ${points.length} points, exceeding the ${maxCurvePoints}-point capture limit`
-      );
-    }
-  } catch (error) {
-    if (error?.code === "UNKNOWN_METHOD") {
-      kind = "point";
-      points = null;
-    } else {
-      throw error;
-    }
+  const { kind, points } = await readPitchControlShape(capture, handle);
+  if (points?.length > maxCurvePoints) {
+    throw codedError(
+      "SNAPSHOT_PITCH_CONTROL_LIMIT_REACHED",
+      `a pitch curve holds ${points.length} points, exceeding the ${maxCurvePoints}-point capture limit`
+    );
   }
 
   const scriptDataKeys = normalizeScriptDataKeys(
@@ -155,6 +173,7 @@ async function readOnePitchControl(capture, handle, groupCtx, indexInGroup, { ma
     })
   );
   const ownedValues = await readOwnedValues(capture, handle, scriptDataKeys);
+  const isTemporary = kind === "point" ? await readPointTemporaryState(capture, handle) : null;
 
   const base = {
     kind,
@@ -180,6 +199,7 @@ async function readOnePitchControl(capture, handle, groupCtx, indexInGroup, { ma
   }
   return {
     ...base,
+    isTemporary,
     position: {
       groupLocalBlick: positionBlick,
       occurrenceAbsoluteBlick: positionBlick + groupCtx.timeOffsetBlick,
@@ -189,6 +209,19 @@ async function readOnePitchControl(capture, handle, groupCtx, indexInGroup, { ma
       occurrenceAbsoluteSemitone: pitchSemitone + groupCtx.pitchOffsetSemitone,
     },
   };
+}
+
+async function readPointTemporaryState(capture, handle) {
+  try {
+    const value = await capture.call(handle, "isTemporary", [], { runtimeConfirmed: true });
+    if (typeof value !== "boolean") {
+      throw hostDataError("PitchControlPoint.isTemporary returned a non-boolean");
+    }
+    return value;
+  } catch (error) {
+    if (error?.code === "UNKNOWN_METHOD") return null;
+    throw error;
+  }
 }
 
 // 只读取 SVCopilot 命名空间里的值用于身份与所有权判定；外部脚本的任意值不在读模型暴露

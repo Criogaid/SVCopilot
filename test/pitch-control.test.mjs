@@ -28,7 +28,13 @@ test("range snapshot reads Point and Curve with discriminator, units, and dual c
     timeOffsetBlick: BAR,
     pitchOffsetSemitone: 2,
     controls: [
-      { kind: "point", position: Q, pitch: 60, scriptData: { mm_Flag: true } },
+      {
+        kind: "point",
+        position: Q,
+        pitch: 60,
+        isTemporary: true,
+        scriptData: { mm_Flag: true },
+      },
       {
         kind: "curve",
         position: 2 * Q,
@@ -62,6 +68,7 @@ test("range snapshot reads Point and Curve with discriminator, units, and dual c
   assert.equal(point.position.occurrenceAbsoluteBlick, Q + BAR);
   assert.equal(point.pitch.groupRelativeSemitone, 60);
   assert.equal(point.pitch.occurrenceAbsoluteSemitone, 62);
+  assert.equal(point.isTemporary, true);
   assert.equal(point.ownership.owner, "external_or_unknown");
   assert.deepEqual(point.ownership.scriptDataKeys, ["mm_Flag"]);
   assert.ok(point.fingerprint.startsWith("sha256:"));
@@ -73,6 +80,7 @@ test("range snapshot reads Point and Curve with discriminator, units, and dual c
   // Curve：SVCopilot 自有；anchor 双坐标，points 保持 anchor 相对坐标（绝不提前展开）。
   assert.equal(curve.kind, "curve");
   assert.equal(curve.indexInGroup, 1);
+  assert.equal(curve.isTemporary, undefined);
   assert.equal(curve.anchor.groupLocalBlick, 2 * Q);
   assert.equal(curve.anchor.occurrenceAbsoluteBlick, 2 * Q + BAR);
   assert.equal(curve.anchor.groupRelativeSemitone, 64);
@@ -177,6 +185,19 @@ test("a point control is returned with its discriminator and no invented curve p
   assert.equal(control.kind, "point");
   assert.equal(control.points, undefined);
   assert.equal(control.ownership.owner, "external_or_unknown");
+  assert.equal(model.hostCalls.filter((method) => method === "getPoints").length, 0);
+});
+
+test("a host without PitchControlPoint.isTemporary reports null without changing identity", async () => {
+  const model = createPitchHostModel({
+    controls: [{ kind: "point", position: Q, pitch: 60, isTemporary: null }],
+  });
+  const result = await createService(model).snapshot({
+    ...RANGE,
+    include: ["pitchControls"],
+  });
+  assert.equal(result.data.pitchControls[0].isTemporary, null);
+  assert.ok(result.data.pitchControls[0].fingerprint.startsWith("sha256:"));
 });
 
 test("pitchControls paginate by item budget and cursor pages serve from cache without re-reading the host", async () => {

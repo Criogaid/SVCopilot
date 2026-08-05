@@ -259,6 +259,7 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
         pan: await capture.call(mixer, "getPan"),
         muted: await capture.call(mixer, "isMuted"),
         solo: await capture.call(mixer, "isSolo"),
+        fxParameters: await readMixerFxParameters(capture, mixer, warnings),
       };
     }
 
@@ -306,6 +307,9 @@ async function captureRange(capture, host, input, warnings, captureLimits) {
         group.targetGroupUuid = group.uuid;
         group.noteCount = await capture.call(target, "getNumNotes");
         occurrence.targetGroupUuid = group.uuid;
+        if (input.include.has("notes")) {
+          group.hostDeclaredScale = await readHostDeclaredScale(capture, target, warnings);
+        }
         if (input.include.has("voiceParameters") || input.include.has("automation")) {
           group.voice = {
             identityStatus: "unobservable",
@@ -538,6 +542,9 @@ function prepareStoredRange(stored, captured, input, snapshotToken, warnings, ar
         : {}),
       ...(occurrence.group?.processing !== undefined
         ? { processing: occurrence.group.processing }
+        : {}),
+      ...(occurrence.group?.hostDeclaredScale !== undefined
+        ? { hostDeclaredScale: occurrence.group.hostDeclaredScale }
         : {}),
       // pitchControls 捕获到时：per-occurrence 全组 fingerprint 是 sv_patch_pitch_controls
       // 的 target.expectedPitchControlFingerprint 来源（任何增删/重排/单对象变化都会改变它）。
@@ -962,6 +969,124 @@ function storedCursor(stored, offset, kind) {
     JSON.stringify({ contextId: stored.contextId, offset, kind }),
     "utf8"
   ).toString("base64url");
+}
+
+async function readHostDeclaredScale(capture, target, warnings) {
+  let raw;
+  try {
+    raw = await capture.call(target, "getScale", [], {
+      resultFormat: "typed-v2",
+      runtimeConfirmed: true,
+    });
+  } catch {
+    return { status: "unavailable" };
+  }
+  if (
+    !isRecord(raw) ||
+    typeof raw.root !== "string" ||
+    raw.root.length === 0 ||
+    typeof raw.type !== "string" ||
+    raw.type.length === 0
+  ) {
+    warnings.push({
+      code: "HOST_DECLARED_SCALE_INVALID",
+      message: "NoteGroup.getScale returned an invalid root/type pair; melodic key inference is unchanged.",
+    });
+    return { status: "invalid" };
+  }
+  return { status: "observed", root: raw.root, type: raw.type };
+}
+
+async function readMixerFxParameters(capture, mixer, warnings) {
+  let raw;
+  try {
+    raw = await capture.call(mixer, "getFxParams", [], {
+      resultFormat: "typed-v2",
+      runtimeConfirmed: true,
+    });
+  } catch {
+    return { status: "unavailable" };
+  }
+  try {
+    return { status: "observed", ...normalizeMixerFxParameters(raw) };
+  } catch {
+    warnings.push({
+      code: "HOST_FX_PARAMETERS_INVALID",
+      message: "TrackMixer.getFxParams returned an invalid structure; gain/pan/mute/solo remain usable.",
+    });
+    return { status: "invalid" };
+  }
+}
+
+function normalizeMixerFxParameters(raw) {
+  const root = requireHostRecord(raw, "TrackMixer.getFxParams");
+  const compressor = requireHostRecord(root.compressor, "compressor");
+  const room = requireHostRecord(root.room, "room");
+  const reverb = requireHostRecord(root.reverb, "reverb");
+  const postRoomEq = requireHostRecord(root.postRoomEq, "postRoomEq");
+  const lowShelf = requireHostRecord(postRoomEq.lowShelf, "postRoomEq.lowShelf");
+  if (!Array.isArray(postRoomEq.filters) || postRoomEq.filters.length > 16) {
+    throw new TypeError("postRoomEq.filters must be a bounded array");
+  }
+  return {
+    compressor: {
+      enabled: requireHostBoolean(compressor.enabled),
+      attack: requireHostNumber(compressor.attack),
+      ratio: requireHostNumber(compressor.ratio),
+      threshold: requireHostNumber(compressor.threshold),
+    },
+    room: {
+      enabled: requireHostBoolean(room.enabled),
+      positionX: requireHostNumber(room.positionX),
+      positionY: requireHostNumber(room.positionY),
+      reflectionGain: requireHostNumber(room.reflectionGain),
+      size: requireHostNumber(room.size),
+    },
+    reverb: {
+      enabled: requireHostBoolean(reverb.enabled),
+      type: requireHostString(reverb.type),
+      preDelay: requireHostNumber(reverb.preDelay),
+      decay: requireHostNumber(reverb.decay),
+      dryWetRatio: requireHostNumber(reverb.dryWetRatio),
+    },
+    postRoomEq: {
+      enabled: requireHostBoolean(postRoomEq.enabled),
+      lowShelf: {
+        freq: requireHostNumber(lowShelf.freq),
+        gain: requireHostNumber(lowShelf.gain),
+      },
+      filters: postRoomEq.filters.map((rawFilter) => {
+        const filter = requireHostRecord(rawFilter, "postRoomEq.filters[]");
+        return {
+          freq: requireHostNumber(filter.freq),
+          gain: requireHostNumber(filter.gain),
+          q: requireHostNumber(filter.q),
+        };
+      }),
+    },
+  };
+}
+
+function requireHostRecord(value, label) {
+  if (!isRecord(value)) throw new TypeError(`${label} must be an object`);
+  return value;
+}
+
+function requireHostBoolean(value) {
+  if (typeof value !== "boolean") throw new TypeError("host value must be boolean");
+  return value;
+}
+
+function requireHostNumber(value) {
+  if (!Number.isFinite(value)) throw new TypeError("host value must be finite");
+  return value;
+}
+
+function requireHostString(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("host value must be a non-empty string");
+  }
+  return value;
 }
 
 function computedPitchSampling(request, range) {
