@@ -1,0 +1,314 @@
+{
+  "kind": "svcopilot-api-surface-evidence",
+  "schemaVersion": "1.0.0",
+  "capturedAt": "2026-08-05T07:26:11Z",
+  "host": {
+    "product": "Synthesizer V Studio 2 Pro",
+    "version": "2.2.1",
+    "platform": "win32",
+    "versionNumber": 131585
+  },
+  "probe": {
+    "name": "SVApiSurfaceProbe",
+    "version": "1",
+    "readOnly": true,
+    "trialCalls": true
+  },
+  "manifestGeneratedAt": "2026-07-21T02:48:17.036Z",
+  "summary": {
+    "resultCode": "API_SURFACE_PARITY_DIVERGED",
+    "matchedCount": 326,
+    "undocumentedCount": 13,
+    "missingCount": 15,
+    "unavailableCount": 1,
+    "undocumentedClasses": [
+      "MainEditorView",
+      "NoteGroup",
+      "PitchControlCurve",
+      "PitchControlPoint",
+      "SV",
+      "TrackMixer"
+    ],
+    "missingClasses": [
+      "ArrangementSelectionState",
+      "ArrangementView",
+      "CoordinateSystem",
+      "GroupSelection",
+      "MainEditorView",
+      "NestedObject",
+      "Note",
+      "PlaybackControl",
+      "Project",
+      "RetakeList",
+      "SV",
+      "ScriptableNestedObject",
+      "SelectionStateBase",
+      "TimeAxis",
+      "TrackInnerSelectionState"
+    ],
+    "captureWarnings": []
+  },
+  "captureHealth": {
+    "memberCount": 527,
+    "callableCount": 522,
+    "trialCount": 304,
+    "observedLuaTypes": [
+      "number",
+      "string",
+      "userdata"
+    ],
+    "warnings": []
+  },
+  "undocumented": [
+    {
+      "className": "MainEditorView",
+      "member": "setCurrentGroup",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "root"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "MainEditorView",
+      "member": "setCurrentTrack",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "root"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "NoteGroup",
+      "member": "getScale",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "created",
+        "live_instance"
+      ],
+      "classDocumented": true,
+      "trial": {
+        "status": "ok",
+        "returnedType": "table"
+      }
+    },
+    {
+      "className": "NoteGroup",
+      "member": "setScale",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "created",
+        "live_instance"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "PitchControlCurve",
+      "member": "type",
+      "kind": "value",
+      "scope": "own",
+      "origins": [
+        "created"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "PitchControlPoint",
+      "member": "isTemporary",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "created"
+      ],
+      "classDocumented": true,
+      "trial": {
+        "status": "ok",
+        "returnedType": "boolean"
+      }
+    },
+    {
+      "className": "PitchControlPoint",
+      "member": "type",
+      "kind": "value",
+      "scope": "own",
+      "origins": [
+        "created"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "SV",
+      "member": "pitch2Freq",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "root"
+      ],
+      "classDocumented": true,
+      "trial": {
+        "status": "failed",
+        "errorKind": "HOST_ERROR"
+      }
+    },
+    {
+      "className": "SV",
+      "member": "scaleNotes",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "root"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "SV",
+      "member": "scaleTypes",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "root"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "TrackMixer",
+      "member": "getFxParams",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "created",
+        "live_instance"
+      ],
+      "classDocumented": true,
+      "trial": {
+        "status": "ok",
+        "returnedType": "table"
+      }
+    },
+    {
+      "className": "TrackMixer",
+      "member": "setFxParams",
+      "kind": "function",
+      "scope": "own",
+      "origins": [
+        "created",
+        "live_instance"
+      ],
+      "classDocumented": true
+    },
+    {
+      "className": "TrackMixer",
+      "member": "type",
+      "kind": "value",
+      "scope": "own",
+      "origins": [
+        "created",
+        "live_instance"
+      ],
+      "classDocumented": true
+    }
+  ],
+  "missing": [
+    {
+      "className": "ArrangementSelectionState",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "ArrangementView",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "CoordinateSystem",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "GroupSelection",
+      "member": null,
+      "reason": "CLASS_NOT_OBSERVED"
+    },
+    {
+      "className": "MainEditorView",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "NestedObject",
+      "member": null,
+      "reason": "CLASS_NOT_OBSERVED"
+    },
+    {
+      "className": "Note",
+      "member": "setPitchAutoMode",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "PlaybackControl",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "Project",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "RetakeList",
+      "member": null,
+      "reason": "CLASS_NOT_OBSERVED"
+    },
+    {
+      "className": "SV",
+      "member": "pitch2freq",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "ScriptableNestedObject",
+      "member": null,
+      "reason": "CLASS_NOT_OBSERVED"
+    },
+    {
+      "className": "SelectionStateBase",
+      "member": null,
+      "reason": "CLASS_NOT_OBSERVED"
+    },
+    {
+      "className": "TimeAxis",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    },
+    {
+      "className": "TrackInnerSelectionState",
+      "member": "getIndexInParent",
+      "reason": "MEMBER_NOT_OBSERVED"
+    }
+  ],
+  "unavailable": [
+    {
+      "name": "Automation",
+      "origin": "created",
+      "reason": "CREATE_FAILED"
+    }
+  ],
+  "truncated": {
+    "undocumented": false,
+    "missing": false,
+    "maxDetailItems": 256
+  },
+  "conclusion": {
+    "semantic": "api.surfaceParity",
+    "status": "contradicted",
+    "value": {
+      "parity": "documented_diverges_from_runtime",
+      "undocumentedCount": 13,
+      "missingCount": 15
+    },
+    "reason": "The runtime scripting surface and the parsed official manifest disagree; undocumented members lose argument validation and returned-handle typing, and documented-but-unobserved members indicate a stale manifest for this host version."
+  }
+}

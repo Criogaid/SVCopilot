@@ -3,3 +3,4 @@
 # 而不是内容真的变了。因此固定用 LF 检出，与仓库里存储的字节一致。
 server/host-profiles/*.json text eol=lf
 docs/pitch-techniques/evidence/*.json text eol=lf
+docs/operations/evidence/*.json text eol=lf
