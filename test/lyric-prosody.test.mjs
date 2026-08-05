@@ -24,7 +24,7 @@ function createStoredContext(store, options = {}) {
     context: { kind: "range", occurrences: [] },
   });
   const noteFingerprints = notes.map((note, index) => ({
-    indexInGroup: index,
+    indexInGroup: note.indexInGroup ?? index,
     onsetBlick: note.onsetBlick,
     durationBlick: note.durationBlick,
     pitch: note.pitch ?? 60,
@@ -281,6 +281,119 @@ test("phonemeCoverage flags only melodic words; br and continuations stay legiti
   assert.equal(result.coverage.phonemeCoverage.status, "captured");
   assert.equal(result.coverage.phonemeCoverage.flaggedNotes, 1);
   assert.equal(result.coverage.phonemeCoverage.legitimatelyEmpty, 2);
+});
+
+test("mandarinReading reports the host reading for each polyphonic character", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [
+      { indexInGroup: 3, onsetBlick: 0, durationBlick: Q, lyrics: "还" },
+      { indexInGroup: 5, onsetBlick: Q, durationBlick: Q, lyrics: "还" },
+      { indexInGroup: 6, onsetBlick: 2 * Q, durationBlick: Q, lyrics: "普通" },
+    ],
+    processing: {
+      state: "ready",
+      phonemes: [null, null, null, "x a :\\i", null, "x ua :n", "p u th U N"],
+    },
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["mandarinReading"],
+  });
+
+  assert.equal(result.coverage.mandarinReading.status, "checked");
+  assert.equal(result.coverage.mandarinReading.candidateNotes, 2);
+  assert.equal(result.coverage.mandarinReading.resolvedReadings, 2);
+  assert.equal(result.coverage.mandarinReading.hitRate, 1);
+  assert.deepEqual(
+    result.issues.map((issue) => [issue.notes, issue.hostReading, issue.hostPhonemes]),
+    [
+      [[3], "hai", "x a :\\i"],
+      [[5], "huan", "x ua :n"],
+    ]
+  );
+  assert.ok(
+    result.issues.every(
+      (issue) =>
+        issue.code === "MANDARIN_READING_REQUIRES_CONFIRMATION" &&
+        issue.toneOnlyDistinctions === "not_distinguishable"
+    )
+  );
+  assert.equal(
+    result.provenance.mandarinReading,
+    "host_g2p_readback_toneless_pinyin_lookup"
+  );
+  assert.equal(
+    result.provenance.mandarinReadingLimit,
+    "tone_only_differences_not_distinguishable"
+  );
+});
+
+test("mandarinReading reports unknown formats and raises a zero-hit health warning", async () => {
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [{ onsetBlick: 0, durationBlick: Q, lyrics: "还" }],
+    processing: { state: "ready", phonemes: ["future-format"] },
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["mandarinReading"],
+  });
+
+  assert.equal(result.coverage.mandarinReading.status, "unknown_phoneme_format");
+  assert.equal(result.coverage.mandarinReading.hitRate, 0);
+  assert.equal(result.issues[0].code, "MANDARIN_READING_UNKNOWN_PHONEME_FORMAT");
+  assert.equal(result.issues[0].kind, "unknown_phoneme_format");
+  assert.equal(result.issues[0].hostReading, null);
+  assert.equal(result.issues[0].hostPhonemes, "future-format");
+  assert.ok(
+    result.warnings.some((warning) => warning.code === "MANDARIN_READING_ZERO_HIT_RATE")
+  );
+});
+
+test("mandarinReading distinguishes missing, legacy, pending, and no-candidate contexts", async () => {
+  const cases = [
+    {
+      processing: undefined,
+      status: "not_captured",
+      warning: "PROCESSING_NOT_CAPTURED",
+    },
+    {
+      processing: { state: "ready" },
+      status: "not_captured",
+      warning: "PHONEME_STRINGS_NOT_CAPTURED",
+    },
+    {
+      processing: { state: "pending", phonemes: [""] },
+      status: "captured_pending",
+      warning: "MANDARIN_READING_PENDING",
+    },
+  ];
+  for (const item of cases) {
+    const store = createStore();
+    const { stored } = createStoredContext(store, {
+      notes: [{ onsetBlick: 0, durationBlick: Q, lyrics: "还" }],
+      processing: item.processing,
+    });
+    const result = await createService(store).validate({
+      contextId: stored.contextId,
+      checks: ["mandarinReading"],
+    });
+    assert.equal(result.coverage.mandarinReading.status, item.status);
+    assert.equal(result.summary.issueCount, 0);
+    assert.ok(result.warnings.some((warning) => warning.code === item.warning));
+  }
+
+  const store = createStore();
+  const { stored } = createStoredContext(store, {
+    notes: [{ onsetBlick: 0, durationBlick: Q, lyrics: "普通" }],
+  });
+  const result = await createService(store).validate({
+    contextId: stored.contextId,
+    checks: ["mandarinReading"],
+  });
+  assert.equal(result.coverage.mandarinReading.status, "checked_no_candidates");
+  assert.deepEqual(result.warnings, []);
 });
 
 test("near-miss special lyrics remain lexical across every validator check", async () => {

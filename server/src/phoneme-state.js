@@ -1,6 +1,10 @@
 import { getWireArrayMetadata } from "./wire-codec.js";
 
-export function analyzePhonemeResult(phonemes, expectedNotes, { observedIndices } = {}) {
+export function analyzePhonemeResult(
+  phonemes,
+  expectedNotes,
+  { observedIndices, includePhonemes = true } = {}
+) {
   const values = Array.isArray(phonemes) ? phonemes : [];
   const indices = normalizeObservedIndices(values, observedIndices);
   const nonEmptyNoteIndices = [];
@@ -17,6 +21,9 @@ export function analyzePhonemeResult(phonemes, expectedNotes, { observedIndices 
   const observedItems = indices.length;
   const shapeComplete = hasExpectedCount ? observedItems >= expectedNotes : observedItems > 0;
   const observedIndexSet = new Set(indices);
+  const capturedPhonemes = Array.from({ length: values.length }, (_, index) =>
+    observedIndexSet.has(index) && typeof values[index] === "string" ? values[index] : null
+  );
   const missingNoteIndices = hasExpectedCount
     ? range(expectedNotes).filter((index) => !observedIndexSet.has(index))
     : [];
@@ -31,6 +38,7 @@ export function analyzePhonemeResult(phonemes, expectedNotes, { observedIndices 
     emptyPhonemeNotes: emptyNoteIndices,
     missingPhonemeNotes: missingNoteIndices,
     shapeComplete,
+    ...(includePhonemes ? { phonemes: capturedPhonemes } : {}),
     phonemeCoverage: {
       indexBase: 0,
       totalNotes: expectedNotes ?? null,

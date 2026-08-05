@@ -485,6 +485,12 @@ test("range snapshot returns one editable context with all tuning includes", asy
   assert.equal(result.data.computedPitch.length, 1);
   assert.equal(result.data.computedPitch[0].values.length, 4);
   assert.equal(result.data.tracks[0].groups[0].processing.state, "ready");
+  assert.deepEqual(result.data.tracks[0].groups[0].processing.phonemes, [
+    "d ow",
+    "r ey",
+    "m iy",
+    "f aa",
+  ]);
   // 身份是组内 index（§3.1）：note.id 与 indexInGroup 是同一个值。
   assert.ok(result.data.notes.every((note) => note.id === note.indexInGroup));
   const stored = service.store.get(result.contextId);

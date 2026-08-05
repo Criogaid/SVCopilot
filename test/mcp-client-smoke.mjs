@@ -746,6 +746,7 @@ try {
     "englishSyllables",
     "languageConsistency",
     "stressAlignment",
+    "mandarinReading",
     "phonemeCoverage",
   ]);
   const prosodyUnknownContext = parseToolError(
@@ -1020,6 +1021,7 @@ try {
   );
   assert.equal(groupProcessing.data.processing.state, "ready");
   assert.equal(groupProcessing.data.processing.computedItems, 2);
+  assert.deepEqual(groupProcessing.data.processing.phonemes, ["a-phoneme", "i-phoneme"]);
 
   const selectionSnapshot = parseToolResult(
     await facadeCall({

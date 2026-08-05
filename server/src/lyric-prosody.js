@@ -1,4 +1,9 @@
 import { classifyCharacter, countEnglishSyllables, splitKanaMorae } from "./lyric-align.js";
+import {
+  isMandarinReadingCandidate,
+  lookupMandarinReading,
+  MANDARIN_READING_DATA,
+} from "./mandarin-reading-data.js";
 import { blickToMusical } from "./musical-time.js";
 import { ServiceTiming } from "./service-timing.js";
 import {
@@ -18,7 +23,7 @@ import { selectOccurrenceByOrdinal } from "./scope-source.js";
 // - 分档诚实置信：mora 切分是确定性规则；英语音节数是启发式（文献 ~85-90%）；
 //   重读位置是"首音节重读"近似（无词典），只发 info 级、confidence:"low"，绝不报 error。
 // - 音素覆盖率遵守 §5.4 两维度语义：br/延音（"-"/"+"）的空音素合法，只报旋律词音符的
-//   空音素；context 未捕获 processing 时如实 not_captured，不猜。
+//   空音素；普通话读音只反查宿主 G2P 的无调拼音，未知格式和声调差异绝不猜测。
 export const PROSODY_CHECKS = Object.freeze([
   "breath",
   "specialLyricChains",
@@ -26,6 +31,7 @@ export const PROSODY_CHECKS = Object.freeze([
   "englishSyllables",
   "languageConsistency",
   "stressAlignment",
+  "mandarinReading",
   "phonemeCoverage",
 ]);
 
@@ -43,6 +49,8 @@ const PROVENANCE = Object.freeze({
   breathDetection: "official_documented_special_lyric_br",
   specialLyricRoles: "official_v2_manual_enter_notes",
   specialLyricChainSpacing: "host_observed_requires_profile_calibration",
+  mandarinReading: "host_g2p_readback_toneless_pinyin_lookup",
+  mandarinReadingLimit: "tone_only_differences_not_distinguishable",
   phonemeCoverage: "snapshot_time_processing_state_not_live",
   basis: "derived_not_host_fact",
   perception: "human_only",
@@ -141,6 +149,9 @@ function runChecks(loaded, input, warnings) {
   if (input.checks.has("languageConsistency")) checkLanguageConsistency(loaded, issues);
   if (input.checks.has("stressAlignment")) {
     coverage.stressAlignment = checkStressAlignment(loaded, issues, warnings);
+  }
+  if (input.checks.has("mandarinReading")) {
+    coverage.mandarinReading = checkMandarinReading(loaded, issues, warnings);
   }
   if (input.checks.has("phonemeCoverage")) {
     coverage.phonemeCoverage = checkPhonemeCoverage(loaded, issues, warnings);
@@ -383,12 +394,119 @@ function strongBeatsFor(numerator) {
   return strong;
 }
 
-// 6. phonemeCoverage：只报旋律词音符的空音素；br 与 "-"/"+" 的空音素合法（§5.4）。
+// 6. mandarinReading：读回宿主 G2P，只把精确命中的 X-SAMPA 转成无调拼音供人工确认。
+function checkMandarinReading(loaded, issues, warnings) {
+  const candidates = loaded.notes.filter((note) => isMandarinReadingCandidate(note.lyrics));
+  const baseCoverage = {
+    candidateNotes: candidates.length,
+    resolvedReadings: 0,
+    unknownPhonemeFormats: 0,
+    mappingEntries: MANDARIN_READING_DATA.mappingCount,
+    pinyinStyle: MANDARIN_READING_DATA.pinyinStyle,
+    toneOnlyDistinctions: "not_distinguishable",
+  };
+  if (candidates.length === 0) {
+    return { status: "checked_no_candidates", ...baseCoverage, hitRate: null };
+  }
+
+  const processing = loaded.occurrence.processing;
+  if (!isRecord(processing)) {
+    pushWarningOnce(warnings, {
+      code: "PROCESSING_NOT_CAPTURED",
+      message:
+        'the range context was captured without include ["processing"]; mandarinReading was skipped — re-snapshot with processing included.',
+    });
+    return { status: "not_captured", ...baseCoverage, hitRate: null };
+  }
+  if (!Array.isArray(processing.phonemes)) {
+    pushWarningOnce(warnings, {
+      code: "PHONEME_STRINGS_NOT_CAPTURED",
+      message:
+        "the range context has a processing summary without host phoneme strings; re-run sv_snapshot_range before checking mandarinReading.",
+    });
+    return { status: "not_captured", ...baseCoverage, hitRate: null };
+  }
+  if (processing.state === "pending") {
+    pushWarningOnce(warnings, {
+      code: "MANDARIN_READING_PENDING",
+      message:
+        "host phoneme processing was pending at snapshot time; wait for processing and capture a fresh range context before checking mandarinReading.",
+    });
+    return {
+      status: "captured_pending",
+      ...baseCoverage,
+      hitRate: null,
+      processingState: processing.state,
+    };
+  }
+
+  let resolvedReadings = 0;
+  let unknownPhonemeFormats = 0;
+  for (const note of candidates) {
+    const hostPhonemes = processing.phonemes[note.indexInGroup];
+    const hostReading = lookupMandarinReading(hostPhonemes);
+    if (hostReading !== null) {
+      resolvedReadings += 1;
+      pushIssue(issues, note, {
+        code: "MANDARIN_READING_REQUIRES_CONFIRMATION",
+        kind: "mandarin_reading",
+        severity: "info",
+        confidence: "host_g2p_readback",
+        hostReading,
+        hostPhonemes,
+        readingSystem: MANDARIN_READING_DATA.pinyinStyle,
+        toneOnlyDistinctions: "not_distinguishable",
+        message: `host G2P reads "${note.lyrics}" as toneless pinyin "${hostReading}" (${hostPhonemes}); confirm that reading manually.`,
+        suggestion:
+          "confirm the intended consonant/final reading by ear; this lookup cannot distinguish readings that differ only by tone.",
+      });
+      continue;
+    }
+
+    unknownPhonemeFormats += 1;
+    pushIssue(issues, note, {
+      code: "MANDARIN_READING_UNKNOWN_PHONEME_FORMAT",
+      kind: "unknown_phoneme_format",
+      severity: "warning",
+      confidence: "unknown",
+      hostReading: null,
+      hostPhonemes: typeof hostPhonemes === "string" ? hostPhonemes : null,
+      readingSystem: MANDARIN_READING_DATA.pinyinStyle,
+      toneOnlyDistinctions: "not_distinguishable",
+      message: `host G2P phonemes for "${note.lyrics}" do not match the configured lookup format; no pinyin reading was guessed.`,
+      suggestion:
+        "inspect the returned hostPhonemes and refresh the lookup only after confirming the host format.",
+    });
+  }
+
+  const hitRate = resolvedReadings / candidates.length;
+  if (resolvedReadings === 0) {
+    warnings.push({
+      code: "MANDARIN_READING_ZERO_HIT_RATE",
+      message: `none of ${candidates.length} polyphonic-character phoneme strings matched the lookup; treat the host format as unverified rather than accepting unknown readings.`,
+    });
+  }
+  return {
+    status:
+      resolvedReadings === 0
+        ? "unknown_phoneme_format"
+        : unknownPhonemeFormats > 0
+          ? "checked_with_unknown_phoneme_format"
+          : "checked",
+    ...baseCoverage,
+    processingState: processing.state,
+    resolvedReadings,
+    unknownPhonemeFormats,
+    hitRate,
+  };
+}
+
+// 7. phonemeCoverage：只报旋律词音符的空音素；br 与 "-"/"+" 的空音素合法（§5.4）。
 //    processing 是快照时状态，可能滞后于当前宿主，provenance 已声明。
 function checkPhonemeCoverage(loaded, issues, warnings) {
   const processing = loaded.occurrence.processing;
   if (!isRecord(processing) || !isRecord(processing.phonemeCoverage)) {
-    warnings.push({
+    pushWarningOnce(warnings, {
       code: "PROCESSING_NOT_CAPTURED",
       message:
         'the range context was captured without include ["processing"]; phonemeCoverage was skipped — re-snapshot with processing included.',
@@ -420,6 +538,10 @@ function checkPhonemeCoverage(loaded, issues, warnings) {
     flaggedNotes: flagged.length,
     legitimatelyEmpty: (processing.phonemeCoverage.emptyNoteIndices ?? []).length - flagged.length,
   };
+}
+
+function pushWarningOnce(warnings, warning) {
+  if (!warnings.some((item) => item.code === warning.code)) warnings.push(warning);
 }
 
 // ---------- 响应组装 ----------

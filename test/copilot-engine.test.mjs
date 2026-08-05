@@ -554,6 +554,8 @@ test("phoneme readiness uses observed envelope entries instead of padded array l
   assert.equal(result.data.state, "pending");
   assert.equal(result.data.evidence.computedItems, 1);
   assert.deepEqual(result.data.evidence.missingPhonemeNotes, [1]);
+  assert.equal(result.data.evidence.phonemes, undefined);
+  assert.deepEqual(result.data.values, padded);
 });
 
 test("phoneme stablePolls compares consecutive observations", async () => {
@@ -592,6 +594,7 @@ test("group snapshot reports complete phonemes with legal empty values as ready"
   assert.equal(snapshot.data.processing.state, "ready");
   assert.equal(snapshot.data.processing.computedItems, 2);
   assert.deepEqual(snapshot.data.processing.emptyPhonemeNotes, [1]);
+  assert.deepEqual(snapshot.data.processing.phonemes, ["a", ""]);
   assert.deepEqual(snapshot.data.processing.phonemeCoverage.emptyNoteIndices, [1]);
 });
 

@@ -161,7 +161,9 @@ export async function waitForProcessing(
         resultShape: "array",
         ...(Number.isSafeInteger(expectedNotes) ? { resultLength: expectedNotes } : {}),
       });
-      const analysis = analyzePhonemeResult(lastObservation, expectedNotes);
+      const analysis = analyzePhonemeResult(lastObservation, expectedNotes, {
+        includePhonemes: false,
+      });
       const contentReady = !requireNonEmpty || analysis.emptyPhonemes === 0;
       evidence = {
         ...analysis,

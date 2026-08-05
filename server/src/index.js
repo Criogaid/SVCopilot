@@ -1143,7 +1143,7 @@ export const TOOLS = [
   {
     name: "sv_snapshot_range",
     description:
-      "Capture one editable musical-range context with occurrence and note identities, including notes sustained across the range start. A single host lease can include notes, voice parameters, Automation, computed pitch, attributes, processing, tempo/meter maps, and mixer state. Decimal or rational beats are converted exactly with host SV.QUARTER. Independent response budgets page already-captured pure data through cursor without rereading the host; global capture limits are published in svcopilot://capabilities. snapshotToken is a content hash, not a host revision; sinceToken still reads and hashes before returning no_change.",
+      "Capture one editable musical-range context with occurrence and note identities, including notes sustained across the range start. A single host lease can include notes, voice parameters, Automation, computed pitch, attributes, processing (including per-note host G2P phoneme strings), tempo/meter maps, and mixer state. Decimal or rational beats are converted exactly with host SV.QUARTER. Independent response budgets page already-captured pure data through cursor without rereading the host; global capture limits are published in svcopilot://capabilities. snapshotToken is a content hash, not a host revision; sinceToken still reads and hashes before returning no_change.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1704,7 +1704,7 @@ export const TOOLS = [
   {
     name: "sv_validate_lyrics_prosody",
     description:
-      'Read-only lyric/prosody validator over a range context (include ["notes"]; in-memory only, never touches the host, never generates patches — fixes go through sv_patch_notes / sv_align_lyrics / sv_restructure_notes). Checks: breath (official exact "br" notes carrying language/phonemes overrides, unusually long breaths), specialLyricChains (ORPHAN_PLUS, ORPHAN_PHONATION_CONTINUATION, SYLLABLE_CHAIN_GAP/OVERLAP, standalone-apostrophe and suspicious-variant evidence from the shared special-lyric state machine), japaneseMora (multiple morae on one note via deterministic mora rules, isolated small kana), englishSyllables (heuristic vowel-group syllable count ~85-90% accurate vs. following "+" continuation notes), languageConsistency (script class vs. languageOverride conflicts), stressAlignment (first-syllable-stress heuristic with NO dictionary vs. meter strong beats — info-level and confidence:"low" only, never an error), and phonemeCoverage (melodic notes with empty phonemes at snapshot time; empty phonemes on br/"-"/"+" are legitimate per the processing-state contract, and the check reports not_captured when the context lacks include ["processing"]). Issues preserve stable code, note indexes, semanticRole, and gapBlick/overlapBlick evidence and are sorted by severity then score-time order. Musical conclusions remain derived/heuristic; the exact special-lyric roles themselves come from the official V2 manual.',
+      'Read-only lyric/prosody validator over a range context (include ["notes"]; in-memory only, never touches the host, never generates patches — fixes go through sv_patch_notes / sv_align_lyrics / sv_restructure_notes). Checks: breath (official exact "br" notes carrying language/phonemes overrides, unusually long breaths), specialLyricChains (ORPHAN_PLUS, ORPHAN_PHONATION_CONTINUATION, SYLLABLE_CHAIN_GAP/OVERLAP, standalone-apostrophe and suspicious-variant evidence from the shared special-lyric state machine), japaneseMora (multiple morae on one note via deterministic mora rules, isolated small kana), englishSyllables (heuristic vowel-group syllable count ~85-90% accurate vs. following "+" continuation notes), languageConsistency (script class vs. languageOverride conflicts), stressAlignment (first-syllable-stress heuristic with NO dictionary vs. meter strong beats — info-level and confidence:"low" only, never an error), mandarinReading (maps snapshot-time host G2P X-SAMPA for 122 common polyphonic characters to toneless pinyin for human confirmation; include ["processing"] is required, tone-only differences are not distinguishable, unknown formats are reported without guessing, and a zero hit rate raises an explicit health warning), and phonemeCoverage (melodic notes with empty phonemes at snapshot time; empty phonemes on br/"-"/"+" are legitimate per the processing-state contract, and the check reports not_captured when the context lacks include ["processing"]). Issues preserve stable code, note indexes, semanticRole, and gapBlick/overlapBlick evidence and are sorted by severity then score-time order. Musical conclusions remain derived/heuristic; the exact special-lyric roles themselves come from the official V2 manual.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1732,6 +1732,7 @@ export const TOOLS = [
               "englishSyllables",
               "languageConsistency",
               "stressAlignment",
+              "mandarinReading",
               "phonemeCoverage",
             ],
           },
@@ -1931,7 +1932,7 @@ export const TOOLS = [
           uniqueItems: true,
           items: { enum: ["phrase", "prosody", "style", "computedPitch"] },
           description:
-            'Defaults to all sections. computedPitch needs a context captured with include ["computedPitch"]; prosody phoneme coverage needs include ["processing"]; style parameter statistics need include ["automation"].',
+            'Defaults to all sections. computedPitch needs a context captured with include ["computedPitch"]; prosody phoneme coverage and Mandarin reading verification need include ["processing"]; style parameter statistics need include ["automation"].',
         },
         phraseGapQuarter: {
           type: "number",
