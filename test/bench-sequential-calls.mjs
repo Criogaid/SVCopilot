@@ -17,14 +17,7 @@ const luaBin = path.join(
   "unsafe-experiment",
   "lua.exe"
 );
-const bridgeScript = path.join(
-  productDir,
-  "scripts",
-  "SynthVCopilotResearch",
-  "copilot",
-  "sv-scripts",
-  "StartSynthVCopilot.lua"
-);
+const bridgeScript = path.join(testDir, "..", "staging", "StartSynthVCopilotPipe.lua");
 const harnessScript = path.join(testDir, "pipe_bridge_harness.lua");
 
 if (!existsSync(luaBin)) {

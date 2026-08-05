@@ -1,6 +1,6 @@
 --[[
-  IO PIPE 桥的参考副本。当前实际脚本已经位于 scripts/.../sv-scripts/
-  StartSynthVCopilot.lua；本文件不在 SynthV 扫描目录中。
+  SynthV 侧 IO PIPE 桥的唯一源码。开发机通过 scripts/ 下的目录 Junction
+  让宿主直接读取 staging，避免 loaded/staging 两份脚本漂移。
 ]]
 
 IDLE_MS = 20
@@ -17,7 +17,7 @@ local PIPE_TO_SV   = "\\\\.\\pipe\\SVCopilot-" .. NAMESPACE .. "to-sv"    -- Rel
 local PIPE_FROM_SV = "\\\\.\\pipe\\SVCopilot-" .. NAMESPACE .. "from-sv"  -- SV -> Relay (we write)
 
 -- ===================================================================== --
--- JSON (pure Lua) -- identical to StartSynthVCopilot.lua
+-- JSON (pure Lua)
 -- ===================================================================== --
 local json = {}
 local function kind_of(obj)
@@ -175,7 +175,7 @@ function json.parse(str, pos, end_delim)
 end
 
 -- ===================================================================== --
--- Handle registry + marshaling -- identical to StartSynthVCopilot.lua
+-- Handle registry + marshaling
 -- ===================================================================== --
 local handles = {}
 local nextId = 1
@@ -466,7 +466,7 @@ local function readNoteFingerprints(cmd)
 end
 
 -- ===================================================================== --
--- Dispatch -- identical to StartSynthVCopilot.lua
+-- Dispatch
 -- ===================================================================== --
 local function resolveTarget(handleId)
   if handleId == nil or handleId == json.null then return SV end

@@ -6,7 +6,7 @@
 // handleTypes 从此断链。也就是说「文档没写」不是少一个方法可用，而是那条调用链上的
 // 类型信息整体消失。
 //
-// 采集侧在宿主 Lua 里用 pairs() 枚举（见 scripts/SVApiSurfaceProbe/）：SV API 对象是
+// 采集侧在宿主 Lua 里用 pairs() 枚举（见 staging/SVApiSurfaceProbe.lua）：SV API 对象是
 // 带 __ptr__/metatable 的普通 Lua 表，方法即键，因此可直接枚举——而桥的 index/call
 // 都是单键查找，必须预先知道名字，天生发现不了文档之外的东西。
 //

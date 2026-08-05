@@ -13,14 +13,7 @@ const productDir = path.resolve(testDir, "..", "..");
 const luaBin =
   process.env.LUA_BIN ||
   path.join(productDir, "scripts", "SynthVCopilotResearch", "unsafe-experiment", "lua.exe");
-const bridgeScript = path.join(
-  productDir,
-  "scripts",
-  "SynthVCopilotResearch",
-  "copilot",
-  "sv-scripts",
-  "StartSynthVCopilot.lua"
-);
+const bridgeScript = path.join(testDir, "..", "staging", "StartSynthVCopilotPipe.lua");
 const harnessScript = path.join(testDir, "pipe_bridge_harness.lua");
 
 function handleOf(value) {

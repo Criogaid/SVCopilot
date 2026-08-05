@@ -19,14 +19,7 @@ const productDir = path.resolve(testDir, "..", "..");
 const luaBin =
   process.env.LUA_BIN ||
   path.join(productDir, "scripts", "SynthVCopilotResearch", "unsafe-experiment", "lua.exe");
-const devScript = path.join(
-  productDir,
-  "scripts",
-  "SynthVCopilotResearch",
-  "copilot",
-  "sv-scripts",
-  "DevSVCopilotFileBridge.lua"
-);
+const devScript = path.join(testDir, "..", "staging", "DevSVCopilotFileBridge.lua");
 const harness = path.join(testDir, "dev_file_bridge_harness.lua");
 
 function readJson(file) {

@@ -28,14 +28,7 @@ const luaBin = path.join(
   "lua.exe"
 );
 const bridgeHarness = path.join(testDir, "pipe_bridge_harness.lua");
-const bridgeScript = path.join(
-  productDir,
-  "scripts",
-  "SynthVCopilotResearch",
-  "copilot",
-  "sv-scripts",
-  "StartSynthVCopilot.lua"
-);
+const bridgeScript = path.join(testDir, "..", "staging", "StartSynthVCopilotPipe.lua");
 
 // content[0].text 只是一行状态摘要，不再是 payload 的第二份副本；
 // 完整机器结果只能从 structuredContent 读取。摘要行仍要断言存在且有界，

@@ -3,7 +3,7 @@
 //   1. tools/out/api-surface-<ts>.json + -latest.json —— 完整明细，gitignored。
 //   2. --evidence <path> —— 精简、脱敏、可提交的证据文件，含 conclusion 块。
 //
-// 采集文件由宿主内的 scripts/SVApiSurfaceProbe/SVApiSurfaceProbe.lua 生成（它直接写盘，
+// 采集文件由 staging/SVApiSurfaceProbe.lua 生成（宿主通过本地链接读取；它直接写盘，
 // 不经管道，因此不受 64 KiB 帧上限约束）。本工具是纯离线后处理：不连宿主、不碰工程。
 //
 // 用法：

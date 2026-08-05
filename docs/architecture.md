@@ -137,7 +137,9 @@ Host Profile 汇总 SV Live Probe 的只读证据和显式 opt-in 的可恢复�
 | `server/src/plan-ledger.js` | PlanRef 单次 commit 状态机 |
 | `server/src/scope-source.js` | Snapshot 与 capsule 的统一 mutation scope |
 | `server/src/mcp-result-encoder.js` | MCP 结果与错误边界 |
-| `staging/StartSynthVCopilotPipe.lua` | 仓库内 Lua bridge 参考副本 |
+| `staging/StartSynthVCopilotPipe.lua` | SynthV IO PIPE bridge 唯一源码 |
+| `staging/DevSVCopilotFileBridge.lua` | 开发期文件 IPC 入口，复用正式 dispatcher |
+| `staging/SVApiSurfaceProbe.lua` | 只读宿主 API 表面探针 |
 
 ## 10. 验证
 

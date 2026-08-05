@@ -12,10 +12,11 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-// loaded 脚本在仓库外：SynthV 递归扫描 scripts/，Node 代码与测试必须留在那棵树之外。
+// SynthV 递归扫描 scripts/；本地开发可把宿主目录 Junction 到仓库 staging。
 // 相对 server/src/ 的候选路径（src → server → SVCopilot → "Synthesizer V Studio 2"），
 // 按优先级排列。
 const LOADED_BRIDGE_CANDIDATES = [
+  "../../../scripts/SynthVCopilotResearch/copilot/sv-scripts/StartSynthVCopilotPipe.lua",
   "../../../scripts/SynthVCopilotResearch/copilot/sv-scripts/StartSynthVCopilot.lua",
 ];
 const STAGING_BRIDGE = "../../staging/StartSynthVCopilotPipe.lua";
@@ -63,8 +64,8 @@ function firstExisting(baseDir, candidates) {
   return { status: "not_found", searchedPaths: searched };
 }
 
-// loaded 与 staging 的比较结论。CLAUDE.md 的约定是两者在注释/措辞上可以不同，
-// 但 dispatcher 与 typed-v2 行为必须一致——哈希不同因此不是错误，只是"需要人核对"。
+// loaded 与 staging 的比较结论。Junction 布置应得到 identical；仍兼容旧的复制式安装，
+// 其注释/措辞差异只提示人工核对，不直接判定行为不一致。
 function compareBridges(loaded, staging) {
   if (loaded.status !== "found" || staging.status !== "found") {
     return {

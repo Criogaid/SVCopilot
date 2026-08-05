@@ -72,7 +72,7 @@ SV = {
 local realGetenv = os.getenv
 local bridgePath = realGetenv("SV_COPILOT_BRIDGE_PATH")
 if not bridgePath or bridgePath == "" then
-  bridgePath = devScript:gsub("DevSVCopilotFileBridge%.lua$", "StartSynthVCopilot.lua")
+  bridgePath = devScript:gsub("DevSVCopilotFileBridge%.lua$", "StartSynthVCopilotPipe.lua")
 end
 os.getenv = function(name)
   if name == "SV_COPILOT_DEV_DIR" then return dir end
