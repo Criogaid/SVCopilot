@@ -107,7 +107,24 @@ export class ArtifactStore {
     this.planLedger = planLedger;
     this.entries = new Map();
     this.expiredIds = new Map();
+    // payload 是 deep-frozen 且永不变更的，因此它的 UTF-8 序列化只算一次。
+    // 分页读取每页都重新 JSON.stringify 整个 payload 会让「读完一个 artifact」
+    // 变成 O(pages × payload)：8 MiB 上限下那是十几秒的阻塞 CPU。
+    //
+    // 代价是每个 artifact 多驻留一份序列化字节（约等于 totalBytes）。这是刻意的：
+    // 配额按 totalBytes 计的仍是解析后的对象，而这份 Buffer 与 entry 同生死，
+    // 因此常驻上限仍由 maxTotalBytes 约束在同一数量级，换掉的是二次方的 CPU。
+    this.payloadBytes = new Map();
     this.totalBytes = 0;
+  }
+
+  // 分页读取的唯一字节来源：seal 时算好，release/过期时随条目一起丢弃。
+  _payloadBytes(artifact) {
+    const cached = this.payloadBytes.get(artifact.id);
+    if (cached) return cached;
+    const encoded = Buffer.from(JSON.stringify(artifact.payload), "utf8");
+    this.payloadBytes.set(artifact.id, encoded);
+    return encoded;
   }
 
   seal({
@@ -141,8 +158,11 @@ export class ArtifactStore {
     const id = createArtifactId();
 
     const immutablePayload = deepFreeze(canonicalClone(payload));
-    const payloadText = JSON.stringify(immutablePayload);
-    const bytes = Buffer.byteLength(payloadText, "utf8");
+    // 序列化一次并留着：artifact 是不可变的，因此这串字节永远有效。翻页曾经每页都
+    // 重新 JSON.stringify 整个 payload，把「读完一个 8 MiB artifact」变成 O(页数×体积)
+    // 的阻塞 CPU（实测约 17 s）。这里存 Buffer 而不是 string：翻页只按字节切片。
+    const payloadBytes = Buffer.from(JSON.stringify(immutablePayload), "utf8");
+    const bytes = payloadBytes.length;
 
     if (bytes > this.quotas.maxArtifactBytes) {
       throw codedError(
@@ -184,6 +204,8 @@ export class ArtifactStore {
     });
 
     this.entries.set(id, artifact);
+    // 缓存与 entries 同生命周期，_delete 里一并删除，避免释放后仍占住这份字节。
+    this.payloadBytes.set(id, payloadBytes);
     this.totalBytes += bytes;
     // 只有 plan 需要执行态：其余 artifact（analysis/detail）是纯只读证据，重复读取
     // 没有副作用，登记它们只会浪费 ledger 配额。
@@ -229,7 +251,7 @@ export class ArtifactStore {
       expectedContentHash,
       sessionId,
     });
-    const payloadBytes = Buffer.from(JSON.stringify(artifact.payload), "utf8");
+    const payloadBytes = this._payloadBytes(artifact);
     const totalBytes = payloadBytes.length;
     const offset =
       cursor === "start"
@@ -289,7 +311,7 @@ export class ArtifactStore {
         "sealed plan artifacts are executable references and cannot be read as detail pages"
       );
     }
-    const payloadBytes = Buffer.from(JSON.stringify(artifact.payload), "utf8");
+    const payloadBytes = this._payloadBytes(artifact);
     if (offset >= payloadBytes.length) {
       throw codedError("ARTIFACT_OFFSET_OUT_OF_BOUNDS", "artifact offset is out of bounds");
     }
@@ -358,6 +380,9 @@ export class ArtifactStore {
     if (!artifact) return false;
     this.totalBytes -= artifact.totalBytes;
     this.entries.delete(id);
+    // 序列化缓存与 entry 同生命周期：释放/过期后立刻丢掉这份字节，
+    // 否则 totalBytes 归零了但内存仍被缓存占住。
+    this.payloadBytes.delete(id);
     return true;
   }
 

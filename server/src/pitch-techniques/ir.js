@@ -3,7 +3,7 @@ import {
   PITCH_DELTA_LIMIT_CENT,
   SEMANTIC_NUMERIC_QUANTA as referenceSemanticNumericQuanta,
   TECHNIQUE_IR_NUMERIC_FIELD_SCHEMA as referenceTechniqueIrNumericFieldSchema,
-} from "../../../docs/pitch-techniques/reference/model.mjs";
+} from "./model.js";
 
 export const TECHNIQUE_IR_SCHEMA_VERSION = 1;
 export const TECHNIQUE_IR_MODEL_VERSION = "pitch-techniques-v1";

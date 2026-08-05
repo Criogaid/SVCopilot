@@ -13,7 +13,7 @@ import {
   compileFirstPeakTransient,
   compilePitchDeltaTransition,
   timeVaryingVibrato,
-} from "../../docs/pitch-techniques/reference/model.mjs";
+} from "./pitch-techniques/model.js";
 import { normalizeTechniqueIr } from "./pitch-techniques/ir.js";
 import { composeTechniqueContributions } from "./pitch-techniques/compose.js";
 import { compilePitchDeltaMutationPlan } from "./pitch-techniques/pitch-delta-compiler.js";

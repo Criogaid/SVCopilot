@@ -32,7 +32,9 @@ const EXAMPLE = {
   // 已迁移到 fingerprint 身份的 operation 用组内 index 引用音符（§3.1）。
   noteIndex: 0,
   secondNoteIndex: 1,
-  planRef: "art_EXAMPLE",
+  // 形状必须与真实 artifactId 一致（`a_` + Base64URL）：指南示例会被 PLAN_REF_SCHEMA
+  // 校验，一个过不了自身 schema 的占位符只会教模型写出被拒绝的请求。
+  planRef: "a_EXAMPLEplanRef01",
   auditionId: "aud_EXAMPLE",
 };
 

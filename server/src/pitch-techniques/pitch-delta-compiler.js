@@ -5,7 +5,7 @@ import {
   compilePitchDeltaTransition as compileTransitionOracle,
   PITCH_DELTA_LIMIT_CENT,
   projectTransitionMandatoryBlickAnchors,
-} from "../../../docs/pitch-techniques/reference/model.mjs";
+} from "./model.js";
 import { assertNormalizedTechniqueIr } from "./ir.js";
 
 export const PITCH_DELTA_MAX_COMPILED_POINTS = 4_000;
@@ -86,7 +86,7 @@ export function compilePitchDeltaMutationPlan(input) {
 export {
   compilePitchDeltaTransition,
   projectTransitionMandatoryBlickAnchors,
-} from "../../../docs/pitch-techniques/reference/model.mjs";
+} from "./model.js";
 
 function normalizeComposition(composition, ir) {
   assertRecord(composition, "$/composition");

@@ -310,4 +310,85 @@ const sessionId = "sess_001";
   assert.strictEqual(short.join(""), legacy.join(""));
 }
 
+// 分页不得为每一页重新序列化整个 payload。以前每页都 JSON.stringify(payload)，
+// 读完一个 artifact 是 O(页数 × 体积)：8 MiB 上限下约 17 s 的阻塞 CPU。
+// 这里同时把关正确性（字节完全一致）与复杂度（序列化次数不随页数增长）。
+{
+  const store = new ArtifactStore();
+  const payload = { rows: Array.from({ length: 4000 }, (_, index) => ({ index, value: index * 1.5, label: `row-${index}` })) };
+  const artifact = store.seal({ kind: "detail", schemaVersion: "1", sessionId, payload });
+  assert.ok(artifact.totalBytes > 64 * 1024, "fixture must span many pages");
+
+  // seal 已经算好字节；翻页只切片，不再调用 JSON.stringify。
+  const originalStringify = JSON.stringify;
+  let stringifyCalls = 0;
+  JSON.stringify = function countingStringify(...args) {
+    stringifyCalls += 1;
+    return originalStringify.apply(this, args);
+  };
+  let fragments = [];
+  let pages = 0;
+  try {
+    let offset = 0;
+    do {
+      const result = store.readOffsetPage({ artifactId: artifact.id, sessionId, offset });
+      pages += 1;
+      fragments.push(result.page.text);
+      if (result.page.done) break;
+      offset = result.page.nextOffset;
+    } while (true);
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+
+  assert.ok(pages > 4, `fixture must page more than once, got ${pages}`);
+  assert.deepStrictEqual(JSON.parse(fragments.join("")), payload, "paged bytes must rebuild the payload exactly");
+  assert.strictEqual(
+    stringifyCalls,
+    0,
+    `paging must reuse the payload serialized at seal time; observed ${stringifyCalls} JSON.stringify calls across ${pages} pages`
+  );
+
+  // 游标翻页同样复用缓存。它仍会为每个 cursor token 序列化一个几十字节的小对象，
+  // 因此这里只禁止「整个 payload 规模的序列化」，而不是禁止一切 JSON.stringify。
+  const payloadTextBytes = artifact.totalBytes;
+  let cursorPages = 0;
+  let payloadSizedSerializations = 0;
+  JSON.stringify = function countingStringify(...args) {
+    const output = originalStringify.apply(this, args);
+    if (typeof output === "string" && output.length >= payloadTextBytes) {
+      payloadSizedSerializations += 1;
+    }
+    return output;
+  };
+  try {
+    let cursor = "start";
+    do {
+      const { page } = store.readPage({
+        artifactId: artifact.id,
+        expectedContentHash: artifact.contentHash,
+        sessionId,
+        cursor,
+        byteBudget: 8192,
+      });
+      cursorPages += 1;
+      cursor = page.cursor;
+    } while (cursor !== null);
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+  assert.ok(cursorPages > 4, `cursor paging fixture must span pages, got ${cursorPages}`);
+  assert.strictEqual(
+    payloadSizedSerializations,
+    0,
+    `cursor paging must reuse the sealed bytes; observed ${payloadSizedSerializations} full-payload serializations across ${cursorPages} pages`
+  );
+
+  // 缓存与 entry 同生命周期：释放后不得继续占住这份字节。
+  assert.strictEqual(store.payloadBytes.has(artifact.id), true);
+  store.release({ artifactId: artifact.id, sessionId });
+  assert.strictEqual(store.payloadBytes.has(artifact.id), false);
+  assert.strictEqual(store.totalBytes, 0);
+}
+
 console.log("artifact-store.test.mjs passed");

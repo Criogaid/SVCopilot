@@ -8,7 +8,7 @@ import { getStoredComputedPitch } from "./musical-range.js";
 import { MAX_CURVE_OPERATIONS_PER_TRANSACTION } from "./parameter-curve.js";
 import { unknownContextError } from "./snapshot.js";
 import { resolveMutationScope } from "./scope-source.js";
-import { PITCH_DELTA_LIMIT_CENT } from "../../docs/pitch-techniques/reference/model.mjs";
+import { PITCH_DELTA_LIMIT_CENT } from "./pitch-techniques/model.js";
 import {
   captureRemediation,
   createCapturedAutomationBaseline,

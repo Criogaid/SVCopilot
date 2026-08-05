@@ -12,7 +12,8 @@ import { resolvePipePaths } from "../server/src/transport-pipe.js";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const serverScript = path.resolve(testDir, "..", "server", "src", "index.js");
-const fixturesDir = path.resolve(testDir, "fixtures", "host-profiles");
+// 与生产一致：doctor 汇总的是服务自带的 host profile 目录。
+const fixturesDir = path.resolve(testDir, "..", "server", "host-profiles");
 
 // doctor 只能通过 sv_status facade 到达：facade 是唯一 surface。
 async function callDoctorEnvelope() {

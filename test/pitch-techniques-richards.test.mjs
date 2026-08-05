@@ -4,7 +4,7 @@ import { performance } from "node:perf_hooks";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { avaRichardsUnitAtInflection } from "../docs/pitch-techniques/reference/model.mjs";
+import { avaRichardsUnitAtInflection } from "../server/src/pitch-techniques/model.js";
 import {
   RICHARDS_MODEL_FAMILY,
   rawRichards,
@@ -34,7 +34,9 @@ test("Richards production module only depends on the concentrated reference mode
     new URL("../server/src/pitch-techniques/richards.js", import.meta.url),
   );
   const source = readFileSync(sourcePath, "utf8");
-  assert.match(source, /docs\/pitch-techniques\/reference\/model\.mjs/);
+  // 模型集中在 server/src/pitch-techniques/model.js（运行时代码，随 npm 包发布）。
+  assert.match(source, /from "\.\/model\.js"/);
+  assert.doesNotMatch(source, /docs\//);
   assert.doesNotMatch(source, /artifact-store|host-|mcp|process\.env|session|store/i);
   assert.deepEqual(RICHARDS_MODEL_FAMILY, {
     asymptotic: "richards_asymptotic",

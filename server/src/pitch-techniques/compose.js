@@ -1,5 +1,5 @@
 import { contentHash } from "../canonical-json.js";
-import { PITCH_DELTA_LIMIT_CENT } from "../../../docs/pitch-techniques/reference/model.mjs";
+import { PITCH_DELTA_LIMIT_CENT } from "./model.js";
 import { assertNormalizedTechniqueIr } from "./ir.js";
 
 export const TECHNIQUE_COMPOSITION_MAX_SAMPLES = 10_000;

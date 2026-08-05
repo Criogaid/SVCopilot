@@ -235,19 +235,19 @@ export function collectDoctorReport({
 /**
  * 采集已提交 host profile 的摘要（只读，不采集新证据）。
  *
- * @param {string} fixturesDir
+ * @param {string} profileDir 运行时 host profile 目录（服务自带，随包分发）。
  * @returns {object[]}
  */
-export function summarizeHostProfiles(fixturesDir) {
+export function summarizeHostProfiles(profileDir) {
   let names;
   try {
-    names = fs.readdirSync(fixturesDir).filter((name) => name.endsWith(".json"));
+    names = fs.readdirSync(profileDir).filter((name) => name.endsWith(".json"));
   } catch {
     return [];
   }
   return names.sort().map((name) => {
     try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(fixturesDir, name), "utf8"));
+      const parsed = JSON.parse(fs.readFileSync(path.join(profileDir, name), "utf8"));
       const semantics = parsed.semantics ?? {};
       const statusCounts = {};
       for (const entry of Object.values(semantics)) {

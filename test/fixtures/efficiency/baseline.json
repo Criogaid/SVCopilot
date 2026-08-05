@@ -1,11 +1,11 @@
 {
   "fixtureVersion": "1",
-  "generatedAt": "2026-08-04T17:04:02.748Z",
+  "generatedAt": "2026-08-05T00:21:33.355Z",
   "summary": {
     "servedToolsListBytes": 5015,
-    "internalHandlerInventoryBytes": 114784,
+    "internalHandlerInventoryBytes": 115222,
     "facadeReductionPercent": 95.6,
-    "workflowModelVisibleBytes": 31746,
+    "workflowModelVisibleBytes": 31827,
     "artifactRequestReductionPercent": 61.3,
     "representativeResultBytes": 20054
   },
@@ -42,7 +42,7 @@
           "edit_phrase"
         ],
         "requestBytes": 55,
-        "responseBytes": 11321,
+        "responseBytes": 11402,
         "returned": 1,
         "deferred": [
           "edit_phrase"
@@ -77,18 +77,18 @@
   },
   "operationSchemas": {
     "label": "internal-handler-inventory",
-    "prettyBytes": 195107,
-    "minifiedBytes": 114784,
-    "overheadPercent": 69.98,
+    "prettyBytes": 195593,
+    "minifiedBytes": 115222,
+    "overheadPercent": 69.75,
     "handlerCount": 44,
     "operationCount": 44,
-    "totalSchemaBytes": 75260,
+    "totalSchemaBytes": 75698,
     "schemasWithDefs": 7,
     "largestOperations": [
       {
         "operation": "patch_parameter_curves",
         "facade": "sv_edit",
-        "schemaBytes": 9521,
+        "schemaBytes": 9602,
         "descriptionBytes": 1303,
         "deduped": true
       },
@@ -102,7 +102,7 @@
       {
         "operation": "patch_pitch_controls",
         "facade": "sv_edit",
-        "schemaBytes": 6350,
+        "schemaBytes": 6431,
         "descriptionBytes": 1219,
         "deduped": true
       },
@@ -123,7 +123,7 @@
       {
         "operation": "patch_notes",
         "facade": "sv_edit",
-        "schemaBytes": 3430,
+        "schemaBytes": 3511,
         "descriptionBytes": 787,
         "deduped": false
       },
@@ -137,7 +137,7 @@
       {
         "operation": "restructure_notes",
         "facade": "sv_edit",
-        "schemaBytes": 3067,
+        "schemaBytes": 3148,
         "descriptionBytes": 810,
         "deduped": false
       },
@@ -214,8 +214,8 @@
     "resourceReads": 1,
     "describeCalls": 3,
     "requestBytes": 116,
-    "responseBytes": 26731,
-    "modelVisibleBytes": 31746,
+    "responseBytes": 26812,
+    "modelVisibleBytes": 31827,
     "wallTimeMs": null,
     "hostCalls": 0,
     "bridgeRoundTrips": 0,

@@ -123,14 +123,13 @@ export class PitchTechniqueAnalysisService {
 
     let canonical;
     if (loaded.melodicNotes.length === 0) {
-      canonical = noMelodicCanonical(loaded, input);
+      canonical = noMelodicCanonical(loaded);
     } else {
       const grid = await timer.measure("gridMs", async () => buildGrid(loaded));
       canonical = await timer.measure("fitMs", async () =>
         analyzeGrid({
           loaded,
           grid,
-          input,
           fitRichards: this.fitRichards,
           revalidateFit: this.revalidateFit,
           warnings,
@@ -149,7 +148,13 @@ export class PitchTechniqueAnalysisService {
           schemaVersion: PITCH_TECHNIQUE_ANALYSIS_VERSION,
           analysisHash,
           source: publicSource(loaded),
-          request: input,
+          // 只登记真正影响分析的请求字段。maxCandidates 纯粹是紧凑响应的投影宽度，
+          // 写进封存证据会让同一份分析因请求不同而产生不同的 artifact 字节与 hash。
+          // occurrence 可缺省，必须整键省略而不是写入 undefined（canonical JSON 拒绝它）。
+          request: {
+            contextId: input.contextId,
+            ...(input.occurrence === undefined ? {} : { occurrence: input.occurrence }),
+          },
           ...canonical,
         },
       })
@@ -370,7 +375,7 @@ function buildGrid(loaded) {
   return grid;
 }
 
-function noMelodicCanonical(loaded, input) {
+function noMelodicCanonical(loaded) {
   return {
     analysisStatus: "no_technique_candidate",
     reasonCode: "NO_TECHNIQUE_CANDIDATE",
@@ -383,9 +388,7 @@ function noMelodicCanonical(loaded, input) {
     },
     summary: {
       candidateCount: 0,
-      returnedCandidateCount: 0,
       candidateWindows: { considered: 0, total: 0, truncated: false },
-      requestMaxCandidates: input.maxCandidates,
     },
     candidates: [],
     rejected: [],
@@ -396,10 +399,11 @@ function noMelodicCanonical(loaded, input) {
 
 // ---------- 前向分解 ----------
 
+// 刻意不接收 request/input：分析范围完全由乐句证据与固定的 maxBoundaryWindows 决定。
+// 少一个参数就少一条把投影宽度重新泄漏回分析的路径。
 async function analyzeGrid({
   loaded,
   grid,
-  input,
   fitRichards,
   revalidateFit,
   warnings,
@@ -462,10 +466,10 @@ async function analyzeGrid({
     Number.isFinite(value) ? value - vibrato.contributions[index] : null
   ));
 
-  const boundaryLimit = Math.min(
-    PITCH_TECHNIQUE_ANALYSIS_DEFAULTS.maxBoundaryWindows,
-    Math.max(1, input.maxCandidates)
-  );
+  // 分析范围与 maxCandidates 解耦：maxCandidates 只裁剪紧凑响应的投影条数，绝不改变
+  // 实际检查了多少个音符边界。否则调用方为省字节调小它，会静默缩小音乐覆盖范围，
+  // 而封存 Artifact 里也同样缺少这些技法——那是"读少了"伪装成"没有技法"。
+  const boundaryLimit = PITCH_TECHNIQUE_ANALYSIS_DEFAULTS.maxBoundaryWindows;
   const transitionResult = await analyzeTransitionCandidates({
     notes: loaded.melodicNotes,
     grid,
@@ -552,11 +556,11 @@ async function analyzeGrid({
       allCandidates.length > 0 ? "candidates_found" : "no_technique_candidate",
     ...(allCandidates.length === 0 ? { reasonCode: "NO_TECHNIQUE_CANDIDATE" } : {}),
     sampling: publicSampling(grid, baseline, finiteFrames, coverage),
+    // canonical 分析不含任何投影字段：candidateCount 与 candidateWindows 描述真实
+    // 分析范围，因此 analysisHash 只随乐句证据变化，不随 maxCandidates 变化。
     summary: {
       candidateCount: allCandidates.length,
-      returnedCandidateCount: Math.min(allCandidates.length, input.maxCandidates),
       candidateWindows,
-      requestMaxCandidates: input.maxCandidates,
       jointModel: summarizeJointModel(reconstruction),
     },
     candidates: allCandidates,
@@ -1453,6 +1457,9 @@ function seedFromHash(hash) {
 
 // ---------- 投影与通用辅助 ----------
 
+// maxCandidates 只在这里生效：它裁剪紧凑响应，不参与 canonical 分析或 analysisHash。
+// candidateCount / candidateWindows 始终报告完整的分析范围，因此"响应里少了几条"
+// 与"这段乐句没有技法"在语义上不会混淆。
 function compactAnalysis(canonical, maxCandidates) {
   const candidates = canonical.candidates.slice(0, maxCandidates).map(publicCandidate);
   const rejectedSummary = summarizeRejected(canonical.rejected);
@@ -1463,6 +1470,7 @@ function compactAnalysis(canonical, maxCandidates) {
       candidateCount: canonical.candidates.length,
       returnedCandidateCount: candidates.length,
       candidatesTruncated: canonical.candidates.length > candidates.length,
+      requestMaxCandidates: maxCandidates,
       analysisStatus: canonical.analysisStatus,
       ...(canonical.reasonCode ? { reasonCode: canonical.reasonCode } : {}),
     },

@@ -18,7 +18,7 @@ import {
 import { createPitchHostModel } from "./helpers/pitch-host.mjs";
 
 const FIXTURE_URL = new URL(
-  "./fixtures/host-profiles/synthv-2.2.1-win32-v2.json",
+  "../server/host-profiles/synthv-2.2.1-win32-v2.json",
   import.meta.url
 );
 const T04_EVIDENCE_URL = new URL(

@@ -44,6 +44,7 @@ const CALLS = [
     "compare_computed_pitch",
     { mode: "compare_to_target", contextId: MISSING_CONTEXT },
   ],
+  ["sv_read", "analyze_pitch_techniques", { contextId: MISSING_CONTEXT }],
   ["sv_plan", "plan_expression", { contextId: MISSING_CONTEXT, intent: { genre: "jpop" } }],
   [
     "sv_plan",
@@ -87,6 +88,7 @@ const CALLS = [
     "patch_notes",
     { contextId: MISSING_CONTEXT, patches: [{ noteId: "x", set: { lyrics: "a" } }] },
   ],
+  ["sv_artifact", "read", { artifactId: "a_missing0000000" }],
   ["sv_artifact", "release", { artifactId: "a_missing0000000" }],
   // 刻意不包含需要活宿主的调用（sv_raw、ping、set_selection）：没有宿主时它们只能
   // 等满 10 秒调用超时，而它们贡献的是同一个 encodeToolError 错误信封（已由

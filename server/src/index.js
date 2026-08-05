@@ -102,12 +102,13 @@ import { loadRuntimeHostProfiles, selectRuntimeHostProfile } from "./runtime-hos
 // 避免升级时漏改其中一处。
 export const INTERFACE_VERSION = "0.10.0";
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+// 运行时 host profile 目录属于服务自身（随 npm 包一起分发），不再借用 test fixtures：
+// 能力闸门是生产数据，测试目录既不会被打包，也不该决定生产可用能力。
+const HOST_PROFILE_DIR = path.resolve(moduleDir, "../host-profiles");
 
 const bridge = new PipeRelay();
 const hostSession = new HostSession(bridge);
-const runtimeHostProfiles = loadRuntimeHostProfiles(
-  path.resolve(moduleDir, "../../test/fixtures/host-profiles")
-);
+const runtimeHostProfiles = loadRuntimeHostProfiles(HOST_PROFILE_DIR);
 // ArtifactStore 与 SnapshotStore 分离：artifact 是只读数据，可跨 context 过期后继续读取。
 // 使用进程级 session id 让同一 server 实例内的 tool/resource 共享 artifact。
 const serverSessionId = `sess_${randomUUID()}`;
@@ -639,10 +640,15 @@ const HOST_INTERPOLATION_POSTCONDITION_SCHEMA = {
 // kind、实例归属与 sealed targetTool 都不依赖调用方回传任何东西，因此以前那些
 // contentHash / resourceUri / firstPageUri 字段既不构成校验，也只是让模型每次
 // 交接都多复制一遍。
+// pattern 与 createArtifactId 的输出一致（`a_` + Base64URL）。它不只是省一次往返：
+// 有了它，任何写错格式的 planRef —— 包括指南里的示例 —— 都会在 schema 层被拒绝，
+// 而不是先通过校验、再在 ArtifactStore 里查不到。
 const PLAN_REF_SCHEMA = {
   type: "string",
-  minLength: 1,
-  description: "The artifactId string from a planner's apply.planRef.",
+  pattern: "^a_[A-Za-z0-9_-]+$",
+  minLength: 3,
+  description:
+    "The artifactId string from a planner's apply.planRef (an `a_` prefix followed by Base64URL characters).",
 };
 // 每个 mutation 请求都必须显式说明自己要不要写（§10.6 / §13.4 规则 5）。
 //
@@ -1388,7 +1394,7 @@ export const TOOLS = [
           maximum: 32,
           default: 12,
           description:
-            "Maximum compact candidate items. Dense candidates, rejected fits, and solver traces remain in the Artifact.",
+            "Maximum compact candidate items. Response projection only: it never changes how much of the phrase is analyzed. The full candidate set, dense reconstruction, rejected fits, and solver traces always remain in the Artifact.",
         },
       },
       required: ["contextId"],
@@ -3866,9 +3872,7 @@ function doctorReport() {
       // 生效与否可观测，而不是只能看条数。
       snapshotContexts: snapshotService.store.stats(),
     },
-    hostProfiles: summarizeHostProfiles(
-      path.resolve(moduleDir, "../../test/fixtures/host-profiles")
-    ),
+    hostProfiles: summarizeHostProfiles(HOST_PROFILE_DIR),
     runtimeHostProfile: summarizeRuntimeHostProfile(profile, host),
   });
 }

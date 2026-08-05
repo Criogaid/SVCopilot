@@ -4,7 +4,7 @@ import {
   secondOrderImpulse as referenceSecondOrderImpulse,
   secondOrderImpulseDerivative as referenceSecondOrderImpulseDerivative,
   TRANSIENT_TAPER_RATIO as referenceTransientTaperRatio,
-} from "../../../docs/pitch-techniques/reference/model.mjs";
+} from "./model.js";
 
 export const TRANSIENT_TAPER_RATIO = referenceTransientTaperRatio;
 

@@ -6,6 +6,7 @@ import { ArtifactStore } from "../server/src/artifact-store.js";
 import { encodeToolError, encodeToolResult } from "../server/src/mcp-result-encoder.js";
 import { PitchTechniqueAnalysisService } from "../server/src/pitch-technique-analysis.js";
 import { fitRichardsSegment } from "../server/src/pitch-techniques/fit-worker.js";
+import { normalizedRichardsTransition } from "../server/src/pitch-techniques/model.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
 import {
   ANALYSIS_REFERENCE_TIMEBASE,
@@ -336,6 +337,97 @@ test("T17 is deterministic, stores dense solver evidence in Artifact, and keeps 
   assert.ok(page.page.cursor);
   const encoded = encodeToolResult(first);
   assert.ok(Buffer.byteLength(JSON.stringify(encoded.structuredContent), "utf8") < 16 * 1024);
+});
+
+// maxCandidates 曾同时充当 boundaryLimit：调小它会静默缩小实际检查的音符边界数，
+// 于是"为省字节少读几条"变成了"这段乐句没有那些技法"，且封存证据里也一并缺失。
+// 这条门禁固定同一段乐句，只改投影宽度，要求分析结论逐字节一致。
+test("maxCandidates only projects the response and never narrows analyzed coverage", async () => {
+  // 把 T17 参考 transition 的形状在多个边界上平铺：每个边界都是一个真实可拟合的
+  // Richards 过渡，因此 considered 会明显大于 1，投影宽度的影响才可观测。
+  const noteCount = 6;
+  const noteSeconds = 1;
+  const halfWidthSeconds = 0.25;
+  const sampleRateHz = ANALYSIS_REFERENCE_TIMEBASE.sampleRateHz;
+  const notes = Array.from({ length: noteCount }, (_, index) => ({
+    indexInGroup: index,
+    onsetSeconds: index * noteSeconds,
+    durationSeconds: noteSeconds,
+    pitch: index % 2 === 0 ? 60 : 62,
+  }));
+  const pitchAt = (index) => (index % 2 === 0 ? 60 : 62);
+  const frameCount = Math.round(noteCount * noteSeconds * sampleRateHz) + 1;
+  const values = Array.from({ length: frameCount }, (_, frameIndex) => {
+    const seconds = frameIndex / sampleRateHz;
+    const boundaryIndex = Math.round(seconds / noteSeconds);
+    const boundarySeconds = boundaryIndex * noteSeconds;
+    const fromSeconds = boundarySeconds - halfWidthSeconds;
+    const toSeconds = boundarySeconds + halfWidthSeconds;
+    const noteIndex = Math.min(noteCount - 1, Math.floor(seconds / noteSeconds));
+    if (
+      boundaryIndex <= 0
+      || boundaryIndex >= noteCount
+      || seconds <= fromSeconds
+      || seconds >= toSeconds
+    ) {
+      return pitchAt(noteIndex);
+    }
+    return normalizedRichardsTransition(
+      seconds - fromSeconds,
+      pitchAt(boundaryIndex - 1),
+      pitchAt(boundaryIndex),
+      {
+        spanSeconds: toSeconds - fromSeconds,
+        inflectionSeconds: 0.275,
+        growthPerSecond: 14,
+        asymmetryB: 1.7,
+      },
+    );
+  });
+
+  // 同一个 fixture 连续分析两次：除 maxCandidates 外所有输入完全相同。
+  const fixture = createFixture(null, { notes, values });
+  const narrow = await fixture.service.analyze({
+    contextId: fixture.stored.contextId,
+    maxCandidates: 1,
+  });
+  const wide = await fixture.service.analyze({
+    contextId: fixture.stored.contextId,
+    maxCandidates: 32,
+  });
+
+  // 1) 分析范围与结论完全不受投影宽度影响。
+  assert.equal(narrow.data.analysisHash, wide.data.analysisHash);
+  assert.deepEqual(
+    narrow.data.summary.candidateWindows,
+    wide.data.summary.candidateWindows,
+  );
+  assert.equal(narrow.data.summary.candidateCount, wide.data.summary.candidateCount);
+  assert.ok(
+    wide.data.summary.candidateWindows.considered > 1,
+    "fixture must exercise more than one boundary window",
+  );
+
+  // 2) 只有投影条数不同，且窄响应必须如实声明自己被截断。
+  assert.equal(narrow.data.candidates.items.length, 1);
+  assert.equal(narrow.data.summary.candidatesTruncated, true);
+  assert.equal(narrow.data.summary.requestMaxCandidates, 1);
+  assert.equal(wide.data.summary.requestMaxCandidates, 32);
+  assert.ok(wide.data.candidates.items.length > narrow.data.candidates.items.length);
+
+  // 3) 封存 Artifact 逐字节相同，且始终保留被响应截断掉的完整候选集合。
+  assert.equal(narrow.data.artifactRef.contentHash, wide.data.artifactRef.contentHash);
+  const sealed = fixture.artifactStore.resolve({
+    artifactId: narrow.data.artifactRef.artifactId,
+    expectedContentHash: narrow.data.artifactRef.contentHash,
+    sessionId: SESSION_ID,
+  });
+  assert.equal(sealed.payload.candidates.length, wide.data.summary.candidateCount);
+  assert.ok(sealed.payload.candidates.length > narrow.data.candidates.items.length);
+  // 封存证据不得携带任何投影字段，否则 analysisHash 又会随请求漂移。
+  assert.equal("requestMaxCandidates" in sealed.payload.summary, false);
+  assert.equal("returnedCandidateCount" in sealed.payload.summary, false);
+  assert.equal("maxCandidates" in sealed.payload.request, false);
 });
 
 test("T17 has no host session, setter, or Undo dependency", async () => {

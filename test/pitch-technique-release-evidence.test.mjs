@@ -24,7 +24,7 @@ test("T20 release evidence is reproducible, scoped, and capability-honest", () =
   const release = readJson("docs/pitch-techniques/evidence/T20-release-evidence.json");
   const benchmark = readJson("docs/pitch-techniques/evidence/T16-fit-worker-benchmark.json");
   const live = readJson("docs/pitch-techniques/evidence/T18-live-host-rc.json");
-  const profile = readJson("test/fixtures/host-profiles/synthv-2.2.1-win32-v2.json");
+  const profile = readJson("server/host-profiles/synthv-2.2.1-win32-v2.json");
   const packageJson = readJson("server/package.json");
   const packageLock = readJson("server/package-lock.json");
 
@@ -49,7 +49,7 @@ test("T20 release evidence is reproducible, scoped, and capability-honest", () =
   );
   assert.equal(
     release.reproducibleArtifacts.hostProfile.fileSha256,
-    fileSha256("test/fixtures/host-profiles/synthv-2.2.1-win32-v2.json"),
+    fileSha256("server/host-profiles/synthv-2.2.1-win32-v2.json"),
   );
   assert.equal(
     release.dependencyProvenance.packageLockSha256,

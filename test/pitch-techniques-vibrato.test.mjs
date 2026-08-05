@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   integratedLinearFrequencyPhase as referenceIntegratedLinearFrequencyPhase,
   timeVaryingVibrato as referenceTimeVaryingVibrato,
-} from "../docs/pitch-techniques/reference/model.mjs";
+} from "../server/src/pitch-techniques/model.js";
 import {
   integratedLinearFrequencyPhase,
   timeVaryingVibrato,
@@ -34,7 +34,9 @@ test("vibrato production module only depends on the concentrated reference model
     new URL("../server/src/pitch-techniques/vibrato.js", import.meta.url),
   );
   const source = readFileSync(sourcePath, "utf8");
-  assert.match(source, /docs\/pitch-techniques\/reference\/model\.mjs/);
+  // 集中模型现在与 planner 同包（docs/ 不进 npm 包），因此这里断言的是包内相对路径。
+  assert.match(source, /from "\.\/model\.js"/);
+  assert.doesNotMatch(source, /\.\.\/\.\.\/\.\.\/docs\//);
   assert.doesNotMatch(source, /artifact-store|host-|mcp|process\.env|session|store|vibratoEnv/i);
 });
 

@@ -8,7 +8,7 @@ import {
   secondOrderImpulse,
   solveOpenLoopCorrection,
   timeVaryingVibrato,
-} from "../docs/pitch-techniques/reference/model.mjs";
+} from "../server/src/pitch-techniques/model.js";
 
 const FIXTURE_URL = new URL(
   "../test/fixtures/pitch-techniques/synthetic-corpus.v1.json",

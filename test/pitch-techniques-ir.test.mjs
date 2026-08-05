@@ -9,7 +9,7 @@ import {
   canonicalizeTechniques as referenceCanonicalizeTechniques,
   SEMANTIC_NUMERIC_QUANTA as referenceSemanticNumericQuanta,
   TECHNIQUE_IR_NUMERIC_FIELD_SCHEMA as referenceTechniqueIrNumericFieldSchema,
-} from "../docs/pitch-techniques/reference/model.mjs";
+} from "../server/src/pitch-techniques/model.js";
 import {
   assertNormalizedTechniqueIr,
   canonicalizeTechniques,
@@ -121,7 +121,9 @@ test("TechniqueIR production module stays pure and reuses the concentrated numer
     new URL("../server/src/pitch-techniques/ir.js", import.meta.url),
   );
   const source = readFileSync(sourcePath, "utf8");
-  assert.match(source, /docs\/pitch-techniques\/reference\/model\.mjs/);
+  // 集中模型现在与 planner 同包（docs/ 不进 npm 包），因此这里断言的是包内相对路径。
+  assert.match(source, /from "\.\/model\.js"/);
+  assert.doesNotMatch(source, /\.\.\/\.\.\/\.\.\/docs\//);
   assert.doesNotMatch(source, /artifact-store|host-|mcp|process\.env|session|store/i);
   assert.strictEqual(TECHNIQUE_IR_NUMERIC_FIELD_SCHEMA, referenceTechniqueIrNumericFieldSchema);
   assert.strictEqual(SEMANTIC_NUMERIC_QUANTA, referenceSemanticNumericQuanta);

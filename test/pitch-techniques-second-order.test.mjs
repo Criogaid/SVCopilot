@@ -9,7 +9,7 @@ import {
   secondOrderImpulse as referenceSecondOrderImpulse,
   secondOrderImpulseDerivative as referenceSecondOrderImpulseDerivative,
   TRANSIENT_TAPER_RATIO as referenceTransientTaperRatio,
-} from "../docs/pitch-techniques/reference/model.mjs";
+} from "../server/src/pitch-techniques/model.js";
 import {
   firstPeakAngularFactor,
   secondOrderImpulse,
@@ -31,7 +31,9 @@ test("second-order production module only depends on the concentrated reference 
     new URL("../server/src/pitch-techniques/second-order.js", import.meta.url),
   );
   const source = readFileSync(sourcePath, "utf8");
-  assert.match(source, /docs\/pitch-techniques\/reference\/model\.mjs/);
+  // 模型集中在 server/src/pitch-techniques/model.js（运行时代码，随 npm 包发布）。
+  assert.match(source, /from "\.\/model\.js"/);
+  assert.doesNotMatch(source, /docs\//);
   assert.doesNotMatch(source, /artifact-store|host-|mcp|process\.env|session|store/i);
   assert.doesNotMatch(source, /naturalHz|\bgain\b/);
   assert.equal(TRANSIENT_TAPER_RATIO, referenceTransientTaperRatio);

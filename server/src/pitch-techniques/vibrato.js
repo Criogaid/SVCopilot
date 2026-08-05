@@ -1,7 +1,7 @@
 import {
   integratedLinearFrequencyPhase as referenceIntegratedLinearFrequencyPhase,
   timeVaryingVibrato as referenceTimeVaryingVibrato,
-} from "../../../docs/pitch-techniques/reference/model.mjs";
+} from "./model.js";
 
 export function integratedLinearFrequencyPhase(localSeconds, parameters) {
   return referenceIntegratedLinearFrequencyPhase(localSeconds, parameters);

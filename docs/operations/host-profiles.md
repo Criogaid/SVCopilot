@@ -121,6 +121,6 @@ remove 返回与附着语义、numeric storage、Automation 边界包含性、te
 并经过补偿、读回和去标识；不能把 `SVLiveProbe` 的 `readOnly:true` 偷换成临时写入。
 
 完整状态和 evidence ID 以
-[`synthv-2.2.1-win32-v2.json`](../../test/fixtures/host-profiles/synthv-2.2.1-win32-v2.json)
+[`synthv-2.2.1-win32-v2.json`](../../server/host-profiles/synthv-2.2.1-win32-v2.json)
 为准。T18 的事务、Undo、回滚与资源清理属于发布验收证据，不会把 profile 中未直接观测的语义
 自动晋升为 `confirmed`。

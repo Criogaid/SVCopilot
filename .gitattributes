@@ -1,0 +1,5 @@
+# 这些文件的 SHA-256 被写进了发布证据（T18/T20）并由 npm test 校验。
+# 一旦被检出成 CRLF，哈希就会与证据不符——那是行尾转换造成的假失败，
+# 而不是内容真的变了。因此固定用 LF 检出，与仓库里存储的字节一致。
+server/host-profiles/*.json text eol=lf
+docs/pitch-techniques/evidence/*.json text eol=lf

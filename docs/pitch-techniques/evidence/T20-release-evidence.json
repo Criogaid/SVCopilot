@@ -96,7 +96,7 @@
       ]
     },
     "hostProfile": {
-      "path": "test/fixtures/host-profiles/synthv-2.2.1-win32-v2.json",
+      "path": "server/host-profiles/synthv-2.2.1-win32-v2.json",
       "fileSha256": "sha256:bd6e4692bd701c951905e7fb16e45f84c89eaa40ac9f165c00573a380a2a2fe5"
     }
   },

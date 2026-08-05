@@ -10,7 +10,7 @@ import {
   solveBandedOpenLoopCorrection,
 } from "../server/src/pitch-correction-plan.js";
 import { SnapshotStore } from "../server/src/snapshot.js";
-import { solveOpenLoopCorrection } from "../docs/pitch-techniques/reference/model.mjs";
+import { solveOpenLoopCorrection } from "../server/src/pitch-techniques/model.js";
 import { createPitchHostModel } from "./helpers/pitch-host.mjs";
 
 const Q = 705_600_000;

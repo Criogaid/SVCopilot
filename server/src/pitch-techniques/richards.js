@@ -3,7 +3,7 @@ import {
   avaRichardsUnitAtInflection,
   normalizedRichardsSegment,
   normalizedRichardsTransition,
-} from "../../../docs/pitch-techniques/reference/model.mjs";
+} from "./model.js";
 
 export const RICHARDS_MODEL_FAMILY = Object.freeze({
   asymptotic: "richards_asymptotic",
