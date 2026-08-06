@@ -6,6 +6,8 @@ import {
 import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 import { resolvePlanReference, settlePlanLedger } from "./plan-reference.js";
 import { dryRunFromAction } from "./mutation-action.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // 结构操作按调用方顺序逐个执行；每步都在执行时读取活动 index，避免删除导致的漂移。
 // MAX_OPERATIONS 导出供 harmony 规划器对齐单次可提交批量上限。
@@ -826,14 +828,4 @@ function clampInteger(value, minimum, maximum, fallback) {
     throw codedError("INVALID_ARGUMENTS", `integer must be between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -1,3 +1,4 @@
+import { isRecord } from "./value-shape.js";
 // inputSchema 的 $defs 去重。
 //
 // 曲线/音符/范围类工具的 schema 里，同一个共享片段（CURVE_RANGE_SCHEMA、
@@ -51,7 +52,7 @@ const SCHEMA_MAP_KEYS = new Set([
  * @returns {object}
  */
 export function dedupeSchema(schema) {
-  if (!isPlainObject(schema)) return schema;
+  if (!isRecord(schema)) return schema;
 
   const counts = new Map();
   countSchemaPositions(schema, counts);
@@ -77,7 +78,7 @@ export function dedupeSchema(schema) {
 // 只在 schema 位置计数。非 schema 位置（default/const/enum 等）整棵跳过，
 // 因为那里的对象是数据而不是约束。
 function countSchemaPositions(node, counts) {
-  if (!isPlainObject(node)) return;
+  if (!isRecord(node)) return;
   counts.set(node, (counts.get(node) ?? 0) + 1);
   for (const [key, value] of Object.entries(node)) {
     if (SCHEMA_KEYS.has(key)) {
@@ -86,14 +87,14 @@ function countSchemaPositions(node, counts) {
       else countSchemaPositions(value, counts);
     } else if (SCHEMA_LIST_KEYS.has(key) && Array.isArray(value)) {
       for (const item of value) countSchemaPositions(item, counts);
-    } else if (SCHEMA_MAP_KEYS.has(key) && isPlainObject(value)) {
+    } else if (SCHEMA_MAP_KEYS.has(key) && isRecord(value)) {
       for (const entry of Object.values(value)) countSchemaPositions(entry, counts);
     }
   }
 }
 
 function rewriteSchema(node, names, isRoot = false) {
-  if (!isPlainObject(node)) return node;
+  if (!isRecord(node)) return node;
   if (!isRoot && names.has(node)) return { $ref: `#/$defs/${names.get(node)}` };
   const out = {};
   for (const [key, value] of Object.entries(node)) {
@@ -103,7 +104,7 @@ function rewriteSchema(node, names, isRoot = false) {
         : rewriteSchema(value, names);
     } else if (SCHEMA_LIST_KEYS.has(key) && Array.isArray(value)) {
       out[key] = value.map((item) => rewriteSchema(item, names));
-    } else if (SCHEMA_MAP_KEYS.has(key) && isPlainObject(value)) {
+    } else if (SCHEMA_MAP_KEYS.has(key) && isRecord(value)) {
       out[key] = Object.fromEntries(
         Object.entries(value).map(([name, entry]) => [name, rewriteSchema(entry, names)])
       );
@@ -117,8 +118,4 @@ function rewriteSchema(node, names, isRoot = false) {
 
 function byteLength(value) {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -5,6 +5,8 @@ import {
 } from "./api-catalog.js";
 import { ExecutionCoordinator } from "./execution-coordinator.js";
 import { decodeWireValue, stampHandleEpoch } from "./wire-codec.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 const FATAL_VALIDATION_CODES = new Set(["INVALID_ARGUMENTS", "ARGUMENT_MISMATCH"]);
 const ROOT_HANDLE_TYPES = Object.freeze({
@@ -287,16 +289,6 @@ export function isReadOnlyMethod(method) {
     /^(blick|quarter|seconds|pitch|freq)/.test(method) ||
     ["T", "blackKey", "snap", "t2x", "v2y", "x2t", "y2v"].includes(method)
   );
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function classifyHostError(error) {

@@ -2,6 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 
 import { isReadOnlyMethod } from "./host-session.js";
 import { collectHandleRefs } from "./wire-codec.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 const STEP_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const MAX_STEPS = 128;
@@ -616,14 +618,4 @@ function summarizeObserved(value) {
 
 function escapePointerSegment(value) {
   return value.replace(/~/g, "~0").replace(/\//g, "~1");
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

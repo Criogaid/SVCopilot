@@ -11,6 +11,8 @@ import {
   summarizeExcludedVocalEvents,
 } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // sv_compare_computed_pitch：客观演唱分析（音准 / 颤音 / 转换 / 异常区段）。
 //
@@ -1495,14 +1497,4 @@ function assertKnownKeys(value, allowed, label) {
 
 function clamp01(value) {
   return Math.min(1, Math.max(0, value));
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

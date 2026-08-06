@@ -311,7 +311,7 @@ function buildPlanArtifact(options) {
         sessionId,
         artifactStore: store,
       }),
-    /PLAN_TARGET_MISMATCH/
+    { code: "PLAN_TARGET_MISMATCH" }
   );
 }
 
@@ -343,7 +343,7 @@ function buildPlanArtifact(options) {
           sessionId,
           artifactStore: store,
         }),
-      /INVALID_ARGUMENTS/,
+      { code: "INVALID_ARGUMENTS" },
       JSON.stringify(badRef ?? null)
     );
   }
@@ -361,7 +361,10 @@ function buildPlanArtifact(options) {
         sessionId,
         artifactStore: store,
       }),
-    (error) => error.code === "UNKNOWN_ARTIFACT" || /ARTIFACT/.test(error.message)
+    // 判据是结构化的 code 而不是 message 散文：只要它属于 artifact 生命周期
+    // （UNKNOWN_ARTIFACT / ARTIFACT_NOT_FOUND / ARTIFACT_EXPIRED）就算通过，
+    // 被当成 INVALID_ARGUMENTS 这类形状问题才是回归。
+    (error) => /ARTIFACT/.test(error.code)
   );
 }
 

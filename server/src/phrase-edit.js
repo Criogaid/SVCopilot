@@ -16,6 +16,8 @@ import { createHostScope } from "./snapshot.js";
 import { resolveMutationScope } from "./scope-source.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 import { dryRunFromAction } from "./mutation-action.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 const MAX_CURVES = 16;
 const MAX_NOTE_PATCHES = 200;
@@ -1893,15 +1895,4 @@ function clampInteger(value, minimum, maximum, fallback) {
     throw codedError("INVALID_ARGUMENTS", `integer must be between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function codedError(code, message, details = undefined) {
-  const error = new Error(message);
-  error.code = code;
-  if (details !== undefined) error.details = details;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

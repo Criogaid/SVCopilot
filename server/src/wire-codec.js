@@ -1,3 +1,4 @@
+import { isRecord } from "./value-shape.js";
 const MAX_ARRAY_LENGTH = 1_000_000;
 // 单帧 ≤ 64 KiB，但 length 声明可把分配放大到远超帧体积：一个帧塞入数百个
 // "length:1e6" 的稀疏数组兄弟节点即可让解码分配数 GB。整帧聚合预算封住该放大。
@@ -181,8 +182,4 @@ function normalizeLength(value) {
     throw new Error(`Invalid wire array length: ${String(value)}`);
   }
   return value;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -1,11 +1,6 @@
 // 服务端内部批量 mutation runner：把多个 chunk 合并为一个逻辑事务。
 // 调用方负责 Undo 边界、业务预检和具体写入；runner 负责顺序、逆序补偿与结果诚实性。
-
-function codedError(code, message) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  return error;
-}
+import { codedError } from "./coded-error.js";
 
 export async function runChunkedMutation({
   prepareJournal,

@@ -26,6 +26,8 @@ import {
   evaluateCapturedAutomation,
   replaceAutomationPoints,
 } from "./pitch-techniques/automation-baseline.js";
+import { codedError } from "./coded-error.js";
+import { isPlainRecord } from "./value-shape.js";
 
 export const PITCH_GESTURE_DEFAULTS = Object.freeze({
   retainCorrectionTarget: false,
@@ -160,7 +162,7 @@ export class PitchGesturePlanService {
 }
 
 function normalizePlanRequest(request) {
-  if (!isRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
+  if (!isPlainRecord(request)) throw codedError("INVALID_ARGUMENTS", "request must be an object");
   assertKnownKeys(
     request,
     ["contextId", "occurrence", "gestures", "retainCorrectionTarget", "constraints"],
@@ -193,7 +195,7 @@ function normalizePlanRequest(request) {
 
 function normalizeGesture(value, index) {
   const path = `gestures[${index}]`;
-  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", `${path} must be an object`);
+  if (!isPlainRecord(value)) throw codedError("INVALID_ARGUMENTS", `${path} must be an object`);
   if (!PITCH_GESTURE_TYPES.includes(value.type)) {
     throw codedError("INVALID_ARGUMENTS", `${path}.type must be transition, transient, or vibrato`);
   }
@@ -209,10 +211,10 @@ function normalizeTransition(value, path) {
   if (value.from === value.to) {
     throw codedError("INVALID_ARGUMENTS", `${path}.from and ${path}.to must differ`);
   }
-  if (!isRecord(value.width)) throw codedError("INVALID_ARGUMENTS", `${path}.width must be an object`);
+  if (!isPlainRecord(value.width)) throw codedError("INVALID_ARGUMENTS", `${path}.width must be an object`);
   assertKnownKeys(value.width, ["seconds"], `${path}.width`);
   requireNumber(value.width.seconds, 1e-9, 2, `${path}.width.seconds`);
-  if (!isRecord(value.curve)) throw codedError("INVALID_ARGUMENTS", `${path}.curve must be an object`);
+  if (!isPlainRecord(value.curve)) throw codedError("INVALID_ARGUMENTS", `${path}.curve must be an object`);
   if (value.curve.family === "linear") {
     assertKnownKeys(value.curve, ["family"], `${path}.curve`);
     return {
@@ -382,7 +384,7 @@ function normalizeVibrato(value, path) {
 
 function normalizeConstraints(value) {
   if (value === undefined) return { ...PITCH_GESTURE_DEFAULTS.constraints };
-  if (!isRecord(value)) throw codedError("INVALID_ARGUMENTS", "constraints must be an object");
+  if (!isPlainRecord(value)) throw codedError("INVALID_ARGUMENTS", "constraints must be an object");
   assertKnownKeys(value, ["maxAbsPeakSemitone", "maxTotalPoints", "maxFitErrorCent"], "constraints");
   return {
     maxAbsPeakSemitone: optionalNumber(
@@ -1397,7 +1399,7 @@ function buildCorrectionTarget(detail, loaded) {
     || !Number.isSafeInteger(captured.frames)
     || captured.frames < 1
     || captured.frames !== captured.values.length
-    || !isRecord(captured.evidence)
+    || !isPlainRecord(captured.evidence)
     || !Number.isSafeInteger(captured.evidence.requestedFrames)
     || !Number.isSafeInteger(captured.evidence.observedFrames)
     || !Array.isArray(captured.evidence.nullFrameIndices)
@@ -1568,7 +1570,7 @@ function requireVibratoGate(hostProfile, selected) {
   }
   if (
     needsExplicit
-    && (!isRecord(suppression) || suppression.mode !== "replace" || !Number.isFinite(suppression.value))
+    && (!isPlainRecord(suppression) || suppression.mode !== "replace" || !Number.isFinite(suppression.value))
   ) {
     throw codedError("HOST_SEMANTIC_UNCONFIRMED", "Explicit pitchDelta vibrato requires a confirmed safe vibratoEnv suppression value.", {
       semantic: "vibrato.hostEnvelopeWithExplicitPitchDelta",
@@ -1796,21 +1798,8 @@ function sameValue(left, right) {
   return Math.abs(left - right) <= CENT_QUANTUM;
 }
 
-function isRecord(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
 function deepFreeze(value) {
   if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  if (details !== undefined) error.details = details;
-  return error;
 }

@@ -11,6 +11,7 @@ import {
   projectStatusEnvelope,
 } from "./result-status.js";
 import { classifyRootField } from "./root-envelope.js";
+import { isPlainRecord, isRecord } from "./value-shape.js";
 
 const TEXT_SUMMARY_MAX_BYTES = 512;
 
@@ -156,9 +157,7 @@ function foldLegacyRootFields(envelope) {
  */
 export function encodeToolResult(value) {
   const normalizedValue = value ?? null;
-  const isPlainObject =
-    normalizedValue !== null && typeof normalizedValue === "object" && !Array.isArray(normalizedValue);
-  if (!isPlainObject) {
+  if (!isRecord(normalizedValue)) {
     const structuredContent = { result: normalizedValue };
     return {
       content: [{ type: "text", text: summarizeLine(structuredContent) }],
@@ -220,7 +219,7 @@ export function encodeToolError(code, message, details) {
     error: {
       code,
       message,
-      ...(details && typeof details === "object" && !Array.isArray(details) ? details : {}),
+      ...(isPlainRecord(details) ? details : {}),
     },
   };
 

@@ -3182,7 +3182,7 @@ server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
 }));
 
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const payload = readResource(request.params.uri);
+  const payload = readResourceWithCodedMessage(request.params.uri);
   return {
     contents: [
       {
@@ -3485,6 +3485,28 @@ function manifestUnavailableError() {
     "API_MANIFEST_UNAVAILABLE",
     "The parsed SV API manifest is not loaded; run 'npm run parse:sv-api'."
   );
+}
+
+// resources/read 与 tools/call 的错误通道不对称，这个包装就是为了补上这个差别。
+//
+// 工具调用的失败经 encodeToolError 返回，`error.code` 是结构化字段，客户端直接读它。
+// 而 resources/read 的失败是**抛出**的：SDK 只把它转成 JSON-RPC `{code: -32603,
+// message}`，那个数字 code 恒为 InternalError，没有任何位置承载我们的语义 code。
+// 因此 ARTIFACT_NOT_FOUND 与 ARTIFACT_EXPIRED 在这条路径上会退化成同一个错误——
+// 而这两者的正确下一步完全不同（重新捕获 vs 换 artifact）。
+//
+// 所以只在这一条边界把 code 前缀进 message。这不是恢复旧的 `[CODE] ` 全局前缀：
+// codedError 仍然只写 error.code，前缀在此处按需合成，因此 tools/call 的响应
+// 不会因为它而把同一个 code 说两遍。
+function readResourceWithCodedMessage(uri) {
+  try {
+    return readResource(uri);
+  } catch (error) {
+    if (typeof error?.code === "string" && !error.message.startsWith(`[${error.code}]`)) {
+      error.message = `[${error.code}] ${error.message}`;
+    }
+    throw error;
+  }
 }
 
 function readResource(uri) {

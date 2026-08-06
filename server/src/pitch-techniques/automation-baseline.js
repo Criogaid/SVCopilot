@@ -1,10 +1,12 @@
 import { contentHash } from "../canonical-json.js";
+import { codedError } from "../coded-error.js";
+import { isPlainRecord } from "../value-shape.js";
 
 const INTERPOLATION_METHODS = new Set(["linear", "cosine", "cubic"]);
 const TIME_EPSILON = 1e-9;
 
 export function createCapturedAutomationBaseline({ curve, contextId, parameter }) {
-  if (!isRecord(curve)) {
+  if (!isPlainRecord(curve)) {
     throw codedError("CAPTURE_EVIDENCE_REQUIRED", "captured Automation evidence is required", {
       remediation: captureRemediation([parameter]),
     });
@@ -89,7 +91,7 @@ export function evaluateAutomationPoints({ method, defaultValue, points, blick }
 }
 
 export function replaceAutomationPoints(baseline, range, replacementPoints) {
-  if (!isRecord(range) || !Number.isSafeInteger(range.fromBlick) || !Number.isSafeInteger(range.toBlick)) {
+  if (!isPlainRecord(range) || !Number.isSafeInteger(range.fromBlick) || !Number.isSafeInteger(range.toBlick)) {
     throw codedError("INVALID_ARGUMENTS", "replacement range must use safe-integer BLICK bounds");
   }
   if (range.toBlick <= range.fromBlick) {
@@ -124,7 +126,7 @@ export function normalizeInterpolationMethod(value) {
 }
 
 function normalizeDefinition(value, parameter) {
-  if (!isRecord(value) || !Number.isFinite(value.defaultValue)) {
+  if (!isPlainRecord(value) || !Number.isFinite(value.defaultValue)) {
     throw codedError(
       "CAPTURE_EVIDENCE_REQUIRED",
       `captured ${parameter} definition with a finite defaultValue is required`,
@@ -144,7 +146,7 @@ function normalizePoints(value) {
   }
   const byBlick = new Map();
   for (const [index, point] of value.entries()) {
-    if (!isRecord(point) || !Number.isSafeInteger(point.localBlick ?? point.blick) || !Number.isFinite(point.value)) {
+    if (!isPlainRecord(point) || !Number.isSafeInteger(point.localBlick ?? point.blick) || !Number.isFinite(point.value)) {
       throw codedError("HOST_DATA_INVALID", "captured Automation points must have finite values and local BLICK", {
         index,
       });
@@ -184,21 +186,8 @@ function lerp(left, right, ratio) {
   return (1 - ratio) * left + ratio * right;
 }
 
-function isRecord(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
 function deepFreeze(value) {
   if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  if (details !== undefined) error.details = details;
-  return error;
 }

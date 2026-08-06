@@ -1,5 +1,7 @@
 // 非音高 expression gesture 展开。音高技法统一由 plan_pitch_gesture 处理。
 import { resolveNoteIndex } from "./scope-source.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // 固定参数顺序，保证相同请求的操作排列和 PlanRef 内容稳定。
 export const HAIRPIN_PARAMETER_ORDER = Object.freeze([
@@ -125,15 +127,4 @@ function checkNumber(value, minimum, maximum, path, { required = false } = {}) {
       got: value,
     });
   }
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  if (details) error.details = details;
-  return error;
 }

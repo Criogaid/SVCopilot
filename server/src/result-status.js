@@ -1,3 +1,4 @@
+import { isRecord } from "./value-shape.js";
 // status × effects × isError 的唯一权威（计划 §4.5）。
 //
 // 冻结这张表的意义不是"记下十个字符串"，而是让「哪些结论可表达」成为机械可判定的：
@@ -188,12 +189,8 @@ export function projectStatusEnvelope(envelope) {
     effects: envelope.effects ?? projected.effects,
     ...(projected.retryable ? { retryable: true } : {}),
     // 状态机取值不丢：它移到 data.state（若服务尚未自己放进去）。
-    ...(projected.status !== status && isPlainObject(envelope.data)
+    ...(projected.status !== status && isRecord(envelope.data)
       ? { data: { state: envelope.data.state ?? status, ...envelope.data } }
       : {}),
   };
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

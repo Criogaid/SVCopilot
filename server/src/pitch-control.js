@@ -1,4 +1,6 @@
 import { canonicalHashHex } from "./canonical-json.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // PitchControlPoint / PitchControlCurve 的规范化读模型与身份模型（主计划 P1-C）。
 //
@@ -342,12 +344,7 @@ function hostDataError(message) {
   return codedError("HOST_DATA_INVALID", message);
 }
 
-export function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-export function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+// 历史上 bake-computed-pitch 与 pitch-control-patch 从这里 import codedError/isRecord，
+// 于是这个业务模块顺带成了工具箱。转出以保持那些 import 可用，但实现只有一份。
+export { codedError } from "./coded-error.js";
+export { isRecord } from "./value-shape.js";

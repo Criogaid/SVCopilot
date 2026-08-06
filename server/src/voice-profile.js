@@ -1,5 +1,7 @@
 import { createHostScope } from "./snapshot.js";
 import { getVocalModeNames, normalizeVoiceParameters } from "./voice-parameters.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // 官方 API 无 singer 枚举/身份/分配接口；这里只暴露可观测的 voice 参数，
 // singer 身份一律报告 unobservable / host_opaque，不伪造。
@@ -318,14 +320,4 @@ function isUnknownOutcomeError(error) {
   return /Timeout waiting|detached|disconnected|EOF/i.test(
     error instanceof Error ? error.message : String(error)
   );
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

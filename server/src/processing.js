@@ -4,6 +4,7 @@ import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
 import { contentHash } from "./canonical-json.js";
+import { codedError } from "./coded-error.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const MAX_PROCESSING_EXPECTED_NOTES = 100_000;
@@ -513,11 +514,4 @@ function clampInteger(value, minimum, maximum, fallback) {
 
 function isHandle(value) {
   return value !== null && typeof value === "object" && Number.isSafeInteger(value.__handle__);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  if (details) error.details = details;
-  return error;
 }

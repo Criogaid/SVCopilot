@@ -21,6 +21,8 @@ import {
   summarizeExcludedVocalEvents,
 } from "./vocal-event-semantics.js";
 import { unknownContextError } from "./snapshot.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 export const PITCH_TECHNIQUE_ANALYSIS_VERSION = 1;
 
@@ -1685,15 +1687,4 @@ function checkedInteger(value, minimum, maximum, fallback, label) {
     );
   }
   return value;
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  if (details !== undefined) error.details = details;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -17,6 +17,8 @@ import {
 } from "./pitch-techniques/automation-baseline.js";
 import { buildHostInterpolationPostcondition } from "./pitch-techniques/host-interpolation.js";
 import { buildUniformSecondsGrid, splitFiniteRuns } from "./pitch-techniques/time-grid.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 export const PITCH_CORRECTION_DEFAULTS = Object.freeze({
   evidence: Object.freeze({
@@ -1252,15 +1254,4 @@ function assertKnownKeys(value, allowed, label) {
   if (unknown.length > 0) {
     throw codedError("INVALID_ARGUMENTS", `${label} contains unknown field: ${unknown.join(", ")}`, { unknown });
   }
-}
-
-function codedError(code, message, details = undefined) {
-  const error = new Error(message);
-  error.code = code;
-  if (details !== undefined) error.details = details;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

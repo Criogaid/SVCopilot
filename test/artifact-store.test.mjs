@@ -85,7 +85,7 @@ const sessionId = "sess_001";
   const artifact = store.seal({ kind: "range-detail", schemaVersion: "1", sessionId, payload: { x: 1 } });
   assert.throws(
     () => store.resolve({ artifactId: artifact.id, expectedKind: "wrong", sessionId }),
-    /ARTIFACT_KIND_MISMATCH/
+    { code: "ARTIFACT_KIND_MISMATCH" }
   );
   assert.throws(
     () =>
@@ -94,7 +94,7 @@ const sessionId = "sess_001";
         expectedContentHash: "sha256_0000000000000000000000000000000000000000000000000000000000000000",
         sessionId,
       }),
-    /ARTIFACT_HASH_MISMATCH/
+    { code: "ARTIFACT_HASH_MISMATCH" }
   );
 }
 
@@ -102,10 +102,10 @@ const sessionId = "sess_001";
 {
   const store = new ArtifactStore();
   const artifact = store.seal({ kind: "x", schemaVersion: "1", sessionId, payload: {} });
-  assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId: "other" }), /ARTIFACT_SESSION_MISMATCH/);
+  assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId: "other" }), { code: "ARTIFACT_SESSION_MISMATCH" });
   assert.throws(
     () => store.readOffsetPage({ artifactId: artifact.id, sessionId: "other" }),
-    /ARTIFACT_SESSION_MISMATCH/
+    { code: "ARTIFACT_SESSION_MISMATCH" }
   );
 }
 
@@ -123,10 +123,10 @@ const sessionId = "sess_001";
   now = 1001;
   assert.throws(
     () => store.readOffsetPage({ artifactId: artifact.id, sessionId }),
-    /ARTIFACT_EXPIRED/
+    { code: "ARTIFACT_EXPIRED" }
   );
-  assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId }), /ARTIFACT_EXPIRED/);
-  assert.throws(() => store.resolve({ artifactId: "a_unknown", sessionId }), /ARTIFACT_NOT_FOUND/);
+  assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId }), { code: "ARTIFACT_EXPIRED" });
+  assert.throws(() => store.resolve({ artifactId: "a_unknown", sessionId }), { code: "ARTIFACT_NOT_FOUND" });
 }
 
 // release 后 resolve 失败。
@@ -134,7 +134,7 @@ const sessionId = "sess_001";
   const store = new ArtifactStore();
   const artifact = store.seal({ kind: "x", schemaVersion: "1", sessionId, payload: {} });
   assert.strictEqual(store.release({ artifactId: artifact.id, sessionId }), true);
-  assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId }), /ARTIFACT_NOT_FOUND/);
+  assert.throws(() => store.resolve({ artifactId: artifact.id, sessionId }), { code: "ARTIFACT_NOT_FOUND" });
 }
 
 // capacity 限制：超过 maxTotalBytes 拒绝。
@@ -142,7 +142,7 @@ const sessionId = "sess_001";
   const store = new ArtifactStore({ quotas: { maxTotalBytes: 1, maxArtifactBytes: 1_000_000 } });
   assert.throws(
     () => store.seal({ kind: "x", schemaVersion: "1", sessionId, payload: { data: "too large" } }),
-    /ARTIFACT_CAPACITY_EXCEEDED/
+    { code: "ARTIFACT_CAPACITY_EXCEEDED" }
   );
 }
 
@@ -163,7 +163,7 @@ const sessionId = "sess_001";
   const first = store.seal({ kind: "x", schemaVersion: "1", sessionId, payload: { first: true } });
   assert.throws(
     () => store.seal({ kind: "x", schemaVersion: "1", sessionId, payload: { second: true } }),
-    /ARTIFACT_CAPACITY_EXCEEDED/
+    { code: "ARTIFACT_CAPACITY_EXCEEDED" }
   );
   assert.strictEqual(store.resolve({ artifactId: first.id, sessionId }).id, first.id);
 }
@@ -215,7 +215,7 @@ const sessionId = "sess_001";
         cursor: `${body}.${tamperedSignature}`,
         byteBudget: 7,
       }),
-    /ARTIFACT_CURSOR_INVALID/
+    { code: "ARTIFACT_CURSOR_INVALID" }
   );
 }
 
@@ -263,20 +263,20 @@ const sessionId = "sess_001";
   const artifact = store.seal({ kind: "detail", schemaVersion: "1", sessionId, payload: { text: "甲" } });
   assert.throws(
     () => store.readOffsetPage({ artifactId: artifact.id, sessionId, offset: 10 }),
-    /ARTIFACT_OFFSET_NOT_UTF8_BOUNDARY/
+    { code: "ARTIFACT_OFFSET_NOT_UTF8_BOUNDARY" }
   );
   assert.throws(
     () => store.readOffsetPage({ artifactId: artifact.id, sessionId, offset: artifact.totalBytes }),
-    /ARTIFACT_OFFSET_OUT_OF_BOUNDS/
+    { code: "ARTIFACT_OFFSET_OUT_OF_BOUNDS" }
   );
   assert.throws(
     () => store.readOffsetPage({ artifactId: artifact.id, sessionId, offset: -1 }),
-    /INVALID_ARGUMENTS/
+    { code: "INVALID_ARGUMENTS" }
   );
   const plan = store.seal({ kind: "plan", schemaVersion: "1", sessionId, payload: { mutation: true } });
   assert.throws(
     () => readArtifactOffsetPage({ artifactStore: store, sessionId, artifactId: plan.id }),
-    /ARTIFACT_NOT_READABLE/
+    { code: "ARTIFACT_NOT_READABLE" }
   );
 }
 

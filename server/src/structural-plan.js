@@ -1,3 +1,4 @@
+import { codedError } from "./coded-error.js";
 // 结构编辑的快照基准解析与执行顺序（计划 §9.4 / §3.3）。
 //
 // 契约：请求里出现的每个 index 都相对**同一份快照**解析，绝不相对同一请求内的中间
@@ -314,11 +315,4 @@ function assertIndex(value, groupNoteCount, path, { inclusive = false } = {}) {
       max,
     });
   }
-}
-
-function codedError(code, message, details) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  if (details) error.details = details;
-  return error;
 }

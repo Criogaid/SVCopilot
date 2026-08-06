@@ -1,6 +1,7 @@
 // 不可变 Artifact 存储：服务端大结果/大计划的只读容器，与短期可编辑 Context 生命周期隔离。
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { canonicalClone, contentHash } from "./canonical-json.js";
+import { codedError } from "./coded-error.js";
 
 export const DEFAULT_ARTIFACT_PAGE_BYTES = 8 * 1024;
 export const MIN_ARTIFACT_PAGE_BYTES = 8 * 1024;
@@ -478,10 +479,4 @@ function sliceUtf8Page(payloadBytes, offset, byteBudget) {
     chunk: payloadBytes.subarray(offset, nextOffset).toString("utf8"),
     nextOffset,
   };
-}
-
-function codedError(code, message) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  return error;
 }

@@ -5,6 +5,8 @@ import { analyzePhonemeResult, observedArrayIndices } from "./phoneme-state.js";
 import { collectHandleRefs } from "./wire-codec.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
 import { ServiceTiming } from "./service-timing.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 200;
@@ -907,14 +909,4 @@ function normalizePageSize(value) {
 
 function toExternalIndex(luaIndex) {
   return Number.isSafeInteger(luaIndex) ? luaIndex - 1 : null;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

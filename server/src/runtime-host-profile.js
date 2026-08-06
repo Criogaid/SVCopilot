@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isRecord } from "./value-shape.js";
 
 const PROFILE_KIND = "svcopilot-host-profile";
 const PROFILE_SCHEMA_VERSION = "2.0.0";
@@ -54,8 +55,4 @@ function deepFreeze(value) {
   Object.freeze(value);
   for (const nested of Object.values(value)) deepFreeze(nested);
   return value;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

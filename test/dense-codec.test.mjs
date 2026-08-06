@@ -207,7 +207,7 @@ import { normalizeCurveInput } from "../server/src/parameter-curve.js";
         schemaVersion: "1",
         columns: [{ name: "x", type: "number" }],
       }),
-    /DENSE_ALLOCATION_LIMIT/
+    { code: "DENSE_ALLOCATION_LIMIT" }
   );
 }
 
@@ -215,7 +215,7 @@ import { normalizeCurveInput } from "../server/src/parameter-curve.js";
 {
   assert.throws(() => {
     encodeDense([], { schemaVersion: "1", columns: [{ name: "x", type: "integer", encoding: "unknown" }] });
-  }, /INVALID_DENSE_PROFILE/);
+  }, { code: "INVALID_DENSE_PROFILE" });
 }
 
 // 错误：delta overflow。
@@ -226,7 +226,7 @@ import { normalizeCurveInput } from "../server/src/parameter-curve.js";
   };
   assert.throws(() => {
     encodeDense([{ x: Number.MAX_SAFE_INTEGER }, { x: Number.MAX_SAFE_INTEGER + 1 }], profile);
-  }, /INVALID_DENSE_VALUE/);
+  }, { code: "INVALID_DENSE_VALUE" });
 }
 
 console.log("dense-codec.test.mjs passed");

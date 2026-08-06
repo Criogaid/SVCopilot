@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { createHostScope } from "./snapshot.js";
 import { ServiceTiming } from "./service-timing.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // MCP 无法听到声音：audition 只驱动宿主播放，感知判断永远属于人。
 // Node 崩溃可能遗留 solo/mute，因此 start 返回可跨重启使用的 recovery payload。
@@ -1042,14 +1044,4 @@ function isUnknownOutcomeError(error) {
   return /Timeout waiting|detached|disconnected|EOF/i.test(
     error instanceof Error ? error.message : String(error)
   );
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

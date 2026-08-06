@@ -5,6 +5,7 @@ import { measureDiagnosticPhase } from "./operation-diagnostics.js";
 import { createBulkStats, readNoteFingerprints } from "./note-fingerprint-reader.js";
 import { createHostScope } from "./snapshot.js";
 import { resolveMutationScope, resolveNoteIndex } from "./scope-source.js";
+import { codedError } from "./coded-error.js";
 
 export async function resolveContextTarget(
   host,
@@ -337,10 +338,4 @@ function isResolveError(error) {
     "UNKNOWN_OCCURRENCE",
     "AMBIGUOUS_CONTEXT",
   ].includes(error?.code);
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }

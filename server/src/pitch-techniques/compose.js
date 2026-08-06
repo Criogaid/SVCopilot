@@ -1,6 +1,7 @@
 import { contentHash } from "../canonical-json.js";
 import { PITCH_DELTA_LIMIT_CENT } from "./model.js";
 import { assertNormalizedTechniqueIr } from "./ir.js";
+import { codedError } from "../coded-error.js";
 
 export const TECHNIQUE_COMPOSITION_MAX_SAMPLES = 10_000;
 
@@ -337,11 +338,4 @@ function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  error.details = details;
-  return error;
 }

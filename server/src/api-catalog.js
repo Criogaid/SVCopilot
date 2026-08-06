@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isRecord } from "./value-shape.js";
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const manifestPath = path.resolve(sourceDir, "..", "..", "api-docs", "api-manifest.json");
@@ -22,12 +23,12 @@ function unavailableStub() {
 }
 
 function isPlausibleManifest(value) {
-  if (!isObject(value) || !isObject(value.classes)) return false;
-  if (!isObject(value.classes.SV) || !isObject(value.classes.SV.methods)) return false;
+  if (!isRecord(value) || !isRecord(value.classes)) return false;
+  if (!isRecord(value.classes.SV) || !isRecord(value.classes.SV.methods)) return false;
   // 每个类条目及其 methods 都必须是对象,否则运行时访问 apiClass.methods[...] 会抛异常,
   // 让已知 handle 的 sv_call 返回 MCP 内部错误而不是转发给宿主。
   for (const entry of Object.values(value.classes)) {
-    if (!isObject(entry) || !isObject(entry.methods)) return false;
+    if (!isRecord(entry) || !isRecord(entry.methods)) return false;
   }
   return true;
 }
@@ -296,7 +297,7 @@ function validateSingleType(value, expectedType, resolveHandleType) {
     return Array.isArray(value) ? null : "must be an array";
   }
   if (expectedType === "object" || expectedType === "attributes") {
-    return isObject(value) ? null : "must be an object";
+    return isRecord(value) ? null : "must be an object";
   }
 
   const arrayMatch = expectedType.match(/^Array\.<(.+)>$/);
@@ -320,12 +321,9 @@ function validateSingleType(value, expectedType, resolveHandleType) {
   return null;
 }
 
-function isObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function getHandleId(value) {
-  if (!isObject(value) || !Number.isSafeInteger(value.__handle__)) return null;
+  if (!isRecord(value) || !Number.isSafeInteger(value.__handle__)) return null;
   return value.__handle__;
 }
 

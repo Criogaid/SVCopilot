@@ -3,6 +3,7 @@
 import { canonicalClone } from "./canonical-json.js";
 import { operationNameForTool } from "./operation-catalog.js";
 import { assertSealedCapsuleSatisfies } from "./scope-source.js";
+import { codedError } from "./coded-error.js";
 
 const EXECUTION_OPTIONS_BY_TOOL = Object.freeze({
   sv_patch_notes: new Set(["atomic", "waitFor", "timeoutMs", "pollIntervalMs"]),
@@ -305,10 +306,4 @@ function applyExecutionOptions(request, targetTool, executionOptions) {
     );
   }
   Object.assign(request, canonicalClone(executionOptions));
-}
-
-function codedError(code, message) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  return error;
 }

@@ -1,3 +1,4 @@
+import { codedError } from "./coded-error.js";
 // ScopeSource：Context 与 Plan capsule 的共同解析入口（计划 §4.3.2）。
 //
 // 两种来源产出同一个值：mutation handler 从 SnapshotStore 读 Context；PlanRef 展开出
@@ -509,11 +510,4 @@ export function summarizeIndexRuns(indices, { maxRuns = 8 } = {}) {
     runs.push([index, index]);
   }
   return runs.slice(0, maxRuns);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  if (details) error.details = details;
-  return error;
 }

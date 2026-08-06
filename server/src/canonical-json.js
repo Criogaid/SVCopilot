@@ -1,13 +1,8 @@
 // 规范化 JSON：稳定 key 顺序、标量规范化、拒绝非 JSON 值，提供统一 content hash。
 import { createHash } from "node:crypto";
+import { isPlainRecord } from "./value-shape.js";
 
 const MAX_STRING_LENGTH = 1_000_000_000;
-
-function isPlainObject(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
 
 function assertSerializable(value, path = "") {
   if (value === undefined) {
@@ -37,7 +32,7 @@ function assertSerializable(value, path = "") {
   if (typeof value !== "object") {
     throw new TypeError(`Cannot canonicalize ${typeof value} at ${path || "root"}`);
   }
-  if (!Array.isArray(value) && !isPlainObject(value)) {
+  if (!Array.isArray(value) && !isPlainRecord(value)) {
     throw new TypeError(
       `Cannot canonicalize ${value?.constructor?.name ?? "non-plain object"} at ${path || "root"}`
     );

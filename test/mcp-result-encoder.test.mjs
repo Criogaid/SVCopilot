@@ -112,6 +112,12 @@ for (const [status, effects] of [
   assert.strictEqual(result.structuredContent.error.a, 1);
 }
 
+// 错误证据必须是 plain record；实例和数组不能把隐式序列化行为带进 MCP surface。
+for (const details of [null, [], new Date(0), new Map([["a", 1]]), new Error("nested")]) {
+  const result = encodeToolError("X", "Y", details);
+  assert.deepStrictEqual(result.structuredContent.error, { code: "X", message: "Y" });
+}
+
 // 测量工具：text 现在必须远小于 structuredContent，而不是与之相等。
 {
   const result = encodeToolResult({ status: "succeeded", data: "x".repeat(4000) });

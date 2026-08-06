@@ -11,6 +11,8 @@ import {
 } from "./vocal-event-semantics.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
 import { unknownContextError } from "./snapshot.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // sv_align_lyrics：无副作用咬字/铺词规划器（HANDOFF §7 P2 定位）。
 //
@@ -880,14 +882,4 @@ function assertKnownKeys(value, allowed, label) {
   if (unknown.length > 0) {
     throw codedError("INVALID_ARGUMENTS", `${label} contains unknown field: ${unknown.join(", ")}`);
   }
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -1,5 +1,6 @@
 import { contentHash } from "../canonical-json.js";
 import { richardsTransition } from "./richards.js";
+import { codedError } from "../coded-error.js";
 
 export const FIT_WORKER_PROTOCOL_VERSION = 1;
 export const FIT_RICHARDS_SEGMENT_OPERATION = "fit_richards_segment";
@@ -815,11 +816,4 @@ function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  error.details = details;
-  return error;
 }

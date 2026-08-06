@@ -7,6 +7,8 @@ import {
   projectTransitionMandatoryBlickAnchors,
 } from "./model.js";
 import { assertNormalizedTechniqueIr } from "./ir.js";
+import { codedError } from "../coded-error.js";
+import { isRecord } from "../value-shape.js";
 
 export const PITCH_DELTA_MAX_COMPILED_POINTS = 4_000;
 export const PITCH_DELTA_MAX_POINTS_PER_CURVE = 2_000;
@@ -865,19 +867,8 @@ function assertRecord(value, path) {
   throw codedError("INVALID_ARGUMENTS", "value must be an object", { path });
 }
 
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  if (details) error.details = details;
-  return error;
 }

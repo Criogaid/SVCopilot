@@ -1,4 +1,5 @@
 import { contentHash } from "../canonical-json.js";
+import { codedError } from "../coded-error.js";
 
 export const HOST_INTERPOLATION_POSTCONDITION_VERSION = 1;
 export const HOST_INTERPOLATION_MAX_BASELINE_SAMPLES = 256;
@@ -469,11 +470,4 @@ function deepFreeze(value) {
   if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details = undefined) {
-  const error = new Error(message);
-  error.code = code;
-  if (details !== undefined) error.details = details;
-  return error;
 }

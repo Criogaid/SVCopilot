@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import { ServiceTiming } from "./service-timing.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // sv_audition_compare：既有版本的人类 A/B 试听编排（主计划 P1-D）。
 //
@@ -539,16 +541,6 @@ function assertKnownKeys(value, allowed, label) {
       throw codedError("INVALID_ARGUMENTS", `${label} has an unknown field: ${key}`);
     }
   }
-}
-
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }
 
 function failureResult(error, fallbackCode) {

@@ -23,6 +23,8 @@ import {
 import { ServiceTiming } from "./service-timing.js";
 import { SnapshotStore, createHostScope } from "./snapshot.js";
 import { normalizeVoiceParameters } from "./voice-parameters.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 export const RANGE_CAPTURE_LIMITS = Object.freeze({
   notes: 2_000,
@@ -1467,14 +1469,4 @@ function clampInteger(value, minimum, maximum, fallback, label) {
     throw codedError("INVALID_ARGUMENTS", `${label} must be an integer between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

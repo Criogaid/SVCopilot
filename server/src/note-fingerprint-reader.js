@@ -1,3 +1,4 @@
+import { codedError } from "./coded-error.js";
 /**
  * 音符指纹读取适配器。
  *
@@ -199,10 +200,4 @@ function isBulkCapabilityFailure(error) {
 
 function toExternalIndex(luaIndex) {
   return Number.isSafeInteger(luaIndex) ? luaIndex - 1 : null;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }

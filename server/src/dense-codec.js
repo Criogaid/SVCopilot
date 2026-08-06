@@ -1,3 +1,5 @@
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 // Schema-described Dense Codec：只做有界结构转换，不解释音乐语义。
 const ALLOWED_TYPES = new Set(["integer", "number", "string", "boolean"]);
 const ALLOWED_ENCODINGS = new Set(["delta", "qint", "identity", "dictionary"]);
@@ -340,14 +342,4 @@ function assertKnownKeys(value, allowed, label, code) {
   if (unknown.length > 0) {
     throw codedError(code, `${label} contains unknown fields: ${unknown.join(", ")}`);
   }
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function codedError(code, message) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  return error;
 }

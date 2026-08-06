@@ -1,3 +1,4 @@
+import { codedError } from "./coded-error.js";
 // 按 operation 登记的 Context 失效策略（计划 §4.6）。
 //
 // 「mutation 成功后失效」是不安全的窄条件。正确规则是：
@@ -175,10 +176,4 @@ export function invalidateContextsFor({ store, operation, writeAttempted, target
     scope,
     invalidatedContexts: store.invalidateContextsForTarget(targetGroupUuid),
   };
-}
-
-function codedError(code, message) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  return error;
 }

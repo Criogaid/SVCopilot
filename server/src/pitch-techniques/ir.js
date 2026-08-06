@@ -4,6 +4,8 @@ import {
   SEMANTIC_NUMERIC_QUANTA as referenceSemanticNumericQuanta,
   TECHNIQUE_IR_NUMERIC_FIELD_SCHEMA as referenceTechniqueIrNumericFieldSchema,
 } from "./model.js";
+import { codedError } from "../coded-error.js";
+import { isPlainRecord } from "../value-shape.js";
 
 export const TECHNIQUE_IR_SCHEMA_VERSION = 1;
 export const TECHNIQUE_IR_MODEL_VERSION = "pitch-techniques-v1";
@@ -253,9 +255,9 @@ function normalizeTarget(target, scope, techniques) {
     automationParameters,
   };
   const missing = [];
-  if (!isRecord(target.requiredInclude)) missing.push("requiredInclude");
-  if (!isRecord(target.baselineGuard)) missing.push("baselineGuard");
-  if (!isRecord(target.interpolationEvidence)) missing.push("interpolationEvidence");
+  if (!isPlainRecord(target.requiredInclude)) missing.push("requiredInclude");
+  if (!isPlainRecord(target.baselineGuard)) missing.push("baselineGuard");
+  if (!isPlainRecord(target.interpolationEvidence)) missing.push("interpolationEvidence");
   if (typeof target.hostProfileHash !== "string" || target.hostProfileHash.length === 0) {
     missing.push("hostProfileHash");
   }
@@ -291,7 +293,7 @@ function normalizeTarget(target, scope, techniques) {
     }
 
     const evidence = target.interpolationEvidence[parameter];
-    if (!isRecord(evidence)) {
+    if (!isPlainRecord(evidence)) {
       missing.push(`interpolationEvidence.${parameter}`);
       continue;
     }
@@ -402,7 +404,7 @@ function assertKnownKeys(value, allowed, path) {
 }
 
 function assertRecord(value, path) {
-  if (isRecord(value)) return;
+  if (isPlainRecord(value)) return;
   throw codedError("INVALID_ARGUMENTS", "value must be an object", { path });
 }
 
@@ -412,21 +414,8 @@ function hasExactStringArray(value, expected) {
     && value.every((entry, index) => entry === expected[index]);
 }
 
-function isRecord(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
 function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
-}
-
-function codedError(code, message, details) {
-  const error = new Error(message);
-  error.code = code;
-  error.details = details;
-  return error;
 }

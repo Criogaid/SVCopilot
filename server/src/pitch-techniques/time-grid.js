@@ -1,4 +1,5 @@
 import { blickAtSeconds, secondsAtBlick } from "../musical-time.js";
+import { isRecord } from "../value-shape.js";
 
 const MAX_UNIFORM_SECONDS_FRAMES = 20_000;
 const TIME_EPSILON_SECONDS = 1e-9;
@@ -322,8 +323,4 @@ function gridError(code, message, details) {
   error.code = code;
   if (details) error.details = details;
   return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

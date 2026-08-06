@@ -18,23 +18,20 @@
 //   - `retryable: true` —— 只有 false 是默认值。
 //
 // 省略只针对**恒等于默认值**的情形，绝不针对「值恰好是 falsy」。
-
-/**
- * `attempted` 在这两个容器里由「字段是否出现」承载（§10.2.1：出现即 attempted）。
- * 因此 attempted:false 意味着整个容器该消失，attempted:true 则意味着这个键本身冗余。
- */
-const ATTEMPT_GATED_FIELDS = Object.freeze(["verification", "rollback"]);
-
+//
 // 计时字段（`timing` / `timings`）**不在**这里省略，尽管 §10.2.1 说它只该在
 // diagnostics === true 时出现。原因是那条规则依赖一个还不存在的东西：facade 信封
 // 目前只接受 {operation, arguments}，没有 §10.2.1 要求的外层 `diagnostics`
 // （只有 sv_patch_notes 在自己的业务 schema 里声明了一个同名开关）。没有那个外层
 // 开关，「只在请求时返回」就退化成「永远不返回」——那不是省略冗余，而是删掉一项
 // 调用方无法再取回的证据。timing 的门控必须与 facade diagnostics 一起做。
+import { isRecord } from "./value-shape.js";
 
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+/**
+ * `attempted` 在这两个容器里由「字段是否出现」承载（§10.2.1：出现即 attempted）。
+ * 因此 attempted:false 意味着整个容器该消失，attempted:true 则意味着这个键本身冗余。
+ */
+const ATTEMPT_GATED_FIELDS = Object.freeze(["verification", "rollback"]);
 
 /**
  * 空 `detail` 是「没有明细」，与「有明细但没读」不同：后者由 detail 引用本身表达
@@ -43,12 +40,12 @@ function isPlainObject(value) {
 function isEmptyDetail(value) {
   if (value === null || value === undefined) return true;
   if (Array.isArray(value)) return value.length === 0;
-  if (isPlainObject(value)) return Object.keys(value).length === 0;
+  if (isRecord(value)) return Object.keys(value).length === 0;
   return false;
 }
 
 function pruneDetailContainer(container) {
-  if (!isPlainObject(container)) return container;
+  if (!isRecord(container)) return container;
   if (!Object.hasOwn(container, "detail")) return container;
   if (!isEmptyDetail(container.detail)) return container;
   const { detail: _detail, ...rest } = container;
@@ -60,7 +57,7 @@ function pruneDetailContainer(container) {
  * 因此键内再写一遍 true 是同义重复。
  */
 function stripAttemptedKey(container) {
-  if (!isPlainObject(container)) return container;
+  if (!isRecord(container)) return container;
   if (container.attempted !== true) return container;
   const { attempted: _attempted, ...rest } = container;
   return rest;
@@ -73,7 +70,7 @@ function stripAttemptedKey(container) {
  * @returns {object} 新对象；不修改入参（服务可能仍持有它做后续判断）
  */
 export function omitDerivableFields(envelope) {
-  if (!isPlainObject(envelope)) return envelope;
+  if (!isRecord(envelope)) return envelope;
   // 没有信封的 operation（sv_raw 的 handle 图、官方文档查询）直接透出宿主值：
   // 在那些形状上套用根信封的出现条件会删掉宿主自己的字段。
   if (typeof envelope.status !== "string") return envelope;
@@ -87,7 +84,7 @@ export function omitDerivableFields(envelope) {
     // true 有约束，因此省略它不会放宽任何一条相容性检查。
     if (field === "retryable" && value !== true) continue;
 
-    if (ATTEMPT_GATED_FIELDS.includes(field) && isPlainObject(value)) {
+    if (ATTEMPT_GATED_FIELDS.includes(field) && isRecord(value)) {
       // attempted:false —— 这一步从未发生过，整个容器都是噪声。容器内的
       // passed:null / verified:null 也只是「没有结论」的另一种写法。
       if (value.attempted === false) continue;

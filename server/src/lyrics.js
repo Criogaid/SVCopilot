@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { contextGroupNoteCount, resolveContextTarget } from "./context-target.js";
 import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
+import { codedError } from "./coded-error.js";
 
 export class LyricsService {
   constructor(session, snapshotService, { sleepFn, now = () => Date.now() } = {}) {
@@ -411,10 +412,4 @@ function clampInteger(value, minimum, maximum, fallback) {
     throw codedError("INVALID_ARGUMENTS", `integer must be between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }

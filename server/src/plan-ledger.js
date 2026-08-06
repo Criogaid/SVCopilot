@@ -1,3 +1,4 @@
+import { codedError } from "./coded-error.js";
 // Plan 执行 ledger：同一个 planRef 不得被重复 commit（计划 §4.3.1）。
 //
 // Plan Artifact 是不可变的，所以执行状态不能写回 artifact 本身——那会让"不可变"
@@ -215,10 +216,4 @@ export class PlanExecutionLedger {
       if (entry.expiresAt <= now) this.entries.delete(planRef);
     }
   }
-}
-
-function codedError(code, message) {
-  const error = new Error(`[${code}] ${message}`);
-  error.code = code;
-  return error;
 }

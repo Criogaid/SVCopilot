@@ -1,3 +1,4 @@
+import { isRecord } from "./value-shape.js";
 export function normalizeVoiceParameters(value) {
   if (!isRecord(value)) return value;
   const vocalModeParams = value.vocalModeParams;
@@ -17,8 +18,4 @@ export function getVocalModeNames(value) {
   const vocalModeParams = value?.vocalModeParams;
   if (!isRecord(vocalModeParams) || typeof vocalModeParams.$sv === "string") return [];
   return Object.keys(vocalModeParams);
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

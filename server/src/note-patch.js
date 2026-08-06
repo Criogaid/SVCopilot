@@ -7,6 +7,8 @@ import { settlePlanLedger } from "./plan-reference.js";
 import { createOperationDiagnostics } from "./operation-diagnostics.js";
 import { nestedProcessingStatus, waitForProcessing } from "./processing.js";
 import { dryRunFromAction } from "./mutation-action.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // 字段表同时决定确定性写入顺序：先时间/音高结构，再文本，再表达属性。
 const FIELD_SPECS = [
@@ -980,14 +982,4 @@ function clampInteger(value, minimum, maximum, fallback) {
     throw codedError("INVALID_ARGUMENTS", `integer must be between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

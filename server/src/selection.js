@@ -1,5 +1,7 @@
 import { createHostScope, unknownContextError } from "./snapshot.js";
 import { selectOccurrenceByOrdinal } from "./scope-source.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // sv_set_selection：高层 selection 操作（主计划 P1-E）。
 //
@@ -362,14 +364,4 @@ function assertKnownKeys(value, allowed, label) {
       throw codedError("INVALID_ARGUMENTS", `${label} has an unknown field: ${key}`);
     }
   }
-}
-
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }

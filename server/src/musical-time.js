@@ -1,3 +1,5 @@
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 export function normalizeMusicalPoint(point, label = "position") {
   if (!isRecord(point)) throw codedError("INVALID_MUSICAL_POSITION", `${label} must be an object`);
   if (!Number.isSafeInteger(point.bar) || point.bar < 1) {
@@ -231,14 +233,4 @@ function formatBeat(point) {
   return point.beatDenominator === 1
     ? String(point.beatNumerator)
     : `${point.beatNumerator}/${point.beatDenominator}`;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

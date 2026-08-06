@@ -19,6 +19,8 @@ import {
 } from "./pitch-techniques/host-interpolation.js";
 import { resolveMutationScope } from "./scope-source.js";
 import { dryRunFromAction } from "./mutation-action.js";
+import { codedError } from "./coded-error.js";
+import { isRecord } from "./value-shape.js";
 
 // Automation 位于 NoteGroup 本地坐标；对外同时报告 local 与 absolute blick。
 // local → absolute 的偏移是 getTimeOffset()；getOnset() 已含首音符 onset，不能用作偏移。
@@ -2623,14 +2625,4 @@ function clampInteger(value, minimum, maximum, fallback) {
     throw codedError("INVALID_ARGUMENTS", `integer must be between ${minimum} and ${maximum}`);
   }
   return value;
-}
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
