@@ -26,7 +26,7 @@
 
 MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 
-## 当前进展
+## 验收明细
 
 - 已提交运行时 H2 profile 接入（`2ca23eb`）与诊断可观测性（`fe572e7`）。
 - 已重启单一 MCP 进程并确认精确 profile 匹配；MVP 场景 1、2、3、4、5、6、7、8、9、10、11、13、14
@@ -83,6 +83,6 @@ MVP 获得可复核真机 RC 证据，所有跳过项都有门禁原因。
 - 裁定：13 个 MVP 场景通过，外部 worker 场景因 P4 选择进程内后端而条件不适用；pending 为空。
 - 验证：场景 11 完成同连接 stale baseline、跨 epoch stale Context、精确 token 恢复与资源归零；
   完整 `npm test` 849/849、`npm run smoke:mcp` 通过。
-- 条件能力：H3a 仍为 `unknown`、H3b 为 `partially_observed`，所以 T14/T19 保持 `conditional`，
-  不启用 `PitchControlCurve` 或闭环写入。
+- 条件能力：H3a 仍为 `unknown`、H3b 为 `partially_observed`，所以 T14 不启用
+  `PitchControlCurve` 编译；H5/H7 安全门禁未满足，所以 T19 不启用有界闭环写入。
 - 提交：本任务的独立提交见 Git history。

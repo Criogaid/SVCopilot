@@ -1,6 +1,7 @@
 # T14 — 条件 PitchControlCurve 编译
 
 - 状态：`conditional`
+- 裁定：`not_enabled`（H3a 为 `unknown`，H3b 为 `partially_observed`）
 - 权威：[实施计划](../implementation-plan.md) F5a、§9、§13.1 P2b、§17 提交 14
 - 依赖：T04 中 H3a、H3b、H4 全部通过；T13
 - 解锁：T18 的 P2b 条件验收
@@ -25,3 +26,9 @@
 ## 完成条件
 
 第二写面可独立验证并保持一个 Undo；否则任务保持条件未启用。
+
+## 当前裁定
+
+T04/T18 没有证明 `pitchDelta` 与 `PitchControlCurve` 的宿主共存语义，也没有完成绝对音高到
+group-relative curve 的 computed-pitch 往返。当前 capabilities 因此保持禁用；通用
+`sv_patch_pitch_controls` 编辑能力不等于 TechniqueIR 的第二写面编译器。

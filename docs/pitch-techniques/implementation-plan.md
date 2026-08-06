@@ -3,6 +3,10 @@
 ## 0. 文档信息
 
 - 定稿日期：2026-08-03（**v2.8**，在 v2.7 上闭合 transition 坐标映射、量化后二次校验与 MCP 错误证据）
+- 实施状态：`0.10.0` MVP 已完成；当前任务裁定见 [README.md](README.md) 与
+  [T20 发布证据](evidence/T20-release-evidence.md)
+
+本文件冻结公式、公开契约、门禁和历史执行顺序，不再作为实时进度表。
 
 **v2 修订摘要**（相对 v1）：
 
@@ -2236,25 +2240,14 @@ one-step correction 可独立验证改善；所有只读 operation 零 setter/Un
 若闭环门禁失败，项目仍可凭**前向规划 + 宿主保真 + 只读分析 + 单步开环**
 作为完整可发布能力。**不得为勾选路线图而降低 Undo 或恢复契约。**
 
-## 20. 立即下一步
+## 20. 实施结论
 
-按此顺序，不先安装任何新语言运行时：
+T01、T02、T04–T13、T15–T18、T20 已完成。H1 的 600 点实测确认 Node 时间换算满足门禁，
+所以 T03 裁定为 `not_required`。前向技法 MVP、只读分析、FitWorker 选型、一次开环修正、
+宿主插值验证和 14 场景真机 RC 均已有机械证据。
 
-1. **补齐 H1 换算一致性只读比对** —— 最高优先。现有 45 点恒速证据仅为
-   `partially_observed`；还需含 tempo mark 边界、阶跃变速和密集变速的
-   一次性 ≥200 次探针往返。它阻塞所有 Hz 门禁的取值，且无需可恢复写脚手架。
-   若判定需要批量 opcode，则 `time_axis_map_v1` 也在 P0.5 内完成（§7.1a）；
-2. 建立 synthetic corpus 与模型 tolerance（可与 1 并行，纯离线）；
-3. 扩展 host profile v2 schema，所有未知事实先保持 `unknown`；
-4. 用隔离临时轨完成 H2（双颤音 6 组）、H3a（双写面共存/优先级）、
-   H3b（绝对 MIDI/score/occurrence offset 到 group-relative curve 的往返变换）、
-   H4（PitchControl 插值族）、
-   H5/H6（重算延迟与旧非空结果）、H8（fine fluctuation）实验；
-5. 并行实现 F1 端点归一 Richards 与 F2 拆分后的二阶模型（纯离线，不依赖 3–4）；
-   F2 必须一开始就用 `naturalAngularFrequencyRadPerSecond`，
-   不要先写 `naturalHz` 再改 —— 改名会漏掉测试里的同一错误；
-6. 证据与模型都通过后，再迁移 `plan_pitch_gesture` 的公开 schema
-   （只开 `pitchDelta` 一个音高坐标写面；`vibratoEnv` 仍按 H2 gate）。
-
-这条顺序确保不会先写出一个数学上漂亮、但在宿主中会双重颤音、
-违反插值误差、把 rad/s 当 Hz、或建立在未验证秒轴上的 planner。
+T14 与 T19 保持条件未启用：前者仍缺 H3a/H3b 的第二写面宿主语义，后者仍缺 H5 重算稳定性
+与 H7 单次 Ctrl+Z 的人工证据。根据 §19 的完成定义，它们不属于 MVP 缺口，也不得通过降低
+事务或证据标准来清空任务列表。当前状态和阅读入口见 [README.md](README.md)，逐任务记录见
+[tasks/README.md](tasks/README.md)，发布台账见
+[evidence/T20-release-evidence.json](evidence/T20-release-evidence.json)。

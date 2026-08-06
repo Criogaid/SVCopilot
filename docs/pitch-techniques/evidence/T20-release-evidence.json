@@ -164,7 +164,7 @@
   "dependencyProvenance": {
     "notice": "THIRD_PARTY_NOTICES.md",
     "packageLock": "server/package-lock.json",
-    "packageLockSha256": "sha256:204d45f454130b8b6f2aafcdda3ee0eb7a77450eff1c6de481a1d86a4df3638c",
+    "packageLockSha256": "sha256:704726b9765f7220157d19a1d1baad43dd7f270bc38888dafd7370abea4c998b",
     "directRuntimeDependencies": [
       {
         "name": "@modelcontextprotocol/sdk",

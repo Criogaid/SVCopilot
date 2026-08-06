@@ -17,7 +17,9 @@ MCP、Lua 或宿主语义时，再执行对应 smoke、dispatcher 或可恢复�
 任务不得引入兼容别名、第二套公式、内联大证据或未经 profile 证明的宿主事实。条件任务的门禁未满足时，
 保持 `conditional`，不得为了清空列表而实现。
 
-## 依赖波次
+## 历史依赖波次
+
+下表记录实施时的依赖顺序；当前执行已经结束，不表示仍有任务等待领取。
 
 | 波次 | 可执行任务 | 说明 |
 |---|---|---|
@@ -28,30 +30,30 @@ MCP、Lua 或宿主语义时，再执行对应 smoke、dispatcher 或可恢复�
 | E | T14（条件）、T18 | 第二写面与真机 RC |
 | F | T19（条件）、T20 | 有界闭环与正式发布 |
 
-## 任务清单
+## 当前任务状态
 
-| 任务 | 交付物 | 初始状态 |
-|---|---|---|
-| [T01](T01-baseline-corpus.md) | 基线与 synthetic corpus | ready |
-| [T02](T02-time-axis-evidence.md) | H1 TimeAxis 证据与 profile v2 | ready |
-| [T03](T03-time-axis-bulk-op.md) | 条件批量 TimeAxis opcode | conditional |
-| [T04](T04-host-pitch-evidence.md) | H2–H8 可恢复宿主证据 | blocked |
-| [T05](T05-richards-model.md) | Richards 模型 | ready |
-| [T06](T06-second-order-model.md) | 二阶瞬态模型 | ready |
-| [T07](T07-time-varying-vibrato.md) | 时变颤音模型 | ready |
-| [T08](T08-uniform-seconds-grid.md) | 等秒网格与 compare 迁移 | blocked |
-| [T09](T09-technique-ir.md) | TechniqueIR 与 canonicalization | blocked |
-| [T10](T10-technique-composition.md) | 确定性组合与约束 | blocked |
-| [T11](T11-pitch-delta-compiler.md) | `pitchDelta` 编译器 | blocked |
-| [T12](T12-host-interpolation-verification.md) | 宿主插值后置验证 | blocked |
-| [T13](T13-pitch-gesture-surface.md) | `plan_pitch_gesture` 成对迁移 | blocked |
-| [T14](T14-pitch-control-compiler.md) | 条件 PitchControlCurve 编译 | conditional |
-| [T15](T15-open-loop-correction.md) | 单步开环修正 | blocked |
-| [T16](T16-fit-worker-benchmark.md) | FitWorker benchmark 与选型 | blocked |
-| [T17](T17-technique-analysis.md) | 只读技法分析 | blocked |
-| [T18](T18-live-host-rc.md) | 全链路真机 RC | blocked |
-| [T19](T19-bounded-closed-loop.md) | 条件单 Undo 有界闭环 | conditional |
-| [T20](T20-release-evidence.md) | 评估、文档与发布 | blocked |
+| 任务 | 交付物 | 状态 | 裁定 |
+|---|---|---|---|
+| [T01](T01-baseline-corpus.md) | 基线与 synthetic corpus | `done` | 已发布 |
+| [T02](T02-time-axis-evidence.md) | H1 TimeAxis 证据与 profile v2 | `done` | 已发布 |
+| [T03](T03-time-axis-bulk-op.md) | 条件批量 TimeAxis opcode | `conditional` | `not_required` |
+| [T04](T04-host-pitch-evidence.md) | H2–H8 可恢复宿主证据 | `done` | 未确认项保持 fail closed |
+| [T05](T05-richards-model.md) | Richards 模型 | `done` | 已发布 |
+| [T06](T06-second-order-model.md) | 二阶瞬态模型 | `done` | 已发布 |
+| [T07](T07-time-varying-vibrato.md) | 时变颤音模型 | `done` | 已发布 |
+| [T08](T08-uniform-seconds-grid.md) | 等秒网格与 compare 迁移 | `done` | 已发布 |
+| [T09](T09-technique-ir.md) | TechniqueIR 与 canonicalization | `done` | 已发布 |
+| [T10](T10-technique-composition.md) | 确定性组合与约束 | `done` | 已发布 |
+| [T11](T11-pitch-delta-compiler.md) | `pitchDelta` 编译器 | `done` | 已发布 |
+| [T12](T12-host-interpolation-verification.md) | 宿主插值后置验证 | `done` | 已发布 |
+| [T13](T13-pitch-gesture-surface.md) | `plan_pitch_gesture` 成对迁移 | `done` | 已发布 |
+| [T14](T14-pitch-control-compiler.md) | 条件 `PitchControlCurve` 编译 | `conditional` | `not_enabled` |
+| [T15](T15-open-loop-correction.md) | 单步开环修正 | `done` | 已发布 |
+| [T16](T16-fit-worker-benchmark.md) | FitWorker benchmark 与选型 | `done` | 已选择 Node 实现 |
+| [T17](T17-technique-analysis.md) | 只读技法分析 | `done` | 已发布 |
+| [T18](T18-live-host-rc.md) | 全链路真机 RC | `done` | MVP 机械门禁通过 |
+| [T19](T19-bounded-closed-loop.md) | 条件单 Undo 有界闭环 | `conditional` | `not_enabled` |
+| [T20](T20-release-evidence.md) | 评估、文档与发布 | `done` | `0.10.0` MVP 已发布 |
 
 ## 通用完成证据
 

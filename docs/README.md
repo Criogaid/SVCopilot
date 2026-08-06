@@ -8,17 +8,15 @@
 | 文档 | 用途 |
 |---|---|
 | [architecture.md](architecture.md) | 当前运行架构、协议边界和安全约束 |
-| [pitch-techniques/feasibility.md](pitch-techniques/feasibility.md) | 可解释音高技法的可行性裁定与证据 |
-| [pitch-techniques/implementation-plan.md](pitch-techniques/implementation-plan.md) | 可解释音高技法的实施权威契约 |
-| [pitch-techniques/reference/](pitch-techniques/reference/) | 数学 oracle、契约测试和数值门禁 |
-| [pitch-techniques/tasks/](pitch-techniques/tasks/) | 引用权威计划的短任务包与依赖顺序 |
-| [pitch-techniques/evidence/T20-release-evidence.md](pitch-techniques/evidence/T20-release-evidence.md) | `0.10.0` 音高技法发布范围、宿主矩阵与验证结果 |
+| [pitch-techniques/README.md](pitch-techniques/README.md) | 可解释音高技法的当前能力、未启用项和证据导航 |
+| [mandarin-reading-verification.md](mandarin-reading-verification.md) | 宿主 G2P 多音字读音反查的契约与限制 |
 
 ## 实施记录
 
 | 文档 | 用途 |
 |---|---|
 | [plans/mcp-interaction-efficiency.md](plans/mcp-interaction-efficiency.md) | `0.9.0` MCP 双向交互效率迁移的设计目标、实施顺序与验收记录 |
+| [plans/mcp-interaction-efficiency-follow-up.md](plans/mcp-interaction-efficiency-follow-up.md) | `0.10.0` 后续效率优化及完成证据 |
 
 实施记录解释当前设计如何形成，但不覆盖当前 schema、实现、测试或上表列出的权威文档。
 
