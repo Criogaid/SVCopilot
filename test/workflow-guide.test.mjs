@@ -43,6 +43,25 @@ const REQUIRED_RECIPES = [
   "audition_for_human",
 ];
 
+const WORKFLOW_SCHEMA_TOOLS = [
+  "sv_align_lyrics",
+  "sv_analyze_phrase",
+  "sv_analyze_pitch_techniques",
+  "sv_analyze_vocal_context",
+  "sv_bake_computed_pitch",
+  "sv_compare_computed_pitch",
+  "sv_edit_phrase",
+  "sv_generate_harmony",
+  "sv_patch_parameter_curves",
+  "sv_patch_pitch_controls",
+  "sv_plan_expression",
+  "sv_plan_pitch_correction",
+  "sv_plan_pitch_gesture",
+  "sv_quantize_notes",
+  "sv_style_profile",
+  "sv_validate_lyrics_prosody",
+];
+
 // 官方能力缺口：指南绝不能建议这些不存在的工具。
 const FORBIDDEN_TOOL_PATTERNS = [
   /sv_render/i,
@@ -406,5 +425,32 @@ test("the guide is served over MCP, stays under 60 KiB, and pages by recipe id",
     );
     assert.equal(capabilities.interfaces.guide.musicWorkflows, "svcopilot://guide/music-workflows");
     assert.deepEqual(capabilities.interfaces.guide.recipes, REQUIRED_RECIPES);
+  });
+});
+
+test("workflow schema resources share one sorted, readable registry", async () => {
+  await withServer(async (client) => {
+    const listed = await client.listResources();
+    const listedTools = listed.resources
+      .map((resource) => resource.uri)
+      .filter((uri) => uri.startsWith("svcopilot://schemas/sv_"))
+      .map((uri) => uri.slice("svcopilot://schemas/".length));
+    assert.deepEqual(listedTools, WORKFLOW_SCHEMA_TOOLS);
+    assert.deepEqual(listedTools, [...listedTools].sort());
+    assert.equal(new Set(listedTools).size, listedTools.length);
+
+    const schemaIndex = parseResource(
+      await client.readResource({ uri: "svcopilot://schemas/music-workflow" })
+    );
+    assert.deepEqual(
+      schemaIndex.tools.map((entry) => entry.name),
+      WORKFLOW_SCHEMA_TOOLS
+    );
+
+    for (const entry of schemaIndex.tools) {
+      const resource = parseResource(await client.readResource({ uri: entry.uri }));
+      assert.equal(resource.tool, entry.name);
+      assert.equal(resource.schemaHash, entry.schemaHash);
+    }
   });
 });

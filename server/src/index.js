@@ -3039,102 +3039,13 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
         "Small index of per-tool schemas for composite music tools whose nested fields may be collapsed by MCP clients.",
       mimeType: "application/json",
     },
-    {
-      uri: "svcopilot://schemas/sv_patch_parameter_curves",
-      name: "sv_patch_parameter_curves input schema",
-      description: "Exact JSON input schema used to validate sv_patch_parameter_curves.",
+    // 从 WORKFLOW_SCHEMA_TOOL_NAMES 派生，不手抄工具名（见该常量的注释）。
+    ...[...WORKFLOW_SCHEMAS.keys()].map((name) => ({
+      uri: `svcopilot://schemas/${name}`,
+      name: `${name} input schema`,
+      description: `Exact JSON input schema used to validate ${name}.`,
       mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_patch_pitch_controls",
-      name: "sv_patch_pitch_controls input schema",
-      description: "Exact JSON input schema used to validate sv_patch_pitch_controls.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_edit_phrase",
-      name: "sv_edit_phrase input schema",
-      description: "Exact JSON input schema used to validate sv_edit_phrase.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_compare_computed_pitch",
-      name: "sv_compare_computed_pitch input schema",
-      description: "Exact JSON input schema used to validate sv_compare_computed_pitch.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_analyze_pitch_techniques",
-      name: "sv_analyze_pitch_techniques input schema",
-      description: "Exact JSON input schema used to validate sv_analyze_pitch_techniques.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_plan_expression",
-      name: "sv_plan_expression input schema",
-      description: "Exact JSON input schema used to validate sv_plan_expression.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_plan_pitch_gesture",
-      name: "sv_plan_pitch_gesture input schema",
-      description: "Exact JSON input schema used to validate sv_plan_pitch_gesture.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_plan_pitch_correction",
-      name: "sv_plan_pitch_correction input schema",
-      description: "Exact JSON input schema used to validate sv_plan_pitch_correction.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_bake_computed_pitch",
-      name: "sv_bake_computed_pitch input schema",
-      description: "Exact JSON input schema used to validate sv_bake_computed_pitch.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_align_lyrics",
-      name: "sv_align_lyrics input schema",
-      description: "Exact JSON input schema used to validate sv_align_lyrics.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_analyze_phrase",
-      name: "sv_analyze_phrase input schema",
-      description: "Exact JSON input schema used to validate sv_analyze_phrase.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_style_profile",
-      name: "sv_style_profile input schema",
-      description: "Exact JSON input schema used to validate sv_style_profile.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_validate_lyrics_prosody",
-      name: "sv_validate_lyrics_prosody input schema",
-      description: "Exact JSON input schema used to validate sv_validate_lyrics_prosody.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_quantize_notes",
-      name: "sv_quantize_notes input schema",
-      description: "Exact JSON input schema used to validate sv_quantize_notes.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_generate_harmony",
-      name: "sv_generate_harmony input schema",
-      description: "Exact JSON input schema used to validate sv_generate_harmony.",
-      mimeType: "application/json",
-    },
-    {
-      uri: "svcopilot://schemas/sv_analyze_vocal_context",
-      name: "sv_analyze_vocal_context input schema",
-      description: "Exact JSON input schema used to validate sv_analyze_vocal_context.",
-      mimeType: "application/json",
-    },
+    })),
     {
       uri: "svcopilot://artifacts",
       name: "SV Copilot immutable artifact store",
@@ -3922,69 +3833,62 @@ function summarizeRuntimeHostProfile(profile, host) {
   };
 }
 
+// 逐 tool schema resource 的可达集合，三处消费者的唯一来源：ListResources 的公布
+// 清单、svcopilot://schemas/music-workflow 索引、以及单 tool 资源的可达白名单。
+// 抄成多份后，往其中一份加名字就会公布一个另两份不认识、一读就报错的 URI。
+//
+// 数组顺序即 surface 顺序（索引资源按它逐项返回），因此这里是有序的清单而不是 Set。
+//
+// schemaHash 在启动时算一次并留着：inputSchema 在 dedupeSchema 之后不再变，
+// 而每次 readResource 重新 stringify + sha256 整份 schema（最大约 18 KiB）是纯浪费。
+const WORKFLOW_SCHEMA_TOOL_NAMES = [
+  "sv_align_lyrics",
+  "sv_analyze_phrase",
+  "sv_analyze_pitch_techniques",
+  "sv_analyze_vocal_context",
+  "sv_bake_computed_pitch",
+  "sv_compare_computed_pitch",
+  "sv_edit_phrase",
+  "sv_generate_harmony",
+  "sv_patch_parameter_curves",
+  "sv_patch_pitch_controls",
+  "sv_plan_expression",
+  "sv_plan_pitch_correction",
+  "sv_plan_pitch_gesture",
+  "sv_quantize_notes",
+  "sv_style_profile",
+  "sv_validate_lyrics_prosody",
+];
+
+const WORKFLOW_SCHEMAS = new Map(
+  WORKFLOW_SCHEMA_TOOL_NAMES.map((name) => {
+    const tool = TOOLS.find((candidate) => candidate.name === name);
+    if (!tool) throw new Error(`workflow schema list references unknown tool "${name}"`);
+    return [name, { inputSchema: tool.inputSchema, schemaHash: jsonContentHash(tool.inputSchema) }];
+  })
+);
+
 function musicWorkflowSchemaIndex() {
-  const names = [
-    "sv_patch_parameter_curves",
-    "sv_patch_pitch_controls",
-    "sv_plan_pitch_correction",
-    "sv_plan_pitch_gesture",
-    "sv_bake_computed_pitch",
-    "sv_edit_phrase",
-    "sv_compare_computed_pitch",
-    "sv_analyze_pitch_techniques",
-    "sv_plan_expression",
-    "sv_align_lyrics",
-    "sv_analyze_phrase",
-    "sv_style_profile",
-    "sv_validate_lyrics_prosody",
-    "sv_quantize_notes",
-    "sv_generate_harmony",
-    "sv_analyze_vocal_context",
-  ];
   return {
     schemaVersion: INTERFACE_VERSION,
     description:
       "Read one per-tool resource to avoid client truncation of a combined schema payload.",
-    tools: names.map((name) => {
-      const tool = TOOLS.find((candidate) => candidate.name === name);
-      return {
-        name,
-        uri: `svcopilot://schemas/${name}`,
-        schemaHash: jsonContentHash(tool.inputSchema),
-      };
-    }),
+    tools: [...WORKFLOW_SCHEMAS.entries()].map(([name, { schemaHash }]) => ({
+      name,
+      uri: `svcopilot://schemas/${name}`,
+      schemaHash,
+    })),
   };
 }
 
 function toolInputSchema(name) {
-  const tool = TOOLS.find(
-    (candidate) =>
-      candidate.name === name &&
-      [
-        "sv_patch_parameter_curves",
-        "sv_patch_pitch_controls",
-        "sv_plan_pitch_correction",
-        "sv_plan_pitch_gesture",
-        "sv_bake_computed_pitch",
-        "sv_edit_phrase",
-        "sv_compare_computed_pitch",
-        "sv_analyze_pitch_techniques",
-        "sv_plan_expression",
-        "sv_align_lyrics",
-        "sv_analyze_phrase",
-        "sv_style_profile",
-        "sv_validate_lyrics_prosody",
-        "sv_quantize_notes",
-        "sv_generate_harmony",
-        "sv_analyze_vocal_context",
-      ].includes(candidate.name)
-  );
-  if (!tool) throw new Error(`Unsupported workflow schema: ${name}`);
+  const entry = WORKFLOW_SCHEMAS.get(name);
+  if (!entry) throw new Error(`Unsupported workflow schema: ${name}`);
   return {
     schemaVersion: INTERFACE_VERSION,
-    tool: tool.name,
-    schemaHash: jsonContentHash(tool.inputSchema),
-    inputSchema: tool.inputSchema,
+    tool: name,
+    schemaHash: entry.schemaHash,
+    inputSchema: entry.inputSchema,
   };
 }
 
