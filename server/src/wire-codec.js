@@ -71,22 +71,6 @@ function decodeValue(value, context) {
   }
 }
 
-export function canonicalArray(value, { length } = {}) {
-  if (Array.isArray(value)) return resizeArray(value, length);
-  if (!isRecord(value)) return [];
-
-  const entries = Object.entries(value).filter(([key]) => /^\d+$/.test(key));
-  if (entries.length === 0) return resizeArray([], length);
-  const maxLuaIndex = Math.max(...entries.map(([key]) => Number(key)));
-  const outputLength = normalizeLength(length ?? maxLuaIndex);
-  const output = Array(outputLength).fill(null);
-  for (const [key, nested] of entries) {
-    const index = Number(key) - 1;
-    if (index >= 0 && index < output.length) output[index] = nested;
-  }
-  return output;
-}
-
 export function getWireArrayMetadata(value) {
   return Array.isArray(value) ? value[WIRE_ARRAY_METADATA] ?? null : null;
 }
@@ -164,16 +148,6 @@ function readSequence(value) {
     .filter((key) => /^\d+$/.test(key))
     .sort((left, right) => Number(left) - Number(right))
     .map((key) => value[key]);
-}
-
-function resizeArray(value, requestedLength) {
-  if (requestedLength === undefined) return [...value];
-  const length = normalizeLength(requestedLength);
-  const output = Array(length).fill(null);
-  for (let index = 0; index < Math.min(length, value.length); index += 1) {
-    output[index] = value[index] ?? null;
-  }
-  return output;
 }
 
 function normalizeLength(value) {

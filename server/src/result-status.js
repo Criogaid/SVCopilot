@@ -112,16 +112,6 @@ export function assertStatusEnvelope(envelope) {
   }
 }
 
-/**
- * status 的规范 effects。服务省略 effects 时用它补齐，保持线上形状一致。
- *
- * @param {string} status
- * @returns {string|undefined}
- */
-export function canonicalEffects(status) {
-  return RESULT_STATUS_MATRIX[status]?.effects[0];
-}
-
 // ---------------------------------------------------------------------------
 // 服务内部 status -> 矩阵 status 的投影
 // ---------------------------------------------------------------------------
