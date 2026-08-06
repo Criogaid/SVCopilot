@@ -973,6 +973,22 @@ function storedCursor(stored, offset, kind) {
   ).toString("base64url");
 }
 
+// 「这台宿主没有这个可选 getter」只有一个 code：UNKNOWN_METHOD。getScale /
+// getFxParams 都走核心 call opcode，resultFormat: "typed-v2" 只是 call 命令里的一个
+// 字段（host-session.js:165），不是需要 supportsOp 协商的独立 opcode——因此这条路径
+// 上不会出现 UNSUPPORTED_HOST_CAPABILITY。那个 code 只从 _bulk 的 supportsOp 门禁
+// 和桥的 `unknown op` 出来，含义是「连核心协议都不兼容」，属于必须暴露的故障，
+// 不是某个 getter 缺失。（note-fingerprint-reader 把它列入白名单是因为那里读的是
+// bulk opcode，与这里不是同一条路径。）
+//
+// 其余 code（HOST_TIMEOUT / HOST_DETACHED / HOST_CALL_FAILED）是**通信故障**，
+// 必须重新抛出。把它们吞成 unavailable，就等于让一次超时在 range artifact 里
+// 留下一条「宿主不声明音阶」的永久证据——而那条证据是假的，且与真正缺方法的老宿主
+// 无法区分。
+function isOptionalCapabilityAbsent(error) {
+  return error?.code === "UNKNOWN_METHOD";
+}
+
 async function readHostDeclaredScale(capture, target, warnings) {
   let raw;
   try {
@@ -980,7 +996,8 @@ async function readHostDeclaredScale(capture, target, warnings) {
       resultFormat: "typed-v2",
       runtimeConfirmed: true,
     });
-  } catch {
+  } catch (error) {
+    if (!isOptionalCapabilityAbsent(error)) throw error;
     return { status: "unavailable" };
   }
   if (
@@ -1006,9 +1023,12 @@ async function readMixerFxParameters(capture, mixer, warnings) {
       resultFormat: "typed-v2",
       runtimeConfirmed: true,
     });
-  } catch {
+  } catch (error) {
+    if (!isOptionalCapabilityAbsent(error)) throw error;
     return { status: "unavailable" };
   }
+  // 这个 try 只包住本地规范化，不含宿主调用：到这里 raw 已经取回，
+  // 因此没有通信故障能落进来，格式错误归类为 invalid 是完备的。
   try {
     return { status: "observed", ...normalizeMixerFxParameters(raw) };
   } catch {

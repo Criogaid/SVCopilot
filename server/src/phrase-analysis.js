@@ -338,6 +338,11 @@ function compareHostDeclaredScale(hostScale, inferred) {
   if (hostScale.status !== "observed") {
     return { status: "not_comparable", reason: hostScale.status };
   }
+  // 这里用 PITCH_CLASS_NAMES 解析**宿主输入**，而它只含升号拼写。实机 2.2.1 的
+  // SV.scaleNotes 返回 12 个升号音名（docs/operations/host-profiles.md:208），因此
+  // 当前恒能命中。若宿主改为返回 Db 之类的降号拼写，等价调性会退化成
+  // unsupported_root 而不是 matched——那时需要的是同音异名归一，不是放宽比较。
+  // 注意 PROVENANCE.enharmonicSpelling 说的是本模块的输出拼写，不覆盖这条输入依赖。
   const tonicPitchClass = PITCH_CLASS_NAMES.indexOf(hostScale.root);
   const mode = hostScale.type === "Major"
     ? "major"

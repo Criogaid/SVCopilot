@@ -416,6 +416,65 @@ test("optional scale and FX getters degrade on hosts that do not expose them", a
   });
 });
 
+// 通信故障绝不能退化成「宿主没有这个能力」：unavailable 会被封存进 range artifact，
+// 一次超时就会在证据里留下一条与老宿主无法区分的假结论。
+//
+// UNSUPPORTED_HOST_CAPABILITY 也在这里而不在 unavailable 一侧：这两个 getter 走核心
+// call opcode，该 code 只可能来自 bulk 的 supportsOp 门禁或桥的 `unknown op`，
+// 意味着协议层不兼容，而不是某个方法缺失。
+for (const { code, message, label } of [
+  { code: "HOST_TIMEOUT", message: "timeout waiting for host", label: "a host timeout" },
+  { code: "HOST_DETACHED", message: "host detached", label: "a bridge disconnect" },
+  { code: "HOST_CALL_FAILED", message: "host call failed", label: "an unclassified host failure" },
+  {
+    code: "UNSUPPORTED_HOST_CAPABILITY",
+    message: "the connected SynthV bridge does not advertise call",
+    label: "a bridge protocol incompatibility",
+  },
+]) {
+  test(`${label} during getScale fails the capture instead of reporting unavailable`, async () => {
+    const model = createRangeModel();
+    const originalCall = model.host.call;
+    model.host.call = async (request) => {
+      if (request.method === "getScale") {
+        const error = new Error(message);
+        error.code = code;
+        throw error;
+      }
+      return originalCall(request);
+    };
+    await assert.rejects(
+      () =>
+        createService(model).snapshot({
+          scope: { kind: "range", from: { bar: 1 }, to: { bar: 3 } },
+          include: ["notes"],
+        }),
+      (error) => error.code === code
+    );
+  });
+
+  test(`${label} during getFxParams fails the capture instead of reporting unavailable`, async () => {
+    const model = createRangeModel();
+    const originalCall = model.host.call;
+    model.host.call = async (request) => {
+      if (request.method === "getFxParams") {
+        const error = new Error(message);
+        error.code = code;
+        throw error;
+      }
+      return originalCall(request);
+    };
+    await assert.rejects(
+      () =>
+        createService(model).snapshot({
+          scope: { kind: "range", from: { bar: 1 }, to: { bar: 3 } },
+          include: ["notes", "mixer"],
+        }),
+      (error) => error.code === code
+    );
+  });
+}
+
 test("invalid optional scale and FX data is isolated with stable warnings", async () => {
   const model = createRangeModel();
   const originalCall = model.host.call;
